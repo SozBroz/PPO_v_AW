@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1630687 turn-0 snapshot",
+  "units": [
+    {
+      "row": 1,
+      "col": 3,
+      "player": 0,
+      "unit_type": "BLACK_BOAT",
+      "hp": 20
+    },
+    {
+      "row": 14,
+      "col": 3,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 15,
+      "col": 20,
+      "player": 1,
+      "unit_type": "BLACK_BOAT",
+      "hp": 20
+    }
+  ]
+}

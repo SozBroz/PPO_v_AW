@@ -1,0 +1,6389 @@
+{
+  "maps": [
+    {
+      "id": 133665,
+      "name": "Walls Are Closing In",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 36,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 23012,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 23013,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 23014,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 23015,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 23016,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 23017,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 23018,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 166877,
+      "name": "Throne Of Skulls",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 23005,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 23006,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 23007,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 23008,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 23009,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 23010,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 23011,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 134930,
+      "name": "Swiss Banking",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22998,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22999,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 23000,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 23001,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 23002,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 23003,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 23004,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 123858,
+      "name": "Misery",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 30,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22991,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22992,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22993,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22994,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22995,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22996,
+          "cos": [
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22997,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 146797,
+      "name": "Inland Viking",
+      "type": "std",
+      "unitLimit": 60,
+      "capLimit": 40,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22984,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22985,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22986,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22987,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22988,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22989,
+          "cos": [
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22990,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 180298,
+      "name": "Eternity, Served Cold",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22977,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22978,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22979,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22980,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22981,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22982,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22983,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 171596,
+      "name": "Designed Desires",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 25,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22970,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22971,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22972,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22973,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22974,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22975,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22976,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 170934,
+      "name": "BL Go Brrr",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 33,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22963,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22964,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22965,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22966,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22967,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22968,
+          "cos": [
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22969,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 69201,
+      "name": "Beads on a String",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 23,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22956,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22957,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22958,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22959,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22960,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22961,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22962,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 159501,
+      "name": "A Dance With Magnums",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22949,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22950,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22951,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22952,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22953,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22954,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22955,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 140000,
+      "name": "140000 Ways to Die",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22942,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22943,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22944,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22945,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22946,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22947,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22948,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 118615,
+      "name": "Low Light",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 37,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22605,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22606,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22607,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22608,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22609,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22610,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22611,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 128505,
+      "name": "Malachite Trail",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 44,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22598,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22599,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 10
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22600,
+          "cos": [
+            {
+              "id": 3
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22601,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22602,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22603,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22604,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 169069,
+      "name": "Only Pain To Gain",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 37,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22591,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22592,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22593,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22594,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22595,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22596,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22597,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 165694,
+      "name": "Silverado",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22584,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22585,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22586,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22587,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22588,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22589,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22590,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 160882,
+      "name": "Eye Of The Vortex (HF)",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 35,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22577,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22578,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22579,
+          "cos": [
+            {
+              "id": 5
+            },
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22580,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22581,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22582,
+          "cos": [
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22583,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 173471,
+      "name": "Rhinoplast Reno",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 33,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22570,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22571,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22572,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22573,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22574,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22575,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22576,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 172246,
+      "name": "Subwoofer Lullaby",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 37,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22563,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22564,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22565,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22566,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22567,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22568,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22569,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 143661,
+      "name": "BlackBoat Confrontation v2",
+      "type": "fog",
+      "unitLimit": 65,
+      "capLimit": 35,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22232,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22233,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22234,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22235,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22236,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22237,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22238,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 110767,
+      "name": "Seashoals?!",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22225,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22226,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22227,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22228,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22229,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22230,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22231,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 142984,
+      "name": "Intelligent System v2",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22218,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22219,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22220,
+          "cos": [
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22221,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 22222,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22223,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22224,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Piperunner"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 144739,
+      "name": "Stitch Monster v2",
+      "type": "fog",
+      "unitLimit": 65,
+      "capLimit": 33,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22211,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22212,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22213,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22214,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22215,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22216,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22217,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 69659,
+      "name": "1vs1 Marengo",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22204,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22205,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22206,
+          "cos": [
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22207,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22208,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22209,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22210,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 166637,
+      "name": "Quota Iota Redux",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 32,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22197,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22198,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22199,
+          "cos": [
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22200,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22201,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22202,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22203,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 176423,
+      "name": "Queen Annes Revenge",
+      "type": "fog",
+      "unitLimit": 65,
+      "capLimit": 36,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22183,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22184,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22185,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22186,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22187,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22188,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22189,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 170819,
+      "name": "Greener Greens",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22176,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22177,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 22178,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22179,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22180,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22181,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22182,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 175434,
+      "name": "Cathedral of the Dead",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 32,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 22169,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 22170,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 22171,
+          "cos": [
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 22172,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 22173,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 22174,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 22175,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 126428,
+      "name": "Ft. Fantasy",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21958,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21959,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 21960,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21961,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 21962,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 10
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21963,
+          "cos": [
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21964,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 173170,
+      "name": "Phobies",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21916,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21917,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21918,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21919,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 21920,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21921,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21922,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 108178,
+      "name": "Hidden city",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 36,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21248,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21249,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 21250,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21251,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 21252,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21253,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21254,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 76602,
+      "name": "Autumn's Grace",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 28,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21241,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21242,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21243,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21244,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 21245,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21246,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21247,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 116014,
+      "name": "Data Downer",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21234,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21235,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21236,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21237,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 21238,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21239,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21240,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 164887,
+      "name": "Out Of Jurisdiction",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 30,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21227,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21228,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21229,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21230,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 21231,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21232,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21233,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 58429,
+      "name": "Chaos Theory",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21213,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21214,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 21215,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21216,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 21217,
+          "cos": [
+            {
+              "id": 27
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21218,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21219,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 172795,
+      "name": "Sundered Land",
+      "type": "hf",
+      "unitLimit": 65,
+      "capLimit": 35,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21206,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21207,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21208,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21209,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T3",
+          "prefs_id": 21210,
+          "cos": [
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21211,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21212,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 175286,
+      "name": "Cutting Edge",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 30,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21161,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21162,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21163,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21164,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 21165,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21166,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21167,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 175384,
+      "name": "Sunset over the Himalaya",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 29,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21154,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21155,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21156,
+          "cos": [
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21157,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 21158,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21159,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21160,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 77060,
+      "name": "A Hope Forlorn",
+      "type": "std",
+      "unitLimit": 50,
+      "capLimit": 32,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 21035,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 21036,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 21037,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 29
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 21038,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 21039,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 21040,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 21041,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 165147,
+      "name": "Withering Garden: Core",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 26,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 20064,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 20065,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T1",
+          "prefs_id": 20066,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 20067,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 20068,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 20069,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 20070,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 121802,
+      "name": "Warped Streams",
+      "type": "fog",
+      "unitLimit": 50,
+      "capLimit": 35,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 20043,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 20044,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 20045,
+          "cos": [
+            {
+              "id": 2
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 19
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 20046,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 20047,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 20048,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 20049,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 164756,
+      "name": "Far-East El Dorado",
+      "type": "fog",
+      "unitLimit": 60,
+      "capLimit": 35,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 20022,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 20023,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 20024,
+          "cos": [
+            {
+              "id": 12
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 20025,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 27
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 20026,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 20027,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 20028,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb"
+      ],
+      "unitLabs": []
+    },
+    {
+      "id": 161411,
+      "name": "Off The Beaten Path (HF)",
+      "type": "hf",
+      "unitLimit": 60,
+      "capLimit": 31,
+      "tiers": [
+        {
+          "enabled": false,
+          "name": "TL",
+          "prefs_id": 19304,
+          "cos": [
+            {
+              "id": 25
+            },
+            {
+              "id": 26
+            },
+            {
+              "id": 24
+            },
+            {
+              "id": 29
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T0",
+          "prefs_id": 19305,
+          "cos": [
+            {
+              "id": 15
+            },
+            {
+              "id": 17
+            },
+            {
+              "id": 3
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T1",
+          "prefs_id": 19306,
+          "cos": [
+            {
+              "id": 10
+            },
+            {
+              "id": 12
+            },
+            {
+              "id": 9
+            },
+            {
+              "id": 13
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T2",
+          "prefs_id": 19307,
+          "cos": [
+            {
+              "id": 1
+            },
+            {
+              "id": 5
+            },
+            {
+              "id": 2
+            },
+            {
+              "id": 7
+            },
+            {
+              "id": 30
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T3",
+          "prefs_id": 19308,
+          "cos": [
+            {
+              "id": 27
+            },
+            {
+              "id": 23
+            },
+            {
+              "id": 28
+            },
+            {
+              "id": 19
+            }
+          ]
+        },
+        {
+          "enabled": true,
+          "name": "T4",
+          "prefs_id": 19309,
+          "cos": [
+            {
+              "id": 11
+            },
+            {
+              "id": 20
+            },
+            {
+              "id": 22
+            },
+            {
+              "id": 14
+            },
+            {
+              "id": 21
+            },
+            {
+              "id": 16
+            },
+            {
+              "id": 8
+            },
+            {
+              "id": 18
+            }
+          ]
+        },
+        {
+          "enabled": false,
+          "name": "T5",
+          "prefs_id": 19310,
+          "cos": []
+        }
+      ],
+      "unitBans": [
+        "Black Bomb",
+        "Stealth"
+      ],
+      "unitLabs": []
+    }
+  ],
+  "cos": {
+    "1": {
+      "name": "Andy",
+      "image": "andy.png",
+      "imagePath": "terrain/co-portraits/ds/andy.png?v=1",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_andy.png?v=1"
+    },
+    "2": {
+      "name": "Grit",
+      "image": "grit.png",
+      "imagePath": "terrain/co-portraits/ds/grit.png?v=2",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_grit.png?v=2"
+    },
+    "3": {
+      "name": "Kanbei",
+      "image": "kanbei.png",
+      "imagePath": "terrain/co-portraits/ds/kanbei.png?v=3",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_kanbei.png?v=3"
+    },
+    "5": {
+      "name": "Drake",
+      "image": "drake.png",
+      "imagePath": "terrain/co-portraits/ds/drake.png?v=5",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_drake.png?v=5"
+    },
+    "7": {
+      "name": "Max",
+      "image": "max.png",
+      "imagePath": "terrain/co-portraits/ds/max.png?v=7",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_max.png?v=7"
+    },
+    "8": {
+      "name": "Sami",
+      "image": "sami.png",
+      "imagePath": "terrain/co-portraits/ds/sami.png?v=8",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_sami.png?v=8"
+    },
+    "9": {
+      "name": "Olaf",
+      "image": "olaf.png",
+      "imagePath": "terrain/co-portraits/ds/olaf.png?v=9",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_olaf.png?v=9"
+    },
+    "10": {
+      "name": "Eagle",
+      "image": "eagle.png",
+      "imagePath": "terrain/co-portraits/ds/eagle.png?v=10",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_eagle.png?v=10"
+    },
+    "11": {
+      "name": "Adder",
+      "image": "adder.png",
+      "imagePath": "terrain/co-portraits/ds/adder.png?v=11",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_adder.png?v=11"
+    },
+    "12": {
+      "name": "Hawke",
+      "image": "hawke.png",
+      "imagePath": "terrain/co-portraits/ds/hawke.png?v=12",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_hawke.png?v=12"
+    },
+    "13": {
+      "name": "Sensei",
+      "image": "sensei.png",
+      "imagePath": "terrain/co-portraits/ds/sensei.png?v=13",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_sensei.png?v=13"
+    },
+    "14": {
+      "name": "Jess",
+      "image": "jess.png",
+      "imagePath": "terrain/co-portraits/ds/jess.png?v=14",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_jess.png?v=14"
+    },
+    "15": {
+      "name": "Colin",
+      "image": "colin.png",
+      "imagePath": "terrain/co-portraits/ds/colin.png?v=15",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_colin.png?v=15"
+    },
+    "16": {
+      "name": "Lash",
+      "image": "lash.png",
+      "imagePath": "terrain/co-portraits/ds/lash.png?v=16",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_lash.png?v=16"
+    },
+    "17": {
+      "name": "Hachi",
+      "image": "hachi.png",
+      "imagePath": "terrain/co-portraits/ds/hachi.png?v=17",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_hachi.png?v=17"
+    },
+    "18": {
+      "name": "Sonja",
+      "image": "sonja.png",
+      "imagePath": "terrain/co-portraits/ds/sonja.png?v=18",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_sonja.png?v=18"
+    },
+    "19": {
+      "name": "Sasha",
+      "image": "sasha.png",
+      "imagePath": "terrain/co-portraits/ds/sasha.png?v=19",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_sasha.png?v=19"
+    },
+    "20": {
+      "name": "Grimm",
+      "image": "grimm.png",
+      "imagePath": "terrain/co-portraits/ds/grimm.png?v=20",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_grimm.png?v=20"
+    },
+    "21": {
+      "name": "Koal",
+      "image": "koal.png",
+      "imagePath": "terrain/co-portraits/ds/koal.png?v=21",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_koal.png?v=21"
+    },
+    "22": {
+      "name": "Jake",
+      "image": "jake.png",
+      "imagePath": "terrain/co-portraits/ds/jake.png?v=22",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_jake.png?v=22"
+    },
+    "23": {
+      "name": "Kindle",
+      "image": "kindle.png",
+      "imagePath": "terrain/co-portraits/ds/kindle.png?v=23",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_kindle.png?v=23"
+    },
+    "24": {
+      "name": "Nell",
+      "image": "nell.png",
+      "imagePath": "terrain/co-portraits/ds/nell.png?v=24",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_nell.png?v=24"
+    },
+    "25": {
+      "name": "Flak",
+      "image": "flak.png",
+      "imagePath": "terrain/co-portraits/ds/flak.png?v=25",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_flak.png?v=25"
+    },
+    "26": {
+      "name": "Jugger",
+      "image": "jugger.png",
+      "imagePath": "terrain/co-portraits/ds/jugger.png?v=26",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_jugger.png?v=26"
+    },
+    "27": {
+      "name": "Javier",
+      "image": "javier.png",
+      "imagePath": "terrain/co-portraits/ds/javier.png?v=27",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_javier.png?v=27"
+    },
+    "28": {
+      "name": "Rachel",
+      "image": "rachel.png",
+      "imagePath": "terrain/co-portraits/ds/rachel.png?v=28",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_rachel.png?v=28"
+    },
+    "29": {
+      "name": "Sturm",
+      "image": "sturm.png",
+      "imagePath": "terrain/co-portraits/aw2/sturm.png?v=29",
+      "grayscaleImagePath": "terrain/co-portraits/aw2/gs_sturm.png?v=29"
+    },
+    "30": {
+      "name": "Von Bolt",
+      "image": "vonbolt.png",
+      "imagePath": "terrain/co-portraits/ds/vonbolt.png?v=30",
+      "grayscaleImagePath": "terrain/co-portraits/ds/gs_vonbolt.png?v=30"
+    }
+  },
+  "units": {
+    "9": {
+      "name": "Anti-Air",
+      "image": "terrain/ani/planti-air.gif"
+    },
+    "6": {
+      "name": "APC",
+      "image": "terrain/ani/plapc.gif"
+    },
+    "7": {
+      "name": "Artillery",
+      "image": "terrain/ani/plartillery.gif"
+    },
+    "13": {
+      "name": "B-Copter",
+      "image": "terrain/ani/plb-copter.gif"
+    },
+    "15": {
+      "name": "Battleship",
+      "image": "terrain/ani/plbattleship.gif"
+    },
+    "28": {
+      "name": "Black Boat",
+      "image": "terrain/ani/plblackboat.gif"
+    },
+    "968731": {
+      "name": "Black Bomb",
+      "image": "terrain/ani/plblackbomb.gif"
+    },
+    "12": {
+      "name": "Bomber",
+      "image": "terrain/ani/plbomber.gif"
+    },
+    "29": {
+      "name": "Carrier",
+      "image": "terrain/ani/plcarrier.gif"
+    },
+    "16": {
+      "name": "Cruiser",
+      "image": "terrain/ani/plcruiser.gif"
+    },
+    "11": {
+      "name": "Fighter",
+      "image": "terrain/ani/plfighter.gif"
+    },
+    "1": {
+      "name": "Infantry",
+      "image": "terrain/ani/plinfantry.gif"
+    },
+    "17": {
+      "name": "Lander",
+      "image": "terrain/ani/pllander.gif"
+    },
+    "3": {
+      "name": "Md.Tank",
+      "image": "terrain/ani/plmd.tank.gif"
+    },
+    "2": {
+      "name": "Mech",
+      "image": "terrain/ani/plmech.gif"
+    },
+    "1141438": {
+      "name": "Mega Tank",
+      "image": "terrain/ani/plmegatank.gif"
+    },
+    "10": {
+      "name": "Missile",
+      "image": "terrain/ani/plmissile.gif"
+    },
+    "46": {
+      "name": "Neotank",
+      "image": "terrain/ani/plneotank.gif"
+    },
+    "960900": {
+      "name": "Piperunner",
+      "image": "terrain/ani/plpiperunner.gif"
+    },
+    "5": {
+      "name": "Recon",
+      "image": "terrain/ani/plrecon.gif"
+    },
+    "8": {
+      "name": "Rocket",
+      "image": "terrain/ani/plrocket.gif"
+    },
+    "30": {
+      "name": "Stealth",
+      "image": "terrain/ani/plstealth.gif"
+    },
+    "18": {
+      "name": "Sub",
+      "image": "terrain/ani/plsub.gif"
+    },
+    "14": {
+      "name": "T-Copter",
+      "image": "terrain/ani/plt-copter.gif"
+    },
+    "4": {
+      "name": "Tank",
+      "image": "terrain/ani/pltank.gif"
+    }
+  }
+}

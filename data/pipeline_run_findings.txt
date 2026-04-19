@@ -1,0 +1,21 @@
+Amarriner Misery pipeline run (2026-04-18)
+=========================================
+Download: 52/52 zips to replays/amarriner_gl/ (ok, manifest data/amarriner_dl_failures.jsonl empty).
+
+Ingest: oracle driver extended (Capt, Resign abort, Md.Tank alias, empty-Capt SELECT+in-place move).
+Still many failures: indirect Fire without Move.paths, JSON envelope parse errors on some zips,
+movement desync (Illegal move / wrong unit id). 96 demo rows written from partial replays
+(5 games contributed lines; see data/amarriner_ingest_failures.jsonl).
+
+Merge: data/merged_bc_misery.jsonl = human_demos.jsonl + amarriner_bc_rows.jsonl (1618 lines).
+
+BC: checkpoints/latest_fork_pre_bc.zip <- copy of latest; checkpoints/amarriner_bc.zip from
+train_bc.py --epochs 1 mean_nll=1.3354. train_bc.py now inserts repo root on sys.path so
+MaskablePPO.load finds rl.* custom_objects.
+
+Symmetric eval: full 4+3 games was very slow in practice; killed after long stall. Reran smoke
+--games-first-seat 1 --games-second-seat 1 -> data/symmetric_eval_misery_andy.json (one draw as P0,
+candidate win as P1; promotion_heuristic_ok=false with n=1 per seat).
+
+Next: extend oracle for pathless Fire; fix PHP JSON extraction for problematic envelopes; align
+movement with AWBW fuel/path rules to raise ingest yield.

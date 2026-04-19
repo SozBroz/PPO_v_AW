@@ -1,0 +1,162 @@
+"""Full capture swaps property terrain IDs; owned-property resupply includes AWBW day heal."""
+
+from __future__ import annotations
+
+import pytest
+
+from engine.action import Action, ActionType
+from engine.game import make_initial_state
+from engine.map_loader import load_map
+from engine.terrain import property_terrain_id_after_owner_change
+from engine.unit import UNIT_STATS, Unit, UnitType
+
+from server.play_human import MAPS_DIR, POOL_PATH
+
+
+def test_property_terrain_id_neutral_city_os_p0():
+    """Neutral city (34) + P0 seated as OS (country 1) → OS city (38)."""
+    tid = property_terrain_id_after_owner_change(34, 0, {1: 0, 5: 1})
+    assert tid == 38
+
+
+def test_full_capture_updates_terrain_on_misery_neutral_city():
+    m = load_map(123858, POOL_PATH, MAPS_DIR)
+    s = make_initial_state(m, 1, 5, tier_name="T3")
+
+    r, c = 0, 4
+    assert s.map_data.terrain[r][c] == 34
+    prop = next(p for p in s.properties if p.row == r and p.col == c)
+    assert prop.owner is None
+    prop.capture_points = 10
+
+    assert s.get_unit_at(r, c) is None
+    st = UNIT_STATS[UnitType.INFANTRY]
+    inf = Unit(
+        UnitType.INFANTRY,
+        0,
+        100,
+        st.max_ammo,
+        st.max_fuel,
+        (r, c),
+        False,
+        [],
+        False,
+        20,
+        1,
+    )
+    s.units[0].append(inf)
+    s.active_player = 0
+
+    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
+
+    assert prop.owner == 0
+    assert s.map_data.terrain[r][c] == 38
+    assert prop.terrain_id == 38
+
+
+def _ground_repair_tile(prop) -> bool:
+    if prop.is_lab or prop.is_comm_tower:
+        return False
+    is_city = not (
+        prop.is_hq
+        or prop.is_lab
+        or prop.is_comm_tower
+        or prop.is_base
+        or prop.is_airport
+        or prop.is_port
+    )
+    return prop.is_hq or prop.is_base or is_city
+
+
+def test_resupply_heals_infantry_on_owned_hq_base_or_city():
+    m = load_map(123858, POOL_PATH, MAPS_DIR)
+    s = make_initial_state(m, 1, 5, tier_name="T3")
+    city = next(
+        p for p in s.properties if p.owner == 0 and _ground_repair_tile(p)
+    )
+    if s.get_unit_at(city.row, city.col) is not None:
+        pytest.skip("Expected an unoccupied P0 HQ/base/city on this map fixture")
+
+    st = UNIT_STATS[UnitType.INFANTRY]
+    u = Unit(
+        UnitType.INFANTRY,
+        0,
+        50,
+        st.max_ammo,
+        st.max_fuel,
+        (city.row, city.col),
+        False,
+        [],
+        False,
+        20,
+        1,
+    )
+    s.funds[0] = 500
+    s.units[0].append(u)
+    s._resupply_on_properties(0)
+    # Infantry 1000g: 20% = 200 for full +20 internal (+2 bars)
+    assert u.hp == 70
+    assert s.funds[0] == 300
+
+
+def test_property_day_repair_partial_hp_charges_proportionally():
+    """Only +10 internal to max → 10% of deployment cost (infantry 1000 → 100g)."""
+    m = load_map(123858, POOL_PATH, MAPS_DIR)
+    s = make_initial_state(m, 1, 5, tier_name="T3")
+    city = next(
+        p for p in s.properties if p.owner == 0 and _ground_repair_tile(p)
+    )
+    if s.get_unit_at(city.row, city.col) is not None:
+        pytest.skip("Expected an unoccupied P0 HQ/base/city on this map fixture")
+
+    st = UNIT_STATS[UnitType.INFANTRY]
+    u = Unit(
+        UnitType.INFANTRY,
+        0,
+        90,
+        st.max_ammo,
+        st.max_fuel,
+        (city.row, city.col),
+        False,
+        [],
+        False,
+        20,
+        1,
+    )
+    s.funds[0] = 500
+    s.units[0].append(u)
+    s._resupply_on_properties(0)
+    assert u.hp == 100
+    assert s.funds[0] == 400  # 1000 * 10 // 100 = 100
+
+
+def test_property_day_repair_respects_insufficient_funds():
+    """Heal only as much HP as the player can pay for (integer cost per HP chunk)."""
+    m = load_map(123858, POOL_PATH, MAPS_DIR)
+    s = make_initial_state(m, 1, 5, tier_name="T3")
+    city = next(
+        p for p in s.properties if p.owner == 0 and _ground_repair_tile(p)
+    )
+    if s.get_unit_at(city.row, city.col) is not None:
+        pytest.skip("Expected an unoccupied P0 HQ/base/city on this map fixture")
+
+    st = UNIT_STATS[UnitType.INFANTRY]
+    u = Unit(
+        UnitType.INFANTRY,
+        0,
+        50,
+        st.max_ammo,
+        st.max_fuel,
+        (city.row, city.col),
+        False,
+        [],
+        False,
+        20,
+        1,
+    )
+    s.funds[0] = 150
+    s.units[0].append(u)
+    s._resupply_on_properties(0)
+    # Full +20 costs 200; largest h with cost <= 150 is h=15 (150g)
+    assert u.hp == 65
+    assert s.funds[0] == 0

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}AWBW DRL Bot{% endblock %}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1a2e; color: #e0e0e0; font-family: 'Courier New', monospace; }
+    nav { background: #16213e; padding: 12px 20px; display: flex; gap: 20px; align-items: center; border-bottom: 2px solid #0f3460; }
+    nav h1 { color: #e94560; font-size: 1.2rem; margin-right: auto; }
+    nav a { color: #a8b2d8; text-decoration: none; font-size: 0.9rem; padding: 6px 12px; border-radius: 4px; transition: background 0.2s; }
+    nav a:hover { background: #0f3460; color: #e0e0e0; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .btn { background: #0f3460; color: #e0e0e0; border: 1px solid #e94560; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 0.9rem; transition: background 0.2s; }
+    .btn:hover { background: #e94560; }
+    .status { padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; }
+    .status.ok  { background: #1a4a2e; color: #4caf50; border: 1px solid #4caf50; }
+    .status.warn { background: #4a3a1a; color: #ff9800; border: 1px solid #ff9800; }
+    .status.err  { background: #4a1a1a; color: #f44336; border: 1px solid #f44336; }
+  </style>
+</head>
+<body>
+  <nav>
+    <h1>&#9876; AWBW DRL Bot</h1>
+    <a href="/watch">Watch</a>
+    <a href="/replay/">Replay</a>
+    <a href="/play/">vs Bot</a>
+  </nav>
+  <div class="container">
+    {% block content %}{% endblock %}
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1613993 turn-0 snapshot",
+  "units": [
+    {
+      "row": 2,
+      "col": 8,
+      "player": 1,
+      "unit_type": "CRUISER",
+      "hp": 10
+    },
+    {
+      "row": 16,
+      "col": 14,
+      "player": 0,
+      "unit_type": "CRUISER",
+      "hp": 10
+    },
+    {
+      "row": 2,
+      "col": 20,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

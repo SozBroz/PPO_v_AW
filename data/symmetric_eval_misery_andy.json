@@ -1,0 +1,74 @@
+{
+  "candidate": "checkpoints/amarriner_bc.zip",
+  "baseline": "checkpoints/latest.zip",
+  "map_id": 123858,
+  "tier": "T3",
+  "max_env_steps": 100,
+  "max_p1_microsteps": null,
+  "co_p0": 1,
+  "co_p1": 1,
+  "candidate_wins": 0,
+  "baseline_wins": 0,
+  "per_seat": {
+    "candidate_as_p0": [
+      0,
+      4
+    ],
+    "candidate_as_p1": [
+      0,
+      3
+    ]
+  },
+  "games": [
+    {
+      "game": 1,
+      "block": "candidate_P0",
+      "seed": 1826701614,
+      "winner": -1,
+      "candidate_win": false
+    },
+    {
+      "game": 2,
+      "block": "candidate_P0",
+      "seed": 1367864806,
+      "winner": -1,
+      "candidate_win": false
+    },
+    {
+      "game": 3,
+      "block": "candidate_P0",
+      "seed": 1097657231,
+      "winner": -1,
+      "candidate_win": false
+    },
+    {
+      "game": 4,
+      "block": "candidate_P0",
+      "seed": 579362555,
+      "winner": -1,
+      "candidate_win": false
+    },
+    {
+      "game": 5,
+      "block": "candidate_P1",
+      "seed": 661058651,
+      "winner": -1,
+      "candidate_win": false
+    },
+    {
+      "game": 6,
+      "block": "candidate_P1",
+      "seed": 87989972,
+      "winner": -1,
+      "candidate_win": false
+    },
+    {
+      "game": 7,
+      "block": "candidate_P1",
+      "seed": 161576974,
+      "winner": -1,
+      "candidate_win": false
+    }
+  ],
+  "promotion_heuristic_ok": false
+}

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Replay — AWBW DRL Bot{% endblock %}
+{% block content %}
+
+<div style="display:flex; gap:16px;">
+  <div style="width:300px; flex-shrink:0;">
+    <div class="card">
+      <h2 style="color:#e94560; margin-bottom:12px; font-size:1rem;">Recent Games</h2>
+      {% if games %}
+        <div style="max-height:600px; overflow-y:auto;">
+          {% for g in games %}
+          <div onclick="loadGame({{ g.game_idx }})"
+               style="padding:8px; border-bottom:1px solid #0f3460; cursor:pointer; font-size:0.8rem;"
+               onmouseover="this.style.background='#0f3460'" onmouseout="this.style.background=''">
+            <div style="color:#e0e0e0;">Map {{ g.map_id }} | {{ g.tier }}</div>
+            <div style="color:#a8b2d8;">P{{ g.winner }} wins | Turn {{ g.turns }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="status warn">No games yet. Train first.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="flex:1; min-width:0;">
+    <div class="card">
+      <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap;">
+        <button class="btn" onclick="stepBack()">&#9664; Prev</button>
+        <button class="btn" onclick="stepForward()">Next &#9654;</button>
+        <button class="btn" onclick="togglePlay()" id="play-btn">&#9654; Play</button>
+        <span id="step-info" style="color:#a8b2d8; font-size:0.85rem; margin-left:auto;">—</span>
+      </div>
+      <div style="overflow:auto;">
+        <canvas id="board-canvas" style="display:block; image-rendering:pixelated;"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='board.js') }}"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (typeof preloadAWBWBoardTextures === 'function') preloadAWBWBoardTextures();
+  });
+</script>
+<script src="{{ url_for('static', filename='replay.js') }}"></script>
+{% if game_idx is defined %}
+<script>document.addEventListener('DOMContentLoaded', () => loadGame({{ game_idx }}));</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,426 @@
+<html>
+<head>
+<title>GL Maps - AWBW  
+</title>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=0.75">
+<link rel="stylesheet" href="css/awbw_minify.css?1775942967" type="text/css">
+<link rel="stylesheet" type="text/css" href="css/header.css?1775942967">
+<link rel="stylesheet" type="text/css" href="css/main.css?1775942967">
+<link rel="stylesheet" type="text/css" href="css/slideshow.css?1775942967">
+<link rel="stylesheet" type="text/css" href="css/game.css?1775942967">
+<link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.5.0/css/all.css">
+      <link rel="stylesheet" href="css/calculator_new.css?1775942967">
+      <link rel="stylesheet" href="css/messages.css?1775942967">
+      <link rel="stylesheet" href="css/layout.css?1775942967">
+<link rel="shortcut icon" href="https://awbw.amarriner.com/favicon.ico" type="image/x-icon">
+<link rel="icon" href="https://awbw.amarriner.com/favicon.ico" type="image/x-icon">
+<script src="js/vue.min.js"></script>
+<script src="js/axios.js"></script>
+<script type="text/javascript">
+let mtDiffStart = "59965";let mtDiffEnd = "-59605";   function move_check(query, url) {
+      var reply = confirm(query);
+      if (reply) {
+         this.location.href = url;
+      }
+   }
+
+</script>
+<script src="js/lib/maintenance.js?1775942967"></script>
+</head>
+<body>
+<!-- Begin Page (1776296605) (19:43:25) -->
+<div id="overDiv" style="position:absolute; visibility:hidden; z-index:900;"></div>
+<script type="text/javascript" language="JavaScript" src="js/overlib_mini_minify.js?v=1.0"></script>
+
+<div id="fixed-header-wrapper">
+    <nav id="top-header-nav">
+        <div id="above-nav"></div>
+        <div id="logo-background2">
+            <a href="/" style="display: block;">
+                <img id="logo" height=78 width=170 src="terrain/awbwlogo12-Crimson_Legion_Event_Logo.png"></img>
+            </a>
+        </div>
+        
+        <ul id="nav-options" style="margin: auto;">
+
+                    <!-- <span style="position: absolute; top: -30px; left: 5px;">Signups for <a style="color: #009966; text-decoration: underline;" target="_blank" href="viewtournament.php?tournaments_id=768">Amarriner Cup 5</a> are open until Feb 2th, 5 PM ET</span> -->
+            <!-- <span style="position: absolute; top: -36px; left: 5px; color: red">Announcement text here.</span> -->
+
+        
+        
+            <li id="profile-menu">
+                                <span title="iwinagain">iwinagain</span>&nbsp;<span id="profile-arrow">&#9662;</span>
+        
+                                    <span id="navbar-alert">
+                        <img src="terrain/newicon.png">
+                    </span>
+                
+                <input id="user-menu-toggle" type="checkbox">
+                <ul id="profile-dropdown" class="dropdown-menu">
+                        <li style="padding-bottom: 3px;">
+                            <a class="dropdown-menu-link" href="profile.php?username=iwinagain" style="margin-top: 8px;">Profile</a>
+                        </li>
+                        <li>
+                            <a class="dropdown-menu-link" href="messages.php">Messages</a>
+                                                                                </li>
+                        
+                        <li>
+                            <span 
+                                class="yt-alert alert"
+                                style="display: none">
+                                0                            </span>
+                            <a class="dropdown-menu-link" href="yourturn.php">Your Turn</a>
+                        </li>
+
+                        <li>
+                            <a class="dropdown-menu-link" href="yourgames.php">Your Games</a>
+                                                            <span id="dropdown-alert" style="left: -13px;">
+                                    <img src="terrain/newicon.png">
+                                </span>
+                                                    </li>
+
+                        <li><a class="dropdown-menu-link" href="design.php">Your Maps</a></li>
+
+                        <li><a class="dropdown-menu-link" href="favorites.php?username=iwinagain">Favorites</a></li>
+
+                        <li>
+                                                        <a class="dropdown-menu-link" href="following.php?username=iwinagain">Following</a>
+                        </li>
+
+                        <li>
+                            <a class="dropdown-menu-link" href="friends.php?username=iwinagain">Friends</a>
+
+                                                    </li>
+                        <li><a class="dropdown-menu-link" href="userinfo.php">Settings</a></li>
+                        <li><a class="dropdown-menu-link" href="logout.php">Logout</a></li>
+                </ul>
+            </li>
+        
+            <li id="games-menu" onclick="void(0)">
+                Games
+                <ul id="games-dropdown" class="dropdown-menu">
+                                            <li><a class="dropdown-menu-link" href="create.php">Create Game</a></li>
+                        <li><span class="main-text"><a class="dropdown-menu-link" style="padding-right: 0px;" href="gameswait.php">Join Game</a></span>
+                                <!-- <span class="bracket-text"><a class="dropdown-menu-link" style="padding-left: 0px;" href="gameswait.php?type=private">&nbsp;[Private]</a></span> -->
+                        </li>
+                    
+                    <li><a class="dropdown-menu-link" href="live_queue.php?rated=false&bnew=true">Live Queue</a></li>
+
+                    <div class="arrow up-arrow"></div>
+                    
+                    <li><a class="dropdown-menu-link" href="gamescurrent_all.php">View Active</a></li>
+                    <li><a class="dropdown-menu-link" href="gamescompleted.php">View Completed</a></li>
+                </ul>
+            </li>
+
+            <li id="competitions-menu" onclick="void(0)">
+                                    <span id="navbar-alert">
+                        <img src="terrain/newicon.png">
+                    </span>
+                
+                Competitions
+                <ul id="competitions-dropdown" class="dropdown-menu">
+                    <li><a class="dropdown-menu-link" href="newleague.php">Global League</a></li>
+                    <li><a class="dropdown-menu-link" href="live_queue.php">Live League</a> <span id="dropdown-alert"><img src="terrain/newicon.png"></span></li>
+                    <li>
+                        <a class="dropdown-menu-link" href="viewtournament.php">Tournaments</a>
+                                                    <span id="dropdown-alert">
+                                <img src="terrain/newicon.png">
+                            </span>
+                                            
+                        <div class="arrow up-arrow"></div>
+                    </li>
+
+                    
+                                    </ul>
+            </li>
+
+            <li id="design-maps-menu" onclick="void(0)">
+                Design Maps
+                <ul id="design-maps-dropdown" class="dropdown-menu">
+                    <li><a class="dropdown-menu-link" href="design.php">Create Maps</a></li>
+                    <li><a class="dropdown-menu-link" href="searchmaps.php">Search Maps</a></li>
+                    <li><a class="dropdown-menu-link" href="recentmaps.php">Recent Maps</a></li>
+                    <li><a class="dropdown-menu-link" href="categories.php">Categories</a></li>
+                                        <div class="arrow up-arrow"></div>
+                </ul>
+            </li>
+
+            <li id="right-side-menu">
+                <li id="community-menu" onclick="void(0)">
+                    Community
+                    <ul id="community-dropdown" class="dropdown-menu">
+                        <li><a class="dropdown-menu-link" href="users.php"><img src="terrain/magnifying_glass.png" class="community-menu-img">Search Users</img></a></li>
+                        <li><a class="dropdown-menu-link" href="https://www.twitch.tv/directory/category/advance-wars-by-web" target="_blank"><img src="terrain/twitch-icon.png" class="community-menu-img">Twitch Livestreams</img></a></li>
+                        <li><a class="dropdown-menu-link" href="discord.php"><img src="terrain/discord-icon-upscale.png" class="community-menu-img">Discord Chat</img></a></li>
+                        <li><a class="dropdown-menu-link" href="https://www.reddit.com/r/AWBW/" target="_blank"><img src="terrain/reddit-icon-upscale.png" class="community-menu-img">Reddit (r/AWBW)</img></a></li>
+                        <li><a class="dropdown-menu-link" href="donate.php"><img src="terrain/patreon-icon-upscale.png" class="community-menu-img">Patreon</img></a></li>
+                        <li>
+                                <span class="main-text"><a class="dropdown-menu-link" style="padding-right: 0px;" href="https://isndev.forumotion.co.uk/c2-advance-wars-by-web/" target="_blank"><img src="terrain/forum.png" class="community-menu-img">Forum</img></a></span>
+                                <span class="bracket-text">&nbsp;<a class="dropdown-menu-link" style="padding-left: 0px;" href="http://www.amarriner.com/awbw_forum/">[Archive]</a></span>
+                        </li>
+                        <hr>
+                        <span class="dropdown-header">Contests</span>
+                        <li>
+                            <a class="dropdown-menu-link" href="custom_army_contest.php">
+                                <div class="community-menu-infantry-img"><img src="terrain/aw2/aainfantry.gif"></img></div>
+                                <div class="community-menu-infantry-img"><img src="terrain/uwinfantry.gif"></img></div>
+                                Custom Armies
+                                <div class="community-menu-infantry-img"><img src="terrain/aw2/scinfantry.gif"></img></div>
+                                <div class="community-menu-infantry-img"><img src="terrain/aw2/neinfantry.gif"></img></div>
+
+                            </a>
+                                                    </li>
+                        <div class="arrow up-arrow"></div>
+                    </ul>
+                </li>
+                <li id="tools-menu" onclick="void(0)">
+                    Tools
+                    <ul id="tools-dropdown" class="dropdown-menu">
+                        <li><a class="dropdown-menu-link" href="moveplanner.php">Move Planner</a></li>
+                        <li><a class="dropdown-menu-link" href="calculator.php">Damage Calculator</a></li>
+                        
+                                                    <li><a class="dropdown-menu-link" href="load_replay.php">Upload Replay</a></li>
+                        
+                        <div class="arrow up-arrow"></div>
+                    </ul>
+                </li>
+                <li id="infos-menu" onclick="void(0)">
+                    
+                    Info
+                    <ul id="infos-dropdown" class="dropdown-menu">
+                        <li><a class="dropdown-menu-link" href="guide.php">FAQ</a></li>
+                        <li><a class="dropdown-menu-link" href="tutorials.php">Tutorials</a></li>
+                        <li id="changelog">
+
+                            <a class="dropdown-menu-link" href="changelog.php">Changelog</a>
+                            
+                        </li>
+                        <li><a class="dropdown-menu-link" href="chart.php">Charts</a></li>
+                        <li><a class="dropdown-menu-link" href="http://awbw.wikia.com/wiki/Advance_Wars_By_Web_Wiki">AWBW Wiki</a></li>
+                        <li><a class="dropdown-menu-link" href="https://warswiki.org/">Wars Wiki</a></li>
+                    </ul>
+                </li>
+
+                <li id="contact-menu">
+                    <a href="contact.php">Contact</a>
+                </li>
+
+            </li>
+        </ul>
+    </nav>
+</div>
+
+<div id="outer">
+
+            <div id="left-side-menu-fixed-wrapper" style="margin-left: 25px;">
+            <div id="left-side-menu-container">
+                <div class="right-arrow"></div>
+                <h2 class="green-bold" style="font-size: 16px; height: 24px; padding-top: 2px;"><a style="padding: 0; text-align: center;" href="profile.php?username=iwinagain">iwinagain</a></h2>
+                <ul id="left-side-profile-menu">
+                    <li><a href="profile.php?username=iwinagain">Profile</a></li>
+                    <li>
+                        <a href="messages.php">Messages</a>
+                                                                    </li>
+                    
+                    <li>
+                        <span 
+                            class="yt-alert alert"
+                            style="display: none">
+                            0                        </span>
+                        <a href="yourturn.php">Your Turn</a>
+                    </li>
+
+                    <li>
+                        <a href="yourgames.php">Your Games</a>
+                                                    <span id="dropdown-alert" style="position: absolute; left: 92px;">
+                                <img src="terrain/newicon.png">
+                            </span>
+                                            </li>
+
+                    <li><a href="design.php">Your Maps</a></li>
+
+                    <li><a href="favorites.php?username=iwinagain">Favorites</a></li>
+
+                    <li>
+                                                <a href="following.php?username=iwinagain">Following</a>
+                    </li>
+
+                    <li>
+                        <a href="friends.php?username=iwinagain">Friends</a>
+
+                                            </li>
+                    <li><a href="userinfo.php">Settings</a></li>
+                    <li><a href="logout.php">Logout</a></li>
+                </ul>
+            </div>
+        </div>
+    <!-- <section id="main" style="overflow-x: scroll;"> -->
+    <section id="main">
+
+<!-- incoming server maintenance alert -->
+<div id="game-server-alert-div" class="flex container hv-center" style="border: solid 2px red; height: 30px; width: 380px; margin-bottom: 5px; display: none;">
+<span id="game-server-alert-text" class="error"><b>Warning! Daily server maintenance starts in 59s ...</b></span>
+</div>
+
+<div id="newleaguesetups-vue">
+	<div v-if="maps.length < 1">
+		<h1>Loading...</h1>
+	</div>
+	<div v-else>
+		<div>
+			<span class=small_text>
+				<b>Settings:</b>
+				<a v-if="filterKind != 'all'" href="javascript:" @click="setFilter('all')">All</a>
+				<span v-else> All </span>
+				|
+				<a v-if="filterKind != 'std'" href="javascript:" @click="setFilter('std')">Std</a>
+				<span v-else> Std </span>
+				|
+				<a v-if="filterKind != 'fog'" href="javascript:" @click="setFilter('fog')">Fog</a>
+				<span v-else> Fog </span>
+				|
+				<a v-if="filterKind != 'hf'" href="javascript:" @click="setFilter('hf')">HF</a>
+				<span v-else> HF </span>
+			</span>
+			<div class="header">
+				<b class="header"> AWBW <a href="newleague.php"> Global League </a> - {{ filterDisplay }} Settings </b>
+			</div>
+		</div>
+		<div class="flex col container">
+			<div class="flex row hv-center margin-sv" v-for="(map, index) in filteredMaps" :style="getMapStyle(index)">
+				<div class="flex col margin-mh">
+					<a class="norm" :href=`prevmaps.php?maps_id=${map.id}`>
+						<b> {{ map.name }} </b>
+						<br>
+						<img :src=`smallmaps/${map.id}.png`>
+					</a>
+					<br>
+					<button v-if="mc" @click="loadMap(map.id)" :disabled="hasInflightRequest">Load Map</button>
+				</div>
+				<div class="flex col">
+					<div class="flex row" v-for="tier in map.tiers" v-if="tier.enabled">
+						<span class="flex v-center margin-sh">
+							<a :href=`create.php?maps_id=${map.id}&prefs_id=${tier.prefs_id}`>
+								<b>{{ tier.name }}</b>
+							</a>
+						</span>
+						<span v-for="co in tier.cos">
+							<img class="co_portrait" :src="getCoImage(co.id)" />
+						</span>
+						</span>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="flex col container" v-if="mc">
+		<div class="header">
+			<b> AWBW Global League - Map Committee Controls </b>
+		</div>
+
+		<div>
+			<div class="flex col hv-center subheader"><b>Find Map</b></div>
+			<div>
+				<label>Map Name: <input tpye="text" v-model="mc.searchText" /></label>
+				<button @click="findMaps(mc.searchText)" :disabled="hasInflightRequest"> Search </button>
+			</div>
+			<div>
+				<label>Map Name:
+					<select v-model="mc.loadMapID">
+						<option v-for="map in mc.searchMaps" :value="map.id" :title="map.name"> {{ map.name }} ({{ map.author }}) </option>
+					</select>
+				</label>
+				<label> Map ID: <input type="number" v-model="mc.loadMapID" /> </label>
+				<button v-if="mcMapToLoad && mcMapToLoad.isLeagueMap" @click="loadMap(mc.loadMapID)" :disabled="hasInflightRequest"> Load Map </button>
+				<button v-else @click="addMap(mc.loadMapID)" :disabled="hasInflightRequest"> Add Map </button>
+			</div>
+		</div>
+
+		<div v-if="mc.map && mc.map.id == mc.loadMapID">
+			<div class="flex col hv-center subheader"><b>Edit Map Settings</b></div>
+			<div class="flex row hv-center">
+				<div class="flex col margin-mh">
+					<h4> {{ mc.map.name }} </h4>
+					<img :src=`smallmaps/${mc.map.id}.png` />
+				</div>
+				<div class="flex col">
+					<div class="flex row" v-for="tier in mc.map.tiers" @dragover="allowCoDrop($event)" @drop="onCoDrop($event, tier)">
+						<span>
+							<label>Enabled?: <input type="checkbox" v-model="tier.enabled" /> </label>
+						</span>
+						<span>
+							<label>Tier Name: <input type="text" maxlength="8" v-model="tier.name" /> </label>
+						</span>
+						<span v-for="co in tier.cos">
+							<img class="co_portrait" :src="getCoImage(co.id)" :draggable="!hasInflightRequest" @dragstart="onCoDragStart($event, co)" />
+						</span>
+					</div>
+				</div>
+			</div>
+			<div>
+				<div>
+					<div class="flex col hv-center subheader margin-sv"><b>Unit Ban Overrides</b></div>
+					<span class="flex row" @dragover="allowUnitDrop($event)" @drop="onBannedUnitDrop($event, false)">
+						<span><b>Allowed: </b></span>
+						<span v-for="(unit, name) in allowedUnits">
+							<div class='flex col' style='padding: 3px;' :draggable="!hasInflightRequest" @dragstart="onUnitDragStart($event, unit)">
+								<img :src="getUnitImage(name)" />
+							</div>
+						</span>
+					</span>
+
+					<span class="flex row" @dragover="allowUnitDrop($event)" @drop="onBannedUnitDrop($event, true)">
+						<span><b>Banned: </b></span>
+						<span v-for="(unit, name) in bannedUnits">
+							<div class='flex col' style='padding: 3px;' :draggable="!hasInflightRequest" @dragstart="onUnitDragStart($event, unit)">
+								<img :src="getUnitImage(name)" />
+							</div>
+						</span>
+					</span>
+				</div>
+				<label> Unit Limit: <input type="number" v-model="mc.map.unitLimit" /> </label>
+				<label> Cap Limit: <input type="number" v-model="mc.map.capLimit" /> </label>
+			</div>
+			<div>
+				<button @click="saveMap(mc.map)" :disabled="hasInflightRequest">Save Changes</button>
+				<button @click="loadMap(mc.map.id)" :disabled="hasInflightRequest">Reload Map</button>
+				<button @click="removeMap(mc.loadMapID)" :disabled="hasInflightRequest">Remove Map</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<script src="js/axios.js"></script>
+<script src="js/lib/newleaguesetups.js?1775942967"></script>
+
+<span><br><br><br></span>
+<span class=small_text_11>
+Advance Wars is (c) 1990-2001 <a href="http://www.nintendo.com">Nintendo</a> and (c) 2001 <a href="http://www.intsys.co.jp/">Intelligent Systems</a>. All images are copyright their respective owners.<br><br>
+<!-- End Page (1776296605) (0) (19:43:25) -->
+</span>
+</section>
+</div>
+      <script>
+            const fixedHeader = document.getElementById("fixed-header-wrapper");
+            let smallHeader = false;
+            if(window.pageYOffset !== 0) {
+                  fixedHeader.classList.add("header-small")
+            }
+            document.body.onscroll = function() {
+                  if(window.pageYOffset !== 0 && smallHeader === false) {
+                        // console.log("?");
+                        smallHeader = true;
+                        fixedHeader.classList.add("header-small");
+                  } else if(window.pageYOffset === 0) {
+                        smallHeader = false;
+                        fixedHeader.classList.remove("header-small");
+                  }
+            }
+            
+
+      </script>
+<script src="js/jquery-3.3.1.min.js"></script>
+</body>
+</html>

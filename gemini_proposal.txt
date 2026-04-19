@@ -1,0 +1,51 @@
+Project Document: AWBW-RL (Reinforcement Learning for Advance Wars)
+Goal: Training a high-level agent for Advance Wars by Web (AWBW) using MaskablePPO and custom Neural Architectures.
+1. Current System State
+Algorithm: sb3_contrib.MaskablePPO using MultiInputPolicy.
+Observation Space: Dict-based encode_state (30x30x59 spatial block + 13 flat scalars).
+Spatial: Unit types/HP, terrain, property ownership (one-hot).
+Scalars: Funds, CO Power bars, active flags, turn count, active player.
+Action Space: Discrete(35,000) flat-indexed actions. Handles unit selection, movement, combat, building, and turn-ending.
+Training Method: One-unit-at-a-time execution. The agent acts on a single unit, the environment updates, and the agent acts again until the turn ends.
+Known Bottleneck: Currently utilizes default SB3 CombinedExtractor (Basic CNN/MLP) rather than the intended custom AWBWNet (Residual blocks).
+2. The "Advance Wars vs. Chess" Complexity Gap
+A comparative analysis of the branching factor (
+) and search depth (
+):
+Chess: 
+
+. 1 turn = 1 action.
+AWBW: 
+
+
+
+
+
+
+
+
+.
+With 10 units on the field, the possible permutations of a single turn exceed billions.
+The Horizon Problem: A 5-turn "lookahead" in AWBW equals 50–100+ RL steps. Standard PPO struggle with this credit assignment, often leading to "greedy" short-term play (attacking for immediate damage rather than positioning for map control).
+3. Strategic Roadmap & Areas for Review
+Phase A: Architectural Integration (Immediate)
+Connect Custom Network: Wire AWBWNet into MaskablePPO via policy_kwargs.
+ResNet Backbone: Implement a Residual CNN to handle long-range spatial dependencies (e.g., an Artillery unit's relationship to a chokepoint 5 tiles away).
+Scalar Fusion: Ensure global scalars (Funds/CO Power) are concatenated after the spatial trunk but before the policy/value heads.
+Phase B: From "Instinct" to "Planning" (AlphaZero Transition)
+Value Head Refinement: Train a strong 
+
+
+
+ to act as a learned heuristic for state evaluation, allowing the agent to recognize a "won position" turns before the capture occurs.
+MCTS Integration: Implement a Monte Carlo Tree Search that uses the MaskablePPO policy to prune the massive 35k action space, focusing only on the top-
+ moves.
+Turn-Level Thinking: Address the combinatorial explosion by potentially exploring Hierarchical RL (a "Macro" network sets a goal, a "Micro" network moves the units).
+Phase C: Reward & Environment Engineering
+Reward Shaping: Evaluate the impact of "Sparse" (Win/Loss only) vs. "Dense" rewards (Property count, Unit Value Differential).
+Turn-End Bootstrapping: Investigate updating the agent specifically at the end of turns to reduce noise from individual unit-move sequences.
+4. Specific Questions for Reviewer LLMs
+Action Space: Given a 35k discrete action space, is there a more efficient way to represent "Move unit at X to Y and Attack Z" to help the model generalize faster?
+Credit Assignment: How can we prevent the PPO from becoming "greedy" during the massive sequences of moves required for a single AWBW turn?
+MCTS Feasibility: What are the best strategies for implementing MCTS when the "move" is broken into many sub-actions (Sequential Move Games)?
+Observation Compression: Is a 59-layer spatial input too noisy? Should we use an Autoencoder or deeper ResNet to extract features more effectively?

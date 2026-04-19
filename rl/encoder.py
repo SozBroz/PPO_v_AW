@@ -1,0 +1,203 @@
+"""
+Encodes a GameState into a numpy observation tensor.
+
+Output shape: (H, W, N_CHANNELS) where H=W=30 (padded), N_CHANNELS is:
+  - 28 unit channels (14 unit types × 2 players)
+  - 1 HP channel
+  - 15 terrain channels (one-hot, main terrain categories)
+  - 15 property channels (5 property types × 3 states: neutral/p0/p1)
+  Total: 28 + 1 + 15 + 15 = 59 channels
+
+Plus scalar features (appended after CNN flatten):
+  - funds[0], funds[1] (normalized by 50000)
+  - co_power_bar[0], co_power_bar[1] (normalized by max)
+  - cop_active[0], cop_active[1] (binary)
+  - scop_active[0], scop_active[1] (binary)
+  - turn (normalized by MAX_TURNS)
+  - active_player (0 or 1)
+  - p0_co_id, p1_co_id (normalized by 30)
+  - tier (normalized: T1=0.25, T2=0.5, T3=0.75, T4=1.0)
+  - weather_rain  (binary: 1.0 if rain active, else 0.0)
+  - weather_snow  (binary: 1.0 if snow active, else 0.0)
+  - weather_turns (co_weather_segments_remaining / 2.0; 0 = clear/default)
+  Total scalars: 16
+
+NOTE: N_SCALARS increased from 13 → 16.  Old checkpoints saved with 13 scalars
+are incompatible; use custom_objects={"n_steps": ...} only for n_steps overrides.
+For the scalar space change, retrain from scratch or snapshot-migrate manually.
+"""
+import numpy as np
+from engine.game import GameState, MAX_TURNS
+from engine.unit import UnitType
+from engine.terrain import get_terrain
+
+GRID_SIZE = 30
+N_UNIT_CHANNELS = 28       # 14 unit types × 2 players
+N_TERRAIN_CHANNELS = 15
+N_PROPERTY_CHANNELS = 15   # 5 property types × 3 ownership states
+N_SPATIAL_CHANNELS = N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS  # 59
+N_SCALARS = 16
+
+# Terrain one-hot categories
+TERRAIN_CATEGORIES: dict[str, int] = {
+    "plain": 0,
+    "mountain": 1,
+    "wood": 2,
+    "road": 3,
+    "river": 4,
+    "bridge": 5,
+    "sea": 6,
+    "shoal": 7,
+    "reef": 8,
+    "city": 9,
+    "base": 10,
+    "airport": 11,
+    "port": 12,
+    "hq": 13,
+    "lab": 14,
+}
+
+# Property type index (0-4) for the 5 ownership slots
+_PROP_TYPE_HQ_LAB = 4
+_PROP_TYPE_BASE = 1
+_PROP_TYPE_AIRPORT = 2
+_PROP_TYPE_PORT = 3
+_PROP_TYPE_CITY = 0
+
+# UnitType → channel 0-13 (clamped so unknown types fall into last bucket)
+_N_UNIT_TYPES = 14
+UNIT_TO_CHANNEL: dict[UnitType, int] = {ut: min(int(ut), _N_UNIT_TYPES - 1) for ut in UnitType}
+
+# Tier name → normalized scalar
+_TIER_MAP: dict[str, float] = {
+    "T0": 0.0,
+    "TL": 0.1,
+    "T1": 0.25,
+    "T2": 0.5,
+    "T3": 0.75,
+    "T4": 1.0,
+}
+
+
+def _get_terrain_category(terrain_id: int) -> int:
+    """Map a raw terrain tile id to a TERRAIN_CATEGORIES index."""
+    info = get_terrain(terrain_id)
+    # Property sub-types first (most specific)
+    if info.is_hq:
+        return TERRAIN_CATEGORIES["hq"]
+    if info.is_lab:
+        return TERRAIN_CATEGORIES["lab"]
+    if info.is_airport:
+        return TERRAIN_CATEGORIES["airport"]
+    if info.is_port:
+        return TERRAIN_CATEGORIES["port"]
+    if info.is_base:
+        return TERRAIN_CATEGORIES["base"]
+    if info.is_property:
+        return TERRAIN_CATEGORIES["city"]
+    # Non-property: match by name substring
+    name = info.name.lower() if hasattr(info, "name") else ""
+    for cat, idx in TERRAIN_CATEGORIES.items():
+        if cat in name:
+            return idx
+    return TERRAIN_CATEGORIES["plain"]  # default fallback
+
+
+def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Encode a GameState into spatial and scalar tensors.
+
+    Returns:
+        spatial: (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS) float32
+        scalars: (N_SCALARS,) float32
+    """
+    H = min(state.map_data.height, GRID_SIZE)
+    W = min(state.map_data.width, GRID_SIZE)
+
+    spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
+
+    # ── Terrain channels ─────────────────────────────────────────────────────
+    terrain_ch_offset = N_UNIT_CHANNELS + 1  # skip unit channels + HP channel
+    for r in range(H):
+        for c in range(W):
+            tid = state.map_data.terrain[r][c]
+            cat = _get_terrain_category(tid)
+            spatial[r, c, terrain_ch_offset + cat] = 1.0
+
+    # ── Property ownership channels ──────────────────────────────────────────
+    prop_ch_offset = N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS
+    for prop in state.properties:
+        r, c = prop.row, prop.col
+        if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
+            continue
+
+        if prop.is_hq or prop.is_lab:
+            ptype = _PROP_TYPE_HQ_LAB
+        elif prop.is_base:
+            ptype = _PROP_TYPE_BASE
+        elif prop.is_airport:
+            ptype = _PROP_TYPE_AIRPORT
+        elif prop.is_port:
+            ptype = _PROP_TYPE_PORT
+        else:
+            ptype = _PROP_TYPE_CITY
+
+        # ownership: 0 = neutral, 1 = player 0, 2 = player 1
+        if prop.owner is None:
+            ownership = 0
+        elif prop.owner == 0:
+            ownership = 1
+        else:
+            ownership = 2
+
+        spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
+
+    # ── Unit presence + HP channels ───────────────────────────────────────────
+    hp_ch = N_UNIT_CHANNELS  # single HP channel shared across all units
+    for player in (0, 1):
+        player_ch_offset = _N_UNIT_TYPES * player  # 0 for p0, 14 for p1
+        for unit in state.units[player]:
+            r, c = unit.pos
+            if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
+                continue
+            ch = UNIT_TO_CHANNEL[unit.unit_type] + player_ch_offset
+            spatial[r, c, ch] = 1.0
+            # HP: latest unit written wins — acceptable for non-stacked units
+            spatial[r, c, hp_ch] = unit.hp / 100.0
+
+    # ── Scalar features ───────────────────────────────────────────────────────
+    co0 = state.co_states[0]
+    co1 = state.co_states[1]
+
+    # Normalise power bar against the current SCOP threshold (grows with power_uses)
+    def _norm_power(co_state) -> float:
+        denom = co_state._scop_threshold
+        if denom <= 0 or denom >= 10**11:
+            return 0.0
+        return min(1.0, float(co_state.power_bar) / denom)
+
+    weather = getattr(state, "weather", "clear")
+    scalars = np.array(
+        [
+            state.funds[0] / 50_000.0,
+            state.funds[1] / 50_000.0,
+            _norm_power(co0),
+            _norm_power(co1),
+            float(co0.cop_active),
+            float(co0.scop_active),
+            float(co1.cop_active),
+            float(co1.scop_active),
+            state.turn / MAX_TURNS,
+            float(state.active_player),
+            co0.co_id / 30.0,
+            co1.co_id / 30.0,
+            _TIER_MAP.get(state.tier_name, 0.5),
+            # Weather scalars (indices 13-15)
+            1.0 if weather == "rain" else 0.0,
+            1.0 if weather == "snow" else 0.0,
+            getattr(state, "co_weather_segments_remaining", 0) / 2.0,
+        ],
+        dtype=np.float32,
+    )
+
+    return spatial, scalars

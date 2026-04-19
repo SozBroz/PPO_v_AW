@@ -1,0 +1,699 @@
+{
+  "cos": {
+    "1": {
+      "id": 1,
+      "name": "Andy",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "No day-to-day bonuses"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Hyper Repair",
+        "description": "Restores 2 HP to all own units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Hyper Upgrade",
+        "description": "+10% ATK and DEF to all own units (SCOPB only; no unique bonus)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "2": {
+      "id": 2,
+      "name": "Grit",
+      "country": "Blue Moon",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+20% ATK for indirect units, -10% ATK for direct units"
+      },
+      "atk_modifiers": {"indirect": 20, "direct": -10},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Snipe Attack",
+        "description": "+1 attack range to all indirect units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Super Snipe",
+        "description": "+2 attack range to indirect units; +30% additional ATK for indirect units",
+        "atk_modifiers": {"indirect": 30},
+        "def_modifiers": {}
+      }
+    },
+    "3": {
+      "id": 3,
+      "name": "Kanbei",
+      "country": "Yellow Comet",
+      "tier": null,
+      "cop_stars": 4,
+      "scop_stars": 8,
+      "day_to_day": {
+        "description": "+30% ATK and DEF to all units; own units cost 120% of base price"
+      },
+      "atk_modifiers": {"all": 30},
+      "def_modifiers": {"all": 30},
+      "cop": {
+        "name": "Morale Boost",
+        "description": "+10% additional ATK and DEF to all own units",
+        "atk_modifiers": {"all": 10},
+        "def_modifiers": {"all": 10}
+      },
+      "scop": {
+        "name": "Samurai Spirit",
+        "description": "+10% additional ATK and DEF to all own units; counterattacks deal 1.5x damage",
+        "atk_modifiers": {"all": 10},
+        "def_modifiers": {"all": 10}
+      }
+    },
+    "5": {
+      "id": 5,
+      "name": "Drake",
+      "country": "Green Earth",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+20% ATK for naval units"
+      },
+      "atk_modifiers": {"naval": 20},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Tsunami",
+        "description": "All enemy units take 1 HP damage; all enemy air units lose 1 fuel per tile",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Typhoon",
+        "description": "All enemy units take 2 HP damage; all enemy air units lose 2 fuel per tile",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "7": {
+      "id": 7,
+      "name": "Max",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+20% ATK for direct units, -10% ATK for indirect units"
+      },
+      "atk_modifiers": {"direct": 20, "indirect": -10},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Max Force",
+        "description": "+10% additional ATK for direct units",
+        "atk_modifiers": {"direct": 10},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Max Blast",
+        "description": "+25% additional ATK for direct units (total +45% over base with D2D)",
+        "atk_modifiers": {"direct": 25},
+        "def_modifiers": {}
+      }
+    },
+    "8": {
+      "id": 8,
+      "name": "Sami",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 7,
+      "day_to_day": {
+        "description": "+30% ATK for infantry and mech; -10% ATK for vehicles; double capture speed for infantry and mech"
+      },
+      "atk_modifiers": {"infantry": 30, "mech": 30, "vehicle": -10},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Double Time",
+        "description": "+1 movement to all infantry units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Victory March",
+        "description": "All infantry and mech units can complete a capture in one step regardless of remaining HP; +1 movement to infantry",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "9": {
+      "id": 9,
+      "name": "Olaf",
+      "country": "Blue Moon",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "Own units suffer no movement penalty in snow; snow falls at the start of Olaf's turns; +10% ATK/DEF in snow (always active for Olaf)"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Blizzard",
+        "description": "Causes snowfall; all enemy units lose 1 movement",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Winter Fury",
+        "description": "All enemy units take 2 HP damage; causes snowfall; own units unaffected by snow movement penalties",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "10": {
+      "id": 10,
+      "name": "Eagle",
+      "country": "Green Earth",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+15% ATK for air units, -15% ATK for naval units"
+      },
+      "atk_modifiers": {"air": 15, "naval": -15},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Lightning Drive",
+        "description": "+10% additional ATK for air units",
+        "atk_modifiers": {"air": 10},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Lightning Strike",
+        "description": "All air units may move and act a second time this turn (excluding units that already acted)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "11": {
+      "id": 11,
+      "name": "Adder",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 2,
+      "scop_stars": 5,
+      "day_to_day": {
+        "description": "+1 movement to all own units"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Sideslip",
+        "description": "+1 additional movement to all own units (stacks with D2D for +2 total)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Sidewinder",
+        "description": "+2 additional movement to all own units (stacks with D2D for +3 total)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "12": {
+      "id": 12,
+      "name": "Hawke",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 5,
+      "scop_stars": 10,
+      "day_to_day": {
+        "description": "+10% ATK to all units"
+      },
+      "atk_modifiers": {"all": 10},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Black Wave",
+        "description": "All enemy units take 1 HP damage; all own units recover 2 HP",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Black Storm",
+        "description": "All enemy units take 2 HP damage; all own units recover 2 HP",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "13": {
+      "id": 13,
+      "name": "Sensei",
+      "country": "Yellow Comet",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+40% ATK for infantry, mech, and copter units; -10% ATK for vehicles and naval; spawns mechs on owned bases at turn start"
+      },
+      "atk_modifiers": {"infantry": 40, "mech": 40, "copter": 40, "vehicle": -10, "naval": -10},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Copter Command",
+        "description": "+30% additional ATK for copter units; spawns one infantry on each owned city",
+        "atk_modifiers": {"copter": 30},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Airborne Assault",
+        "description": "Spawns one infantry on every owned city and base",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "14": {
+      "id": 14,
+      "name": "Jess",
+      "country": "Green Earth",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+10% ATK for vehicles, +20% ATK for naval; own vehicles are refueled and rearmed at the start of each turn"
+      },
+      "atk_modifiers": {"vehicle": 10, "naval": 20},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Turbo Charge",
+        "description": "+10% additional ATK for vehicles; all vehicles gain +2 movement",
+        "atk_modifiers": {"vehicle": 10},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Overdrive",
+        "description": "+20% additional ATK for vehicles; all vehicles gain +2 movement and are fully refueled and rearmed",
+        "atk_modifiers": {"vehicle": 20},
+        "def_modifiers": {}
+      }
+    },
+    "15": {
+      "id": 15,
+      "name": "Colin",
+      "country": "Blue Moon",
+      "tier": null,
+      "cop_stars": 2,
+      "scop_stars": 5,
+      "day_to_day": {
+        "description": "All own units cost 80% of base price; earns +10% bonus funds per owned property"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Gold Rush",
+        "description": "Current fund total is multiplied by 1.5",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Power of Money",
+        "description": "ATK is boosted proportional to current fund total (more funds = higher ATK bonus)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "16": {
+      "id": 16,
+      "name": "Lash",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "Gains bonus ATK equal to the terrain star rating of the tile the attacking unit occupies"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Terrain Tactics",
+        "description": "Terrain star value counts double for defensive purposes for all own units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Prime Tactics",
+        "description": "Terrain star value counts double for both ATK (D2D bonus doubled) and DEF for all own units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "17": {
+      "id": 17,
+      "name": "Hachi",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 6,
+      "scop_stars": 9,
+      "day_to_day": {
+        "description": "All own units cost 50% of base price when deployed from cities"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Barter",
+        "description": "All unit production costs reduced to 50% for one turn regardless of deployment location",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Merchant Union",
+        "description": "Own units can be deployed from any owned city (not just bases/airports/ports); all unit costs reduced to 50%",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "18": {
+      "id": 18,
+      "name": "Sonja",
+      "country": "Yellow Comet",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+1 vision range to all own units; own units reveal enemy HP values; counterattacks deal full damage regardless of own HP"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Enhanced Vision",
+        "description": "+2 additional vision to all own units (total +3 over base); own units can see into forests and ambush units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Counter Break",
+        "description": "Own counterattacks deal 1.5x normal damage; enemy units cannot counter-attack this turn",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "19": {
+      "id": 19,
+      "name": "Sasha",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "Earns bonus funds each turn equal to the number of enemy CO power stars charged"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Market Crash",
+        "description": "Drains all enemy CO power bars by 1 star per city Sasha owns",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "War Bonds",
+        "description": "Earns funds equal to the total HP damage dealt to enemies this turn",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "20": {
+      "id": 20,
+      "name": "Grimm",
+      "country": "Yellow Comet",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 5,
+      "day_to_day": {
+        "description": "+30% ATK to all units, -20% DEF for all units"
+      },
+      "atk_modifiers": {"all": 30},
+      "def_modifiers": {"all": -20},
+      "cop": {
+        "name": "Knuckleduster",
+        "description": "+10% additional ATK to all own units",
+        "atk_modifiers": {"all": 10},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Haymaker",
+        "description": "+30% additional ATK to all own units (total +60% ATK over base with D2D)",
+        "atk_modifiers": {"all": 30},
+        "def_modifiers": {}
+      }
+    },
+    "21": {
+      "id": 21,
+      "name": "Koal",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+10% ATK bonus when own units attack from a road tile"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Forced March",
+        "description": "+1 movement to all own units when moving on road tiles",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Trail of Woe",
+        "description": "+30% ATK bonus when attacking from roads; +2 movement on road tiles for all own units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "22": {
+      "id": 22,
+      "name": "Jake",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+10% ATK bonus when own units attack from a plain tile"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Beat Down",
+        "description": "+10% additional ATK for units on plains; small additional bonus for all others",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Block Rock",
+        "description": "+30% ATK for units on plains; +10% ATK for all other units",
+        "atk_modifiers": {"all": 10},
+        "def_modifiers": {}
+      }
+    },
+    "23": {
+      "id": 23,
+      "name": "Kindle",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "Earns +50% funds from all owned cities; +30% ATK bonus when attacking from a city tile"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Urban Blight",
+        "description": "+30% additional ATK from city tiles; all enemy units on city tiles take 1 HP damage",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "High Society",
+        "description": "+50% ATK from city tiles; all enemy units on city tiles take 2 HP damage",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "24": {
+      "id": 24,
+      "name": "Nell",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 2,
+      "scop_stars": 5,
+      "day_to_day": {
+        "description": "+10% luck bonus (attack damage can randomly roll 0-20% higher than base)"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Lucky Star",
+        "description": "+30% additional luck bonus for this turn (total 0-50% lucky bonus range)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Lady Luck",
+        "description": "+60% additional luck bonus for this turn (total 0-80% lucky bonus range)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "25": {
+      "id": 25,
+      "name": "Flak",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "Random ±10% luck variance; damage fluctuates unpredictably (can exceed or fall below normal)"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Brute Force",
+        "description": "Increases random luck range by +10%; higher ceiling but also higher floor variance",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Barbaric Blow",
+        "description": "Increases random luck range by +30%; very high ceiling with significant variance",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "26": {
+      "id": 26,
+      "name": "Jugger",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "Random ±15% luck variance (more extreme than Flak); wider damage fluctuation range"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Overclock",
+        "description": "Increases random luck range by +15%; wider ceiling and deeper floor variance than Flak's COP",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Firestorm",
+        "description": "Increases random luck range by +35%; extremely high ceiling with severe variance",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "27": {
+      "id": 27,
+      "name": "Javier",
+      "country": "Green Earth",
+      "tier": null,
+      "cop_stars": 3,
+      "scop_stars": 6,
+      "day_to_day": {
+        "description": "+10% DEF from comm towers; gains additional +30% DEF per comm tower owned"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Tower Shield",
+        "description": "+20% additional DEF per comm tower owned for all own units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Tower of Power",
+        "description": "+40% ATK and +40% DEF per comm tower owned for all own units",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "28": {
+      "id": 28,
+      "name": "Rachel",
+      "country": "Orange Star",
+      "tier": null,
+      "cop_stars": 2,
+      "scop_stars": 5,
+      "day_to_day": {
+        "description": "+10% luck bonus (attack damage can randomly roll 0-20% higher than base)"
+      },
+      "atk_modifiers": {},
+      "def_modifiers": {},
+      "cop": {
+        "name": "Lucky Lass",
+        "description": "Calls in 3 random missile strikes on enemy units; moderate AOE damage",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Covering Fire",
+        "description": "Calls in 3 powerful missile barrages targeting enemy units; high AOE damage",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "29": {
+      "id": 29,
+      "name": "Sturm",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": 9,
+      "scop_stars": 9,
+      "day_to_day": {
+        "description": "+10% ATK and DEF to all units; own units suffer no movement penalty from any weather condition"
+      },
+      "atk_modifiers": {"all": 10},
+      "def_modifiers": {"all": 10},
+      "cop": {
+        "name": "Meteor Strike",
+        "description": "Fires a large meteor at a targeted area dealing significant HP damage in a wide AOE",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      },
+      "scop": {
+        "name": "Fury Storm",
+        "description": "Fires a devastating meteor at a targeted area dealing severe HP damage in a very wide AOE (larger and stronger than Meteor Strike)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    },
+    "30": {
+      "id": 30,
+      "name": "Von Bolt",
+      "country": "Black Hole",
+      "tier": null,
+      "cop_stars": null,
+      "scop_stars": 10,
+      "day_to_day": {
+        "description": "+10% ATK and DEF to all units; own units consume 1 less fuel per turn"
+      },
+      "atk_modifiers": {"all": 10},
+      "def_modifiers": {"all": 10},
+      "cop": null,
+      "scop": {
+        "name": "Ex Machina",
+        "description": "Fires a massive bolt targeting a large area; deals significant HP damage and stuns all affected enemy units (they cannot move or act for one turn)",
+        "atk_modifiers": {},
+        "def_modifiers": {}
+      }
+    }
+  }
+}

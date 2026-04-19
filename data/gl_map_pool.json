@@ -1,0 +1,5150 @@
+[
+  {
+    "map_id": 133665,
+    "name": "Walls Are Closing In",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 36,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          27,
+          3,
+          13,
+          30
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Javier",
+          "Kanbei",
+          "Sensei",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          8,
+          19
+        ],
+        "co_names": [
+          "Hawke",
+          "Sami",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 166877,
+    "name": "Throne Of Skulls",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 134930,
+    "name": "Swiss Banking",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 123858,
+    "name": "Misery",
+    "p0_country_id": 1,
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 30,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13,
+          30
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          8,
+          19
+        ],
+        "co_names": [
+          "Hawke",
+          "Sami",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          11,
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Adder",
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          20,
+          22,
+          27,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Grimm",
+          "Jake",
+          "Javier",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 146797,
+    "name": "Inland Viking",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 60,
+    "cap_limit": 40,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          27,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Javier",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          11,
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Adder",
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 180298,
+    "name": "Eternity, Served Cold",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 171596,
+    "name": "Designed Desires",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 25,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 170934,
+    "name": "BL Go Brrr",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 33,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          11,
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Adder",
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 69201,
+    "name": "Beads on a String",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 23,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          8
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 159501,
+    "name": "A Dance With Magnums",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 140000,
+    "name": "140000 Ways to Die",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 118615,
+    "name": "Low Light",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 37,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 128505,
+    "name": "Malachite Trail",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 44,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          10,
+          17,
+          12,
+          27
+        ],
+        "co_names": [
+          "Colin",
+          "Eagle",
+          "Hachi",
+          "Hawke",
+          "Javier"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          3,
+          9,
+          13,
+          29
+        ],
+        "co_names": [
+          "Kanbei",
+          "Olaf",
+          "Sensei",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 169069,
+    "name": "Only Pain To Gain",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 37,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13,
+          29
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 165694,
+    "name": "Silverado",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 160882,
+    "name": "Eye Of The Vortex (HF)",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 35,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          5,
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Drake",
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          11,
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Adder",
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 173471,
+    "name": "Rhinoplast Reno",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 33,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 172246,
+    "name": "Subwoofer Lullaby",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 37,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 143661,
+    "name": "BlackBoat Confrontation v2",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 35,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          19
+        ],
+        "co_names": [
+          "Hawke",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          27,
+          7,
+          9,
+          30
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Javier",
+          "Max",
+          "Olaf",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 110767,
+    "name": "Seashoals?!",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 142984,
+    "name": "Intelligent System v2",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb",
+      "Piperunner"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          2,
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Grit",
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 144739,
+    "name": "Stitch Monster v2",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 33,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          27,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Javier",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          8,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 69659,
+    "name": "1vs1 Marengo",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          2,
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Grit",
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 166637,
+    "name": "Quota Iota Redux",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 32,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          2,
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Grit",
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 176423,
+    "name": "Queen Annes Revenge",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 36,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          7,
+          9,
+          30
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Max",
+          "Olaf",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 170819,
+    "name": "Greener Greens",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          27,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Javier",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 175434,
+    "name": "Cathedral of the Dead",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 32,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          2,
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Grit",
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          8,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 126428,
+    "name": "Ft. Fantasy",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          23,
+          7,
+          9,
+          8
+        ],
+        "co_names": [
+          "Kindle",
+          "Max",
+          "Olaf",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          11,
+          1,
+          5,
+          10,
+          16,
+          28
+        ],
+        "co_names": [
+          "Adder",
+          "Andy",
+          "Drake",
+          "Eagle",
+          "Lash",
+          "Rachel"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 173170,
+    "name": "Phobies",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          2,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Grit",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          23,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Kindle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28,
+          8
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 108178,
+    "name": "Hidden city",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 36,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          29,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 76602,
+    "name": "Autumn's Grace",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 28,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          29,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 116014,
+    "name": "Data Downer",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          29,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 164887,
+    "name": "Out Of Jurisdiction",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 30,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          12,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Hawke",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          29,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          2,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Grit",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 58429,
+    "name": "Chaos Theory",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          27,
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Javier",
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 172795,
+    "name": "Sundered Land",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 65,
+    "cap_limit": 35,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          12,
+          27,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Hawke",
+          "Javier",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          10,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          29,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": false,
+        "co_ids": [
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 175286,
+    "name": "Cutting Edge",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 30,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          19,
+          29,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Sasha",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 175384,
+    "name": "Sunset over the Himalaya",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 29,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          27,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Javier",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          2,
+          12,
+          19,
+          29,
+          30
+        ],
+        "co_names": [
+          "Grit",
+          "Hawke",
+          "Sasha",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 77060,
+    "name": "A Hope Forlorn",
+    "type": "std",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 32,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          29,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Sturm",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          23,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Kindle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          16,
+          28,
+          8
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Lash",
+          "Rachel",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 165147,
+    "name": "Withering Garden: Core",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 26,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": true,
+        "co_ids": [
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 121802,
+    "name": "Warped Streams",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 50,
+    "cap_limit": 35,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          2,
+          12,
+          27,
+          19,
+          30
+        ],
+        "co_names": [
+          "Grit",
+          "Hawke",
+          "Javier",
+          "Sasha",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          7,
+          9
+        ],
+        "co_names": [
+          "Eagle",
+          "Max",
+          "Olaf"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          16,
+          28,
+          8,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Lash",
+          "Rachel",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 164756,
+    "name": "Far-East El Dorado",
+    "type": "fog",
+    "unit_bans": [
+      "Black Bomb"
+    ],
+    "unit_limit": 60,
+    "cap_limit": 35,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3,
+          13
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          12,
+          19
+        ],
+        "co_names": [
+          "Hawke",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          10,
+          2,
+          27,
+          7,
+          9,
+          30
+        ],
+        "co_names": [
+          "Eagle",
+          "Grit",
+          "Javier",
+          "Max",
+          "Olaf",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          23,
+          28,
+          18
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Kindle",
+          "Rachel",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  },
+  {
+    "map_id": 161411,
+    "name": "Off The Beaten Path (HF)",
+    "type": "hf",
+    "unit_bans": [
+      "Black Bomb",
+      "Stealth"
+    ],
+    "unit_limit": 60,
+    "cap_limit": 31,
+    "tiers": [
+      {
+        "tier_name": "TL",
+        "enabled": false,
+        "co_ids": [
+          25,
+          26,
+          24,
+          29
+        ],
+        "co_names": [
+          "Flak",
+          "Jugger",
+          "Nell",
+          "Sturm"
+        ]
+      },
+      {
+        "tier_name": "T0",
+        "enabled": false,
+        "co_ids": [
+          15,
+          17,
+          3
+        ],
+        "co_names": [
+          "Colin",
+          "Hachi",
+          "Kanbei"
+        ]
+      },
+      {
+        "tier_name": "T1",
+        "enabled": false,
+        "co_ids": [
+          10,
+          12,
+          9,
+          13
+        ],
+        "co_names": [
+          "Eagle",
+          "Hawke",
+          "Olaf",
+          "Sensei"
+        ]
+      },
+      {
+        "tier_name": "T2",
+        "enabled": true,
+        "co_ids": [
+          1,
+          5,
+          2,
+          7,
+          30
+        ],
+        "co_names": [
+          "Andy",
+          "Drake",
+          "Grit",
+          "Max",
+          "Von Bolt"
+        ]
+      },
+      {
+        "tier_name": "T3",
+        "enabled": true,
+        "co_ids": [
+          27,
+          23,
+          28,
+          19
+        ],
+        "co_names": [
+          "Javier",
+          "Kindle",
+          "Rachel",
+          "Sasha"
+        ]
+      },
+      {
+        "tier_name": "T4",
+        "enabled": true,
+        "co_ids": [
+          11,
+          20,
+          22,
+          14,
+          21,
+          16,
+          8,
+          18
+        ],
+        "co_names": [
+          "Adder",
+          "Grimm",
+          "Jake",
+          "Jess",
+          "Koal",
+          "Lash",
+          "Sami",
+          "Sonja"
+        ]
+      },
+      {
+        "tier_name": "T5",
+        "enabled": false,
+        "co_ids": [],
+        "co_names": []
+      }
+    ]
+  }
+]

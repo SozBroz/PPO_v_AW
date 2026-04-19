@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Watch — AWBW DRL Bot{% endblock %}
+{% block content %}
+
+<div style="display:flex; gap:16px; align-items:flex-start;">
+
+  <!-- Left panel: controls -->
+  <div style="width:260px; flex-shrink:0;">
+    <div class="card">
+      <h2 style="color:#e94560; margin-bottom:12px; font-size:1rem;">Game Info</h2>
+      <div id="game-info">
+        <p class="status warn">Waiting for game...</p>
+        <p style="margin-top:8px; font-size:0.8rem; color:#666;">Run: python train.py --watch-only</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="color:#e94560; margin-bottom:12px; font-size:1rem;">Start Watch Game</h2>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <select id="co-p0" style="background:#0f3460; color:#e0e0e0; border:1px solid #e94560; padding:6px; border-radius:4px; font-family:inherit;">
+          <option value="1">P0: Andy</option>
+          <option value="7">P0: Max</option>
+          <option value="2">P0: Grit</option>
+          <option value="10">P0: Eagle</option>
+          <option value="12">P0: Hawke</option>
+        </select>
+        <select id="co-p1" style="background:#0f3460; color:#e0e0e0; border:1px solid #e94560; padding:6px; border-radius:4px; font-family:inherit;">
+          <option value="7">P1: Max</option>
+          <option value="1">P1: Andy</option>
+          <option value="9">P1: Olaf</option>
+          <option value="8">P1: Sami</option>
+          <option value="10">P1: Eagle</option>
+        </select>
+        <button class="btn" onclick="startGame()">&#9654; Start Game</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="color:#e94560; margin-bottom:12px; font-size:1rem;">Player 0 (Blue)</h2>
+      <div id="p0-info" style="font-size:0.85rem;">—</div>
+    </div>
+    <div class="card">
+      <h2 style="color:#e94560; margin-bottom:12px; font-size:1rem;">Player 1 (Red)</h2>
+      <div id="p1-info" style="font-size:0.85rem;">—</div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <input type="checkbox" id="auto-refresh" checked>
+        <label for="auto-refresh" style="font-size:0.85rem;">Auto-refresh (500ms)</label>
+      </div>
+    </div>
+
+    <div class="card" style="padding:12px;">
+      <div id="poll-status" style="font-size:0.75rem; color:#555;">Polling...</div>
+    </div>
+  </div>
+
+  <!-- Right panel: board -->
+  <div style="flex:1; min-width:0;">
+    <div class="card" style="padding:8px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:4px;">
+        <span id="board-title" style="color:#a8b2d8; font-size:0.9rem;">Board</span>
+        <span id="last-action" style="color:#666; font-size:0.8rem;">—</span>
+      </div>
+      <div style="overflow:auto;">
+        <canvas id="board-canvas" style="display:block; image-rendering:pixelated;"></canvas>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='board.js') }}"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (typeof preloadAWBWBoardTextures === 'function') preloadAWBWBoardTextures();
+  });
+</script>
+<script src="{{ url_for('static', filename='watch.js') }}"></script>
+{% endblock %}

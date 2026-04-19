@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1631881 turn-0 snapshot; player 0 = Black Hole side before p0_country_id remap (OS forced to P0 in pool, infantry remap to P1)",
+  "units": [
+    {
+      "row": 12,
+      "col": 8,
+      "player": 0,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 2,
+      "col": 20,
+      "player": 0,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1624195 turn-0 snapshot",
+  "units": [
+    {
+      "row": 14,
+      "col": 18,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

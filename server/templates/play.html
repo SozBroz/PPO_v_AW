@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Play vs Bot — AWBW DRL Bot{% endblock %}
+{% block content %}
+<div class="card">
+  <h2 style="color:#e94560;">Human vs Bot</h2>
+  <p style="margin-top:8px; font-size:0.85rem; color:#a8b2d8;">
+    MVP: Misery (map <strong>123858</strong>), tier <strong>T3</strong>, <strong>Andy vs Andy</strong> (same slice as <code>train.py --map-id 123858 --tier T3 --co-p0 1 --co-p1 1</code>). You are P0; bot is P1. With no <code>checkpoints/latest.zip</code>, the server uses a <strong>random legal-move</strong> bot so you can play immediately; add a trained checkpoint for MaskablePPO. <strong>BUILD</strong>: in SELECT, click a highlighted empty owned base/airport/port, then pick a unit from the dropdown and click <strong>Build</strong>. Run the server with <code>use_reloader=False</code> so sessions survive edits (see <code>server/app.py</code>).
+    <strong>END_TURN</strong> is legal only when every friendly unit has moved. See <code>docs/play_ui.md</code>.
+  </p>
+  <div id="playStatus" class="status warn" style="margin-top:12px;">Press <strong>Start Game</strong> after a checkpoint exists in <code>checkpoints/</code>.</div>
+  <div id="powerHud" style="margin-top:8px; font-size:0.78rem; color:#c5cae9; line-height:1.5; display:none;">
+    <div><strong>You</strong> — COP charge: <span id="hudCop0">0%</span> · SCOP charge: <span id="hudScop0">0%</span></div>
+    <div><strong>Bot</strong> — COP charge: <span id="hudCop1">0%</span> · SCOP charge: <span id="hudScop1">0%</span></div>
+  </div>
+  <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+    <button type="button" class="btn" id="btnStart">Start Game</button>
+    <button type="button" class="btn" id="btnCop" disabled title="COP">COP</button>
+    <button type="button" class="btn" id="btnScop" disabled title="SCOP">SCOP</button>
+    <button type="button" class="btn" id="btnEnd" disabled title="End Turn">End Turn</button>
+    <button type="button" class="btn" id="btnWait" disabled style="display:none;">Wait</button>
+    <button type="button" class="btn" id="btnCapture" disabled style="display:none;" title="Capture property at move destination">Capture</button>
+    <button type="button" class="btn" id="btnJoin" disabled style="display:none;" title="Merge into injured same-type ally on move destination">Join</button>
+  </div>
+  <p style="margin-top:8px; font-size:0.8rem; color:#8892b0;">Esc = cancel selection (no engine step). MOVE / ACTION: click outside legal highlights cancels.</p>
+  <div style="margin-top:16px; overflow:auto;">
+    <canvas id="playCanvas" width="480" height="480" style="border:1px solid #0f3460; cursor:crosshair; image-rendering:pixelated; image-rendering:crisp-edges;"></canvas>
+  </div>
+</div>
+<div id="buildModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1000; align-items:center; justify-content:center; padding:16px;">
+  <div class="card" style="max-width:420px; width:100%; border:1px solid #e94560;">
+    <div id="buildModalTitle" style="color:#e94560; font-size:0.95rem; margin-bottom:8px;">Build</div>
+    <div id="buildModalFunds" style="font-size:0.85rem; color:#a8b2d8; margin-bottom:10px;">Funds: —</div>
+    <label for="buildUnitSelect" style="display:block; font-size:0.78rem; color:#8892b0; margin-bottom:4px;">Unit</label>
+    <select id="buildUnitSelect" style="width:100%; max-width:100%; padding:8px; margin-bottom:12px; background:#16213e; color:#eaeaea; border:1px solid #0f3460; border-radius:4px; font-size:0.9rem;">
+      <option value="" disabled selected>Choose a unit…</option>
+    </select>
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+      <button type="button" class="btn" id="buildModalBuild" disabled>Build</button>
+      <button type="button" class="btn" id="buildModalCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='board.js') }}"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (typeof preloadAWBWBoardTextures === 'function') preloadAWBWBoardTextures();
+  });
+</script>
+<script src="{{ url_for('static', filename='play.js') }}"></script>
+{% endblock %}

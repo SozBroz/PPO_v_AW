@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1635863 turn-0 snapshot",
+  "units": [
+    {
+      "row": 18,
+      "col": 1,
+      "player": 0,
+      "unit_type": "ANTI_AIR"
+    },
+    {
+      "row": 2,
+      "col": 2,
+      "player": 0,
+      "unit_type": "MISSILES",
+      "hp": 10
+    },
+    {
+      "row": 6,
+      "col": 4,
+      "player": 1,
+      "unit_type": "BLACK_BOAT"
+    },
+    {
+      "row": 18,
+      "col": 6,
+      "player": 1,
+      "unit_type": "LANDER"
+    },
+    {
+      "row": 17,
+      "col": 8,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 0,
+      "col": 14,
+      "player": 0,
+      "unit_type": "LANDER"
+    },
+    {
+      "row": 12,
+      "col": 16,
+      "player": 0,
+      "unit_type": "BLACK_BOAT"
+    },
+    {
+      "row": 16,
+      "col": 18,
+      "player": 1,
+      "unit_type": "MISSILES",
+      "hp": 10
+    },
+    {
+      "row": 0,
+      "col": 19,
+      "player": 1,
+      "unit_type": "ANTI_AIR"
+    }
+  ]
+}
