@@ -30,7 +30,7 @@ todos:
   - id: replay-170901-crash-turn29
     content: "Investigate replay **170901**: desktop AWBW Replay Player **crashes** when advancing into **~turn 29** (exact turn unclear — window closes quickly). Reproduce with exported zip/trace; capture exception or native crash if possible; compare action stream vs `_rebuild_and_emit` / `full_trace` around that turn."
   - id: replay-170901-turn-open-errors
-    content: "Same replay **170901**: on open, viewer reports **errors loading several turns** (partial playback). Diff `a<game_id>` envelopes for failing days; verify PHP snapshot lines and JSON action payloads; fix exporter or trace so rebuild matches viewer (do **not** modify `third_party/AWBW-Replay-Player` unless user explicitly allows)."
+    content: "Same replay **170901**: on open, viewer reports **errors loading several turns** (partial playback). Diff `a<game_id>` envelopes for failing days; verify PHP snapshot lines and JSON action payloads; fix exporter or trace so rebuild matches upstream AWBW Replay Player format (reference parsers on GitHub — we do not vendor the C# viewer)."
 ---
 
 # AWBW engine parity — Black Boat and Pipe seams
@@ -108,7 +108,7 @@ Symptoms reported:
 1. **Crash near turn ~29** — Advancing the replay toward **turn 29** (approximate; hard to pin down) causes the viewer to **close immediately** / crash.
 2. **Turn load errors on open** — Opening the replay shows **issues opening a few turns** (error state for those turns).
 
-**Constraints:** Treat as **export / trace / action-stream** correctness unless proven viewer-only. Do **not** edit [`third_party/AWBW-Replay-Player`](c:\Users\phili\AWBW\third_party\AWBW-Replay-Player) unless the imperator explicitly approves (per repo convention).
+**Constraints:** Treat as **export / trace / action-stream** correctness unless proven viewer-only. Cross-check upstream AWBW Replay Player sources on GitHub; we do not keep a vendored C# tree in-repo.
 
 **Suggested workflow:** Locate `170901` artifact under [`replays/`](c:\Users\phili\AWBW\replays) or regenerate from trace; use [`tools/export_awbw_replay_actions.py`](c:\Users\phili\AWBW\tools\export_awbw_replay_actions.py) rebuild path and [`tools/compare_awbw_replays.py`](c:\Users\phili\AWBW\tools\compare_awbw_replays.py) / [`deep_diff_replays.py`](c:\Users\phili\AWBW\tools\deep_diff_replays.py) if a reference zip exists; bisect which turn’s envelope first fails deserialization or state rebuild.
 

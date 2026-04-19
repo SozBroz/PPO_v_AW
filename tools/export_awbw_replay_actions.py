@@ -253,7 +253,7 @@ def _fire_action_json(
     """Build the full ``Fire`` envelope the viewer expects for an ATTACK.
 
     Shape matches ``AttackUnitActionBuilder.ParseJObjectIntoReplayAction`` in
-    ``third_party/AWBW-Replay-Player``:
+    upstream ``AWBWApp.Game/.../AttackUnitActionBuilder.cs`` (DeamonHunter/AWBW-Replay-Player on GitHub):
 
     - ``Move`` sub-tree: nested ``Move`` action (attacker walking to firing
       tile, carrying *pre-combat* HP/ammo). Pass in pre-built ``move_sub``.
@@ -326,7 +326,7 @@ def _repair_action_json(
     """Build the ``Repair`` envelope for a Black Boat REPAIR action.
 
     Shape matches ``RepairUnitActionBuilder.ParseJObjectIntoReplayAction`` in
-    ``third_party/AWBW-Replay-Player/Actions/RepairUnitAction.cs``:
+    upstream ``Actions/RepairUnitAction.cs`` (DeamonHunter/AWBW-Replay-Player):
 
     - ``Move`` sub-tree: the boat's walk to its firing tile (carries
       pre-repair HP/fuel/ammo for the boat).
@@ -364,7 +364,7 @@ def _attack_seam_action_json(
     """Build the ``AttackSeam`` envelope for a seam attack.
 
     Shape matches ``AttackSeamActionBuilder.ParseJObjectIntoReplayAction`` in
-    ``third_party/AWBW-Replay-Player/Actions/AttackPipeUnitAction.cs``:
+    upstream ``Actions/AttackPipeUnitAction.cs`` (DeamonHunter/AWBW-Replay-Player):
 
     - ``Move`` sub-tree: attacker walking to the firing tile.
     - ``AttackSeam.buildings_terrain_id``: post-attack terrain (intact id

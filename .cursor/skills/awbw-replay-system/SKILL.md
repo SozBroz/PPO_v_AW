@@ -1,13 +1,13 @@
 ---
 name: awbw-replay-system
-description: Describes how AWBW replay is split between the in-repo web viewer (game_log.jsonl), the AWBW Replay Player zip pipeline (Python exporters vs third-party C# viewer source), and using WORKING_REPLAY.zip as a ground-truth fixture. Stresses that the desktop replay viewer is not modified — generated zips must match the existing viewer. Use when discussing replays, replay viewers, viewer compatibility, export_awbw_replay, export_awbw_replay_actions, game_log.jsonl, replay.js, WORKING_REPLAY, AWBW-Replay-Player, diffing or validating zip output.
+description: Describes how AWBW replay is split between the in-repo web viewer (game_log.jsonl + /replay/), the zip export pipeline (tools/export_awbw_replay*) compatible with upstream AWBW Replay Player format, and WORKING_REPLAY.zip as a ground-truth fixture. Upstream C# viewer is referenced on GitHub only — not vendored in this repo. Use when discussing replays, replay viewers, viewer compatibility, export_awbw_replay, export_awbw_replay_actions, game_log.jsonl, replay.js, WORKING_REPLAY, diffing or validating zip output.
 ---
 
 # AWBW Replay System — Architecture
 
-Replay work spans **two independent surfaces** in this repo plus **vendor viewer implementation**. Do not conflate them.
+Replay work spans **two independent surfaces** in this repo, plus the **upstream** AWBW Replay Player format on GitHub. Do not conflate them.
 
-## 1. In-repo web replay (training / debugging)
+## 1. In-repo web replay (training / debugging) — primary UI
 
 **Purpose:** Step through games produced by the RL stack without leaving the browser.
 
@@ -18,16 +18,15 @@ Replay work spans **two independent surfaces** in this repo plus **vendor viewer
 
 This path is **JSON**, not the AWBW Replay Player `.zip` format.
 
-## 2. AWBW Replay Player (.zip) — external desktop viewer
+## 2. AWBW-compatible `.zip` — exporters + upstream format (no vendored viewer)
 
-**Purpose:** Play replays in the same ecosystem as live AWBW (PHP-serialized `awbwGame` snapshots, optional per-action JSON stream).
+**Purpose:** Emit replays that external tooling (same ecosystem as live AWBW: PHP-serialized `awbwGame` snapshots, optional per-action `p:` stream) can consume.
 
-**Constraint (non-negotiable):** We **do not** fork or change the AWBW Replay Player application itself. The vendor tree under `third_party/AWBW-Replay-Player/` is **read-only reference** for understanding parsers and the on-disk format. All fixes land in **our** pipeline — engine, trace, and `tools/export_awbw_replay*.py` — so output zips **conform to the existing shipped viewer**. Treat parser behavior as law; align exports with it and with **`WORKING_REPLAY.zip`**.
+**We do not ship or maintain the C# AWBW Replay Player.** Parser and type reference code live on GitHub ([DeamonHunter/AWBW-Replay-Player](https://github.com/DeamonHunter/AWBW-Replay-Player)). Align our zip output with that format and with **`WORKING_REPLAY.zip`**. All fixes land in **our** pipeline — engine, trace, and `tools/export_awbw_replay*.py`.
 
-- **Vendor source (we have it):** `third_party/AWBW-Replay-Player/` — C# codebase. Authoritative parse/render types include `AWBWApp.Game/API/Replay/ReplayData.cs`, `AWBWJsonReplayParser.cs`, `AWBWXmlReplayParser.cs`, `ReplayController.cs`. Read these when inferring required fields or parser behavior.
-- **Our generators (contrast with “having the viewer”):** Python tools under `tools/` build zips from `GameState` / `full_trace`:
-  - `tools/export_awbw_replay.py` — writes the gzip-compressed snapshot stream (`<game_id>` entry: lines starting with `O:8:"awbwGame":`). Older/minimal path omitted the action stream; viewer still loads turn snapshots.
-  - `tools/export_awbw_replay_actions.py` — builds the `a<game_id>` entry with the `p:` action envelopes for animation; documents limitations (e.g. which action types are fully emitted vs snapshot-sync only).
+- **Our generators:** Python tools under `tools/` build zips from `GameState` / `full_trace`:
+  - `tools/export_awbw_replay.py` — gzip-compressed snapshot stream (`<game_id>` entry: lines starting with `O:8:"awbwGame":`).
+  - `tools/export_awbw_replay_actions.py` — `a<game_id>` entry with `p:` action envelopes; documents limitations (e.g. which action types are fully emitted vs snapshot-sync only).
 - **Diagnostics:** `tools/diff_replay_zips.py`, `tools/compare_awbw_replays.py`, `tools/deep_diff_replays.py`, `tools/inspect_replay.py`, `tools/validate_new_replay.py` — use when reconciling bytes, positions, or PHP layout.
 
 Ground-truth zip semantics, serialization details, and engine invariants live in the sibling skill **[awbw-engine](../awbw-engine/SKILL.md)** (and `reference.md` there for line-by-line layout).
@@ -37,14 +36,14 @@ Ground-truth zip semantics, serialization details, and engine invariants live in
 **Role:** A **known-good** AWBW Replay Player zip (filename **`WORKING_REPLAY.zip`**) to **contrast** against output from **our** replay generator (`export_awbw_replay*.py`). Use it when:
 
 - Diffing structure, gzip members, or first-line PHP shapes.
-- Proving whether a bug is in exporter logic vs viewer expectations.
+- Proving whether a bug is in exporter logic vs upstream expectations.
 - Regression-testing after exporter or engine changes.
 
-If the file is not in the working tree, obtain or place it where your tooling expects (commonly repo root or `replays/`). Prefer the **same viewer build** you use for manual playback when judging correctness.
+If the file is not in the working tree, obtain or place it where your tooling expects (commonly repo root or `replays/`).
 
 ## Agent checklist
 
-1. Identify which surface you are changing: **JSONL web replay** vs **zip for AWBW Replay Player**.
-2. For the desktop viewer: assume the **viewer is fixed** — adjust exporters/engine output until the zip matches what the player accepts; do not plan C# patches unless the user explicitly overrides this.
-3. For zip/export issues, read vendor parsers under `third_party/AWBW-Replay-Player/` and cross-check with **`WORKING_REPLAY.zip`** before blaming the engine alone.
+1. Identify which surface you are changing: **JSONL web replay** vs **zip export**.
+2. For zip compatibility: treat the **upstream GitHub** C# sources as the format reference; adjust our exporters/engine output — do not add a forked viewer to this repo unless the user explicitly demands it.
+3. For zip/export issues, read the relevant parsers on GitHub and cross-check with **`WORKING_REPLAY.zip`** before blaming the engine alone.
 4. For engine/action/trace invariants, follow **[awbw-engine](../awbw-engine/SKILL.md)** — this skill does not duplicate those rules.

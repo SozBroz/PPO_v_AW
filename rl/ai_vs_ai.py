@@ -8,7 +8,7 @@ Usage
   python -m rl.ai_vs_ai --ckpt checkpoints/latest.zip
   python -m rl.ai_vs_ai --co0 1 --co1 7        # CO IDs
   python -m rl.ai_vs_ai --random                # force random vs random
-  python -m rl.ai_vs_ai --no-open               # don't launch replay viewer
+  python -m rl.ai_vs_ai --no-open               # don't open replay output folder
 
 Decision rule
 -------------
@@ -26,7 +26,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -50,45 +49,8 @@ _CKPT_DEFAULT  = _REPO / "checkpoints" / "latest.zip"
 _REPLAY_OUT    = _REPO / "replays"
 
 # ---------------------------------------------------------------------------
-# AWBW Replay Player installation helpers (Windows)
+# Replay export UX: reveal output folder; JSONL games use in-repo /replay/
 # ---------------------------------------------------------------------------
-
-# Local dev build (CLI opens replay zip automatically) — prefer over packaged installs
-_DEV_DESKTOP = _REPO / "AWBW-Replay-Player" / "AWBWApp.Desktop" / "bin"
-_DEV_BUILD_EXE = [
-    _DEV_DESKTOP / "Release" / "net6.0" / "AWBW Replay Player.exe",
-    _DEV_DESKTOP / "Debug" / "net6.0" / "AWBW Replay Player.exe",
-]
-# Clowd.Squirrel default install path on Windows
-_SQUIRREL_INSTALL = Path(os.environ.get("LOCALAPPDATA", "")) / "AWBWReplayPlayer"
-# Portable extraction from nupkg (local to the repo)
-_PORTABLE_EXE = _REPO / "tools" / "awbw-player" / "lib" / "native" / "AWBW Replay Player.exe"
-_APP_EXE_CANDIDATES = [
-    *_DEV_BUILD_EXE,
-    _PORTABLE_EXE,
-    _SQUIRREL_INSTALL / "current" / "AWBWApp.Desktop.exe",
-    _SQUIRREL_INSTALL / "AWBWApp.Desktop.exe",
-    Path(os.environ.get("APPDATA", "")) / "AWBWApp" / "AWBWApp.Desktop.exe",
-]
-
-_INSTALLER_URL = (
-    "https://github.com/DeamonHunter/AWBW-Replay-Player/releases/download"
-    "/v0.13.1/AWBWReplayPlayerInstaller.exe"
-)
-
-# osu-framework storage root on Windows: %APPDATA%\AWBWApp or %APPDATA%\AWBW Replay Player
-_APPDATA_ROOT  = Path(os.environ.get("APPDATA", "")) / "AWBWApp"
-_APPDATA_ROOT2 = Path(os.environ.get("APPDATA", "")) / "AWBW Replay Player"
-# Portable: data sibling to the nupkg exe
-_PORTABLE_DATA = _REPO / "tools" / "awbw-player" / "lib" / "native"
-
-_REPLAY_DIR_CANDIDATES = [
-    _APPDATA_ROOT  / "ReplayData" / "Replays",
-    _APPDATA_ROOT2 / "ReplayData" / "Replays",
-    _PORTABLE_DATA / "ReplayData" / "Replays",
-]
-# Primary = first AppData candidate (create if needed)
-_REPLAY_DIR = _REPLAY_DIR_CANDIDATES[0]
 
 # Progress: log every N actions during play (verbose but bounded).
 _ACTION_PROGRESS_INTERVAL = 500
@@ -117,81 +79,23 @@ def _log(msg: str) -> None:
     print(f"[ai_vs_ai] {ts} | {msg}", flush=True)
 
 
-def _find_exe() -> Optional[Path]:
-    for p in _APP_EXE_CANDIDATES:
-        if p.exists():
-            return p
-    return None
-
-
-def _install_replay_player() -> Optional[Path]:
-    """Download and run the AWBW Replay Player installer. Returns exe path if successful."""
-    installer = _REPO / "tools" / "AWBWReplayPlayerInstaller.exe"
-    if not installer.exists():
-        _log(f"installer: downloading AWBW Replay Player -> {installer}")
-        try:
-            urllib.request.urlretrieve(_INSTALLER_URL, str(installer))
-            _log(f"installer: downloaded to {installer}")
-        except Exception as e:
-            _log(f"installer: download failed: {e}")
-            return None
-
-    _log("installer: running (a window may open)")
+def _open_replay_output_folder(replay_zip: Path) -> None:
+    """Open the folder holding the exported zip/trace; hint at in-repo web replay."""
+    folder = replay_zip.resolve().parent
+    _log(f"viewer: outputs in {folder}")
+    _log(
+        "viewer: training games logged to data/game_log.jsonl — run `python -m server.app` "
+        "and open http://127.0.0.1:5000/replay/"
+    )
     try:
-        subprocess.run([str(installer)], check=False)
-    except Exception as e:
-        _log(f"installer: error: {e}")
-        return None
-
-    # Give Squirrel a moment to finish
-    time.sleep(5)
-    return _find_exe()
-
-
-def _ensure_player_installed() -> Optional[Path]:
-    exe = _find_exe()
-    if exe:
-        return exe
-    _log("viewer: AWBW Replay Player not found — attempting install")
-    return _install_replay_player()
-
-
-def open_in_replay_player(replay_zip: Path, game_id: int) -> None:
-    """Copy replay into the app data dir and launch the viewer."""
-    import shutil
-
-    exe = _ensure_player_installed()
-
-    # Copy to every known candidate replay dir (we don't know which one the app uses
-    # until it runs at least once and creates its own dir structure)
-    dest_path: Optional[Path] = None
-    for candidate in _REPLAY_DIR_CANDIDATES:
-        candidate.mkdir(parents=True, exist_ok=True)
-        dest = candidate / f"{game_id}.zip"
-        try:
-            shutil.copy2(str(replay_zip), str(dest))
-            dest_path = dest
-            _log(f"viewer: replay placed -> {dest}")
-        except Exception as e:
-            _log(f"viewer: could not copy to {dest}: {e}")
-
-    if exe is None:
-        _log(
-            "viewer: executable not found — install from "
-            f"{_INSTALLER_URL}  then drag-drop the zip onto the app"
-        )
-        return
-
-    _log(f"viewer: launching {exe}")
-    try:
-        # Pass the replay path as a CLI arg; osu!framework picks it up via PresentFile
-        subprocess.Popen([str(exe), str(replay_zip)])
-        _log(
-            "viewer: process started with replay path "
-            f"(if it does not open, drag-drop {replay_zip} onto the window)"
-        )
-    except Exception as e:
-        _log(f"viewer: launch failed: {e} — open manually and drag-drop {replay_zip}")
+        if sys.platform == "win32":
+            os.startfile(str(folder))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(folder)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(folder)], check=False)
+    except Exception as exc:
+        _log(f"viewer: could not open folder in file manager: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -559,8 +463,8 @@ def run_game(
 
     # ---- Open viewer ----
     if open_viewer:
-        _log(f"viewer: opening (game_id={gid})")
-        open_in_replay_player(out_path, gid)
+        _log(f"viewer: reveal folder (game_id={gid})")
+        _open_replay_output_folder(out_path)
     else:
         _log("viewer: skipped (--no-open)")
 
@@ -790,7 +694,10 @@ def _save_trace(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run one AI vs AI game and export an AWBW Replay Player–compatible replay."
+        description=(
+            "Run one AI vs AI game and export a replay zip + trace "
+            "(AWBW-compatible zip format for external tooling)."
+        )
     )
     parser.add_argument("--map-id",   type=int,  default=None,
                         help="AWBW map ID to play on (default: random from pool)")
@@ -804,7 +711,7 @@ def main() -> None:
     parser.add_argument("--random",   action="store_true",
                         help="Force random-vs-random (ignore checkpoint)")
     parser.add_argument("--no-open",  action="store_true",
-                        help="Do not launch the replay viewer after the game")
+                        help="Do not open the replay output folder after export")
     parser.add_argument("--out-dir",  type=Path, default=None,
                         help=f"Directory for output files (default: {_REPLAY_OUT})")
     parser.add_argument("--game-id",  type=int,  default=None,

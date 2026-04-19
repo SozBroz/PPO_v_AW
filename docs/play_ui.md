@@ -202,7 +202,7 @@ Options: `--head-only`, `--include-move` (usually a bad idea). **Copy** `checkpo
 
 1. Run `scripts/eval_imitation.py` for a quick win/loss count vs **random** or **checkpoint** pool.
 2. For full metrics, resume short self-play with `python train.py ... --curriculum-tag post_imitation` and compare `data/game_log.jsonl` + TensorBoard to `MASTERPLAN.md` gates.
-3. Qualitative: export a replay (`tools/export_awbw_replay*.py`) and spot-check in the AWBW Replay Player per `.cursor/skills/awbw-replay-system/SKILL.md`.
+3. Qualitative: export a replay (`tools/export_awbw_replay*.py`) if you need AWBW-compatible zip semantics; day-to-day inspection uses the in-repo `/replay/` viewer (`python -m server.app`). See `.cursor/skills/awbw-replay-system/SKILL.md`.
 
 ## Assets
 

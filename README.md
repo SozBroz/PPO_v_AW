@@ -1,6 +1,6 @@
 # AWBW (PPO_v_AW)
 
-Advance Wars engine, AI training pipeline, and AWBW Replay Player export tooling.
+Advance Wars engine, AI training pipeline, in-browser replay, and zip export tooling (AWBW-compatible replays for external tools).
 
 **GitHub repository name:** `PPO_v_AW`.
 
@@ -8,20 +8,11 @@ Advance Wars engine, AI training pipeline, and AWBW Replay Player export tooling
 
 ## Reference
 
-The official AWBW Replay Player source is cloned (shallow) into
-`third_party/AWBW-Replay-Player/` for local inspection when debugging export
-compatibility. It is gitignored. Re-clone with:
+**In-repo replay:** run `python -m server.app` and open `/replay/` — games append to `data/game_log.jsonl` from training (`rl/env`). See `server/routes/replay.py`, `server/static/replay.js`.
 
-```powershell
-git clone --depth 1 https://github.com/DeamonHunter/AWBW-Replay-Player third_party/AWBW-Replay-Player
-```
+**Zip export format** (`tools/export_awbw_replay*.py`) targets the same on-disk layout as the open-source [AWBW Replay Player](https://github.com/DeamonHunter/AWBW-Replay-Player) (MIT). We do not ship that C# app; read parsers and JSON on GitHub when debugging. Optional local clone: `git clone --depth 1 … third_party/AWBW-Replay-Player` (still gitignored if present).
 
-Useful paths inside the clone:
-
-- `AWBWApp.Game/API/Replay/AWBWJsonReplayParser.cs` — PHP replay deserialization.
-- `AWBWApp.Game/Game/Logic/GameMap.cs` — canonical map + building validation.
-- `AWBWApp.Game/Game/Country/CountryStorage.cs` — country ID -> CountryData.
-- `AWBWApp.Resources/Json/Countries.json` — AWBW country IDs, codes, colors.
+**Textures:** `python tools/sync_awbw_textures.py` pulls PNGs + JSON metadata from raw GitHub (no clone required).
 
 ## Human vs bot (Play UI)
 

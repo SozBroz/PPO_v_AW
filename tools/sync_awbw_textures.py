@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Download map + unit PNGs from AWBW-Replay-Player (same art the desktop viewer uses).
+Download map + unit PNGs from upstream AWBW Replay Player texture paths on GitHub.
 
 Writes under server/static/awbw_textures/ and generates manifest.json for board.js.
-Run from repo root after cloning third_party/AWBW-Replay-Player (JSON metadata only required):
+
+Tiles.json / Units.json are loaded from ``third_party/AWBW-Replay-Player/.../Json`` when
+present; otherwise they are fetched from raw.githubusercontent.com (no local clone).
 
   python tools/sync_awbw_textures.py
 
-Source: https://github.com/DeamonHunter/AWBW-Replay-Player (MIT license in that repo).
+Upstream: https://github.com/DeamonHunter/AWBW-Replay-Player (MIT).
 """
 from __future__ import annotations
 
@@ -22,6 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 TP = ROOT / "third_party" / "AWBW-Replay-Player" / "AWBWApp.Resources" / "Json"
 OUT = ROOT / "server" / "static" / "awbw_textures"
 RAW = "https://raw.githubusercontent.com/DeamonHunter/AWBW-Replay-Player/master/AWBWApp.Resources/Textures"
+_JSON_BASE = (
+    "https://raw.githubusercontent.com/DeamonHunter/AWBW-Replay-Player/"
+    "master/AWBWApp.Resources/Json"
+)
 
 # sys.path for `import engine` when running as script
 if str(ROOT) not in sys.path:
@@ -106,6 +112,21 @@ def _aw2_building_texture_rels() -> dict[int, str]:
     return out
 
 
+def _fetch_utf8(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "AWBW-RL-texture-sync"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _load_json_text(filename: str) -> str:
+    local = TP / filename
+    if local.is_file():
+        return local.read_text(encoding="utf-8")
+    url = f"{_JSON_BASE}/{filename}"
+    print(f"Fetching {url} …", file=sys.stderr)
+    return _fetch_utf8(url)
+
+
 def _download(url: str, dest: Path) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "AWBW-RL-texture-sync"})
@@ -120,14 +141,12 @@ def _download(url: str, dest: Path) -> bool:
 
 
 def main() -> None:
-    tiles_path = TP / "Tiles.json"
-    units_path = TP / "Units.json"
-    if not tiles_path.is_file():
-        print(f"Missing {tiles_path}", file=sys.stderr)
+    try:
+        tiles = json.loads(_strip_json_comments(_load_json_text("Tiles.json")))
+        units = json.loads(_strip_json_comments(_load_json_text("Units.json")))
+    except Exception as exc:
+        print(f"Failed to load Tiles.json / Units.json: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    tiles = json.loads(_strip_json_comments(tiles_path.read_text(encoding="utf-8")))
-    units = json.loads(_strip_json_comments(units_path.read_text(encoding="utf-8")))
 
     terrain_by_id: dict[str, str] = {}
     rel_paths: list[str] = []

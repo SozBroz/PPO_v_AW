@@ -5,7 +5,7 @@
  * - Integer DISPLAY_SCALE upscaling + imageSmoothingEnabled=false = crisp pixels
  *   like NearestNeighbourTextureStore in the desktop viewer.
  * - Terrain + units: PNGs under /static/awbw_textures/ (see tools/sync_awbw_textures.py;
- *   same art tree as DeamonHunter/AWBW-Replay-Player, MIT). Until manifest/images load,
+ *   textures synced via tools/sync_awbw_textures.py from upstream Replay Player paths). Until manifest/images load,
  *   falls back to palette fills + procedural unit glyphs.
  *
  * Call renderBoard(canvas, boardData, highlightPos)
