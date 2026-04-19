@@ -5,6 +5,8 @@ __pycache__/
 *.pyo
 .env
 data/game_log.jsonl
+data/human_demos.jsonl
+data/merged_bc_misery.jsonl
 data/co_rankings.json
 data/map_features.json
 checkpoints/
