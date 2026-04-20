@@ -5,8 +5,8 @@
     "Values >100 guarantee a kill on a full-HP (10 HP) unit.",
     "Source: AWBW official damage table. Non-canonical values (Oozium, Piperunner naval) are best estimates.",
     "Modifiers from CO bonuses, terrain, and luck are applied by the engine at runtime.",
-    "2026-04: Filled Lander/Gunboat/BlackBoat for Mech/Recon/Tank/MedTank/NeoTank/MegaTank (AW2 ground-vs-transport chart). Was null, which hid legal adjacent fire in get_attack_targets and oracle Fire (no path).",
-    "2026-04: Tank vs B-Copter / T-Copter set to 55 / 85 (machine gun vs light air). Was null; GL replay 1624764 records Tank vs B-Copter adjacent direct fire (PHP snapshot + combatInfo), which get_attack_targets must allow."
+    "2026-04: Filled Lander/Gunboat/BlackBoat for Mech/Recon/Tank/MedTank/NeoTank/MegaTank (AWBW ground-vs-transport; cross-check https://awbw.fandom.com/wiki/Damage_Chart — automated fetch may hit Cloudflare). Was null, which hid legal adjacent fire in get_attack_targets and oracle Fire (no path).",
+    "2026-04: Tank vs B-Copter / T-Copter set to 55 / 85 (MG vs light air per AWBW; confirm at https://awbw.fandom.com/wiki/Damage_Chart). Was null; GL replay 1624764 records Tank vs B-Copter adjacent direct fire (PHP snapshot + combatInfo), which get_attack_targets must allow."
   ],
   "unit_order": [
     "Infantry",
