@@ -55,6 +55,11 @@ class ActionType(IntEnum):
     REPAIR  = 16
     # Merge two damaged same-type allies: mover ends on partner tile (AWBW join).
     JOIN    = 17
+    # Sub "Dive" / Stealth "Hide": toggle ``Unit.is_submerged`` after movement
+    # (https://awbw.fandom.com/wiki/Sub , https://awbw.fandom.com/wiki/Stealth).
+    DIVE_HIDE = 18
+    # Immediate forfeit (oracle / AWBW replay ``Resign``). Not exposed in RL legal actions.
+    RESIGN = 19
 
 
 # ---------------------------------------------------------------------------
@@ -69,13 +74,17 @@ class Action:
     target_pos: Optional[tuple[int, int]] = None   # attack / unload target
     unit_type:  Optional[UnitType]        = None   # for BUILD
     unload_pos: Optional[tuple[int, int]] = None   # unload destination
+    # Oracle / replay: disambiguate when multiple engine units share ``unit_pos``
+    # (AWBW drawable stack — oracle_zip_replay ``_apply_move_paths_then_terminator``).
+    select_unit_id: Optional[int] = None
 
     def __repr__(self) -> str:
         parts = [self.action_type.name]
         if self.unit_pos:  parts.append(f"from={self.unit_pos}")
         if self.move_pos:  parts.append(f"to={self.move_pos}")
         if self.target_pos: parts.append(f"tgt={self.target_pos}")
-        if self.unit_type:  parts.append(f"unit={self.unit_type.name}")
+        if self.unit_type is not None:
+            parts.append(f"unit={self.unit_type.name}")
         return f"Action({', '.join(parts)})"
 
 
@@ -84,6 +93,7 @@ class Action:
 # ---------------------------------------------------------------------------
 
 _LOADABLE_INTO: dict[UnitType, list[UnitType]] = {
+    # AWBW: APC carries foot soldiers only (Infantry + Mech), never vehicles.
     UnitType.APC: [UnitType.INFANTRY, UnitType.MECH],
     UnitType.T_COPTER: [UnitType.INFANTRY, UnitType.MECH],
     UnitType.LANDER: [
@@ -95,6 +105,11 @@ _LOADABLE_INTO: dict[UnitType, list[UnitType]] = {
     UnitType.CRUISER: [UnitType.B_COPTER, UnitType.T_COPTER],
     UnitType.BLACK_BOAT: [UnitType.INFANTRY, UnitType.MECH],
     UnitType.GUNBOAT: [UnitType.INFANTRY, UnitType.MECH],
+    # AWBW Carrier holds 2 air units of any class. https://awbw.fandom.com/wiki/Carrier
+    UnitType.CARRIER: [
+        UnitType.FIGHTER, UnitType.BOMBER, UnitType.STEALTH,
+        UnitType.B_COPTER, UnitType.T_COPTER, UnitType.BLACK_BOMB,
+    ],
 }
 
 
@@ -105,9 +120,11 @@ def get_loadable_into(transport_type: UnitType) -> list[UnitType]:
 def units_can_join(mover: Unit, occupant: Unit) -> bool:
     """True if ``mover`` may legally end on ``occupant`` to AWBW-join (merge).
 
-    Requires same owner and ``UnitType``, an **injured** partner (``hp < 100``),
-    and neither unit carrying cargo. Transport ``LOAD`` takes precedence when
-    the mover can board the occupant.
+    Requires same owner and ``UnitType``, **at least one** of the two below
+    full HP (AWBW allows joining a full-HP partner with a damaged mover and
+    vice versa — only the both-full case is forbidden), and neither unit
+    carrying cargo. Transport ``LOAD`` takes precedence when the mover can
+    board the occupant.
     """
     if mover is occupant:
         return False
@@ -115,7 +132,7 @@ def units_can_join(mover: Unit, occupant: Unit) -> bool:
         return False
     if mover.unit_type != occupant.unit_type:
         return False
-    if occupant.hp >= 100:
+    if mover.hp >= 100 and occupant.hp >= 100:
         return False
     if mover.loaded_units or occupant.loaded_units:
         return False
@@ -169,6 +186,11 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
     if co.co_id == 20 and co.scop_active:
         if stats.unit_class in ("infantry", "mech", "vehicle", "pipe"):
             move_range += 3
+
+    # Jess COP/SCOP: +2 movement for all vehicles (Turbo Charge / Overdrive).
+    if co.co_id == 14 and (co.cop_active or co.scop_active):
+        if stats.unit_class == "vehicle":
+            move_range += 2
 
     # Fuel hard-caps movement: a unit cannot spend more MP than it has fuel.
     move_range = min(move_range, unit.fuel)
@@ -243,9 +265,9 @@ def get_attack_targets(
     from engine.combat import get_base_damage, get_seam_base_damage  # local import
 
     stats = UNIT_STATS[unit.unit_type]
-    if stats.max_ammo == 0:
-        return []
-    if unit.ammo == 0 and stats.max_ammo > 0:
+    # max_ammo == 0: MG-only / transport (AWBW chart) — still attack if the
+    # damage table allows; no magazine to exhaust.
+    if stats.max_ammo > 0 and unit.ammo == 0:
         return []
 
     # Indirect units cannot move and attack in the same turn
@@ -254,13 +276,36 @@ def get_attack_targets(
 
     targets: list[tuple[int, int]] = []
     min_r, max_r = stats.min_range, stats.max_range
+    # CO powers extend **max** indirect range (AWBW: Grit COP +1 / SCOP +2; Jake
+    # COP/SCOP +1 land indirects only — not Battleship).
+    if stats.is_indirect:
+        co = state.co_states[int(unit.player)]
+        if co.co_id == 2:  # Grit — all indirects including naval
+            if co.scop_active:
+                max_r += 2
+            elif co.cop_active:
+                max_r += 1
+        elif co.co_id == 22 and (co.cop_active or co.scop_active):
+            if stats.unit_class != "naval":
+                max_r += 1
     mr, mc = move_pos
 
     for dr in range(-max_r, max_r + 1):
         for dc in range(-max_r, max_r + 1):
-            dist = abs(dr) + abs(dc)
-            if dist < min_r or dist > max_r:
-                continue
+            # Indirect: Manhattan ring (AWBW artillery / rockets). Non-indirect with
+            # range 1–1: Chebyshev 1 = eight adjacent tiles (includes diagonals).
+            if stats.is_indirect:
+                dist = abs(dr) + abs(dc)
+                if dist < min_r or dist > max_r:
+                    continue
+            elif min_r == 1 and max_r == 1:
+                cheb = max(abs(dr), abs(dc))
+                if cheb != 1:
+                    continue
+            else:
+                dist = abs(dr) + abs(dc)
+                if dist < min_r or dist > max_r:
+                    continue
             tr, tc = mr + dr, mc + dc
             if not (0 <= tr < state.map_data.height and 0 <= tc < state.map_data.width):
                 continue
@@ -268,7 +313,7 @@ def get_attack_targets(
             if enemy is not None:
                 if enemy.player == unit.player:
                     continue
-                if enemy.is_submerged and not _can_detect_submerged(unit):
+                if enemy.is_submerged and not _can_attack_submerged_or_hidden(unit, enemy):
                     continue
                 if get_base_damage(unit.unit_type, enemy.unit_type) is not None:
                     targets.append((tr, tc))
@@ -277,7 +322,9 @@ def get_attack_targets(
             # No defender: still targetable if this tile is an intact pipe seam
             # and the attacker has a seam damage entry.
             tid = state.map_data.terrain[tr][tc]
-            if tid in (113, 114):
+            # Intact seams (113/114) and broken rubble (115/116) use the same seam
+            # damage chart on AWBW; replays may show AttackSeam after rubble forms.
+            if tid in (113, 114, 115, 116):
                 seam_base = get_seam_base_damage(unit.unit_type)
                 if seam_base is not None and seam_base > 0:
                     targets.append((tr, tc))
@@ -285,10 +332,17 @@ def get_attack_targets(
     return targets
 
 
-def _can_detect_submerged(unit: Unit) -> bool:
-    """Naval units (non-sub) can spot submerged submarines."""
-    cls = UNIT_STATS[unit.unit_type].unit_class
-    return cls == "naval" and not UNIT_STATS[unit.unit_type].is_submarine
+def _can_attack_submerged_or_hidden(attacker: Unit, enemy: Unit) -> bool:
+    """Whether ``attacker`` may target ``enemy`` while ``enemy.is_submerged``.
+
+    - Hidden Stealth: only Fighter or Stealth (https://awbw.fandom.com/wiki/Stealth).
+    - Submerged Sub: Cruiser or Submarine (standard AWBW / Units chart; subs fight subs).
+    """
+    if enemy.unit_type == UnitType.STEALTH:
+        return attacker.unit_type in (UnitType.FIGHTER, UnitType.STEALTH)
+    if UNIT_STATS[enemy.unit_type].is_submarine:
+        return attacker.unit_type in (UnitType.CRUISER, UnitType.SUBMARINE)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +354,10 @@ _GROUND_UNITS: list[UnitType] = [
     UnitType.TANK, UnitType.MED_TANK, UnitType.NEO_TANK, UnitType.MEGA_TANK,
     UnitType.APC, UnitType.ARTILLERY, UnitType.ROCKET,
     UnitType.ANTI_AIR, UnitType.MISSILES,
+    # Piperunner: AWBW allows production from any owned Base unless the map
+    # bans it via ``unit_bans`` ("Piperunner"). Movement is restricted to pipe
+    # tiles by ``MOVE_PIPELINE``; build legality is independent.
+    UnitType.PIPERUNNER,
 ]
 _AIR_UNITS: list[UnitType] = [
     UnitType.FIGHTER, UnitType.BOMBER, UnitType.STEALTH,
@@ -428,7 +486,12 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
         # but fail closed if it ever is.
         return []
 
+    stats = UNIT_STATS[unit.unit_type]
     actions: list[Action] = [Action(ActionType.WAIT, unit_pos=unit.pos, move_pos=move_pos)]
+    if stats.can_dive:
+        actions.append(
+            Action(ActionType.DIVE_HIDE, unit_pos=unit.pos, move_pos=move_pos)
+        )
 
     # --- Attack ---
     for tpos in get_attack_targets(state, unit, move_pos):
@@ -442,7 +505,6 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
     # --- Capture ---
     dest_tid  = state.map_data.terrain[move_pos[0]][move_pos[1]]
     dest_info = get_terrain(dest_tid)
-    stats     = UNIT_STATS[unit.unit_type]
 
     if dest_info.is_property and stats.can_capture:
         prop = state.get_property_at(*move_pos)
@@ -473,28 +535,12 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
                     unit_type=cargo.unit_type,
                 ))
 
-    # --- Build (from an owned base/airport/port — unit must be one being built; the
-    #     BUILD action is issued by the producing unit which is the *factory itself* in
-    #     AWBW, but for simplicity here the active player issues BUILD from the factory
-    #     tile; this works when the game loop checks "is there a factory here I own?" ---
-    if dest_info.is_base or dest_info.is_airport or dest_info.is_port:
-        prop_at = state.get_property_at(*move_pos)
-        if prop_at is not None and prop_at.owner == player:
-            existing = state.get_unit_at(*move_pos)
-            # Must match ``GameState._apply_build``: spawn only on an *empty*
-            # factory tile. If ``existing`` is the acting unit, BUILD is legal in
-            # the mask but ``step`` no-ops — the policy can spin in ACTION forever.
-            if existing is None:
-                if len(state.units[player]) < state.map_data.unit_limit:
-                    for ut in get_producible_units(dest_info, state.map_data.unit_bans):
-                        cost = _build_cost(ut, state, player, move_pos)
-                        if state.funds[player] >= cost:
-                            actions.append(Action(
-                                ActionType.BUILD,
-                                unit_pos=unit.pos,
-                                move_pos=move_pos,
-                                unit_type=ut,
-                            ))
+    # --- BUILD removed from Stage-2 ACTION ---
+    # AWBW factories produce units directly from the SELECT stage (see
+    # ``_get_select_actions``); a Stage-2 BUILD piggy-backed on a moved unit
+    # would let the unit issue a build *and* remain unmoved (``_apply_build``
+    # never touches the acting unit), giving a free extra action per turn that
+    # AWBW does not allow. Engine ⊂ AWBW: removed.
 
     # --- Black Boat REPAIR (one per orthogonally adjacent ally) ---
     # AWBW "Repair" command: 1 HP / 10% target cost / resupply fuel+ammo.
@@ -508,7 +554,9 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
             if not (0 <= tr < state.map_data.height and 0 <= tc < state.map_data.width):
                 continue
             ally = state.get_unit_at(tr, tc)
-            if ally is None or ally.player != unit.player or ally is unit:
+            if ally is None or ally.player != unit.player:
+                continue
+            if int(ally.unit_id) == int(unit.unit_id):
                 continue
             if _black_boat_repair_eligible(state, ally):
                 actions.append(Action(
@@ -518,19 +566,20 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
                     target_pos=(tr, tc),
                 ))
 
-    # --- Prune WAIT for capture-capable units on neutral/enemy property ---
-    # Infantry/mech standing on a building they could act on must either attack
-    # or capture — no idling on contested ground. Missile silos (is_property
-    # False) and owned buildings are untouched; if capture is structurally
-    # impossible (e.g. no PropertyState for this tile) we leave WAIT in place
-    # so the unit is never deadlocked.
+    # --- Prune WAIT when CAPTURE is available ---
+    # If CAPTURE is a legal ACTION terminator, WAIT is not. (ATTACK-only does not
+    # remove WAIT here.) Same for fresh vs mid-capture. Missile silos
+    # (is_property False) and owned buildings are untouched; if CAPTURE is
+    # not offered we leave WAIT so the unit is never deadlocked.
     if stats.can_capture and dest_info.is_property:
         prop_here = state.get_property_at(*move_pos)
         if prop_here is not None and prop_here.owner != player:
-            has_attack = any(a.action_type == ActionType.ATTACK for a in actions)
             has_capture = any(a.action_type == ActionType.CAPTURE for a in actions)
-            if has_attack or has_capture:
-                pruned = [a for a in actions if a.action_type != ActionType.WAIT]
+            if has_capture:
+                pruned = [
+                    a for a in actions
+                    if a.action_type not in (ActionType.WAIT, ActionType.DIVE_HIDE)
+                ]
                 if pruned:
                     actions = pruned
 
@@ -554,7 +603,10 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
             pos != move_pos and _apc_tile_benefits_allies(state, unit, pos)
             for pos in reachable
         ):
-            pruned = [a for a in actions if a.action_type != ActionType.WAIT]
+            pruned = [
+                a for a in actions
+                if a.action_type not in (ActionType.WAIT, ActionType.DIVE_HIDE)
+            ]
             if pruned:
                 actions = pruned
 
@@ -584,21 +636,16 @@ def _apc_tile_benefits_allies(
 
 
 def _black_boat_repair_eligible(state: GameState, ally: Unit) -> bool:
-    """Return True if ``ally`` would benefit from a Black Boat REPAIR.
+    """Return True if ``ally`` is a valid Black Boat REPAIR target.
 
-    Eligibility mirrors the AWBW wiki: the target must be an ally below
-    max HP (so the heal applies) *or* needing fuel / ammo (so resupply
-    applies). Either branch is enough because AWBW always resupplies even
-    when the HP heal is skipped (unaffordable or full HP).
+    AWBW emits the ``Repair`` envelope for any orthogonally adjacent ally
+    even when the heal+resupply is a no-op (target at full HP / fuel /
+    ammo — common for fresh INFANTRY ferried by a Black Boat). The legal
+    action mask must therefore mirror that permissive rule; ``_apply_repair``
+    already handles the no-op cleanly (skip heal when affordable/below-max
+    fails, skip resupply when already full).
     """
-    stats = UNIT_STATS[ally.unit_type]
-    if ally.hp < 100:
-        return True
-    if ally.fuel < stats.max_fuel:
-        return True
-    if stats.max_ammo > 0 and ally.ammo < stats.max_ammo:
-        return True
-    return False
+    return ally is not None
 
 
 def _build_cost(ut: UnitType, state: GameState, player: int, pos: tuple[int, int]) -> int:

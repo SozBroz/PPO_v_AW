@@ -10,7 +10,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Optional
 
-from engine.unit import Unit, UnitType, UNIT_STATS
+from engine.unit import Unit, UnitType, UNIT_STATS, idle_start_of_day_fuel_drain
 from engine.terrain import get_terrain, property_terrain_id_after_owner_change
 from engine.co import COState, make_co_state_safe
 from engine.map_loader import MapData, PropertyState
@@ -34,8 +34,15 @@ SEAM_MAX_HP: int = 99
 MAX_TURNS = 100   # after this, winner = player with more properties; tie if equal
 
 # Dense shaping for CAPTURE (acting-player frame). Kept small vs terminal ±1.0.
-_CAPTURE_SHAPING_PROGRESS: float = 0.012  # per 20 capture_points reduced toward flip
-_CAPTURE_SHAPING_COMPLETE: float = 0.07   # bonus when ownership flips to capturer
+# Coefficients raised after the P0-skew investigation (plan p0-capture-architecture-fix):
+# the previous values were dominated by the per-step property-diff penalty in
+# rl/env.py, leaving the learner with no positive discovery signal.
+_CAPTURE_SHAPING_PROGRESS: float = 0.04  # per 20 capture_points reduced toward flip
+_CAPTURE_SHAPING_COMPLETE: float = 0.20  # bonus when ownership flips to capturer
+# One-shot bonus the first time a given unit attempts CAPTURE in an episode.
+# Rewards the *behavior* (issuing CAPTURE) so the SELECT->MOVE->CAPTURE chain
+# gets a positive credit-assignment signal even before the tile flips.
+_CAPTURE_FIRST_ATTEMPT_BONUS: float = 0.01
 
 # Sami (CO 8): AWBW footsoldier capture points per capture action by display HP.
 # https://awbw.fandom.com/wiki/Sami — COP/SCOP do not stack extra capture beyond D2D
@@ -105,6 +112,29 @@ class GameState:
     default_weather:                str = "clear"
     co_weather_segments_remaining:  int = 0
 
+    # Per-episode set of unit ids that have already attempted CAPTURE at least
+    # once. Used by `_apply_capture` to grant a one-shot first-attempt bonus
+    # (acting-player frame) so the multi-stage SELECT -> MOVE -> CAPTURE chain
+    # has a positive credit signal even when the tile does not flip on the
+    # first attempt. Not persisted across episodes; reset implicitly via
+    # `make_initial_state`.
+    capture_attempted_unit_ids: set[int] = field(default_factory=set)
+
+    # Oracle replay channel: when set to ``(dmg, counter)`` immediately before
+    # ``step(ActionType.ATTACK)``, ``_apply_attack`` consumes these instead of
+    # rolling ``calculate_damage`` / ``calculate_counterattack`` (which use a
+    # random luck roll, see ``engine/combat.py``). The oracle computes them
+    # from AWBW ``combatInfoVision.attacker.units_hit_points`` and
+    # ``defender.units_hit_points``, which are the **post-strike** display HP
+    # AWBW actually rolled. Snapping engine HP to AWBW values here removes
+    # the dominant non-determinism in audit / replay (game state diverged
+    # within ~3 turns from luck alone, cascading into the Capt / Move / Fire
+    # "no unit" drift cluster). The override is one-shot: cleared by
+    # ``_apply_attack`` after consumption so a normal RL ``step`` always rolls
+    # luck. Internal HP scale is 0–100; ``None`` slots fall back to the
+    # rolled value (e.g. seam attacks have no defender unit).
+    _oracle_combat_damage_override: Optional[tuple[Optional[int], Optional[int]]] = None
+
     def _allocate_unit_id(self) -> int:
         uid = self.next_unit_id
         self.next_unit_id += 1
@@ -120,6 +150,23 @@ class GameState:
                 if u.pos == (row, col) and u.is_alive:
                     return u
         return None
+
+    def get_unit_at_oracle_id(
+        self, row: int, col: int, select_unit_id: Optional[int]
+    ) -> Optional[Unit]:
+        """``get_unit_at`` unless ``select_unit_id`` pins a specific ``Unit.unit_id`` at tile."""
+        if select_unit_id is None:
+            return self.get_unit_at(row, col)
+        want = int(select_unit_id)
+        for player_units in self.units.values():
+            for u in player_units:
+                if (
+                    u.is_alive
+                    and u.pos == (row, col)
+                    and int(u.unit_id) == want
+                ):
+                    return u
+        return self.get_unit_at(row, col)
 
     def get_property_at(self, row: int, col: int) -> Optional[PropertyState]:
         for prop in self.properties:
@@ -169,11 +216,28 @@ class GameState:
             "move_pos":   list(action.move_pos)   if action.move_pos   is not None else None,
             "target_pos": list(action.target_pos) if action.target_pos is not None else None,
             "unit_type":  action.unit_type.name   if action.unit_type  is not None else None,
+            "select_unit_id": int(action.select_unit_id)
+            if action.select_unit_id is not None
+            else None,
         })
 
         capture_shaping = 0.0
 
-        if action.action_type == ActionType.END_TURN:
+        if action.action_type == ActionType.RESIGN:
+            # Active player forfeits; opponent wins. Used by oracle zip replay (AWBW ``Resign``).
+            if not self.done:
+                self.done = True
+                self.winner = 1 - acting_player
+                self.win_reason = "resign"
+                self.selected_unit = None
+                self.selected_move_pos = None
+                self.action_stage = ActionStage.SELECT
+                self.game_log.append({
+                    "type": "resign",
+                    "player": acting_player,
+                })
+
+        elif action.action_type == ActionType.END_TURN:
             self._end_turn()
 
         elif action.action_type == ActionType.ACTIVATE_COP:
@@ -184,7 +248,9 @@ class GameState:
 
         elif action.action_type == ActionType.SELECT_UNIT:
             if self.action_stage == ActionStage.SELECT:
-                unit = self.get_unit_at(*action.unit_pos)
+                unit = self.get_unit_at_oracle_id(
+                    *action.unit_pos, action.select_unit_id
+                )
                 self.selected_unit = unit
                 self.action_stage  = ActionStage.MOVE
             elif self.action_stage == ActionStage.MOVE:
@@ -199,6 +265,9 @@ class GameState:
 
         elif action.action_type == ActionType.WAIT:
             self._apply_wait(action)
+
+        elif action.action_type == ActionType.DIVE_HIDE:
+            self._apply_dive_hide(action)
 
         elif action.action_type == ActionType.LOAD:
             self._apply_load(action)
@@ -263,13 +332,32 @@ class GameState:
                     self.win_reason = "max_turns_draw"
                 return
 
-        # Start of opponent's turn: reset moved flags, consume fuel, crash units
+        # Start of opponent's turn: reset moved flags, consume idle fuel, crash units.
+        # https://awbw.fandom.com/wiki/Units#Fuel (Sub dive / Stealth hide, Eagle air).
+        # Naval / air units that hit 0 fuel sink/crash UNLESS they are sitting on
+        # their own port (naval) or airport (air/copter): AWBW refuels those at
+        # the start of the turn, so they survive even if last turn ended at 0
+        # fuel. Skipping that exemption made Black Boats sink mid-replay while
+        # AWBW kept them alive (see desync_audit ``move_no_unit`` cluster on
+        # game 1629104 — fuel-starved Black Boat parked on its own port).
+        opp_co_id = self.co_states[opponent].co_id
         for unit in list(self.units[opponent]):
             unit.moved = False
-            stats      = UNIT_STATS[unit.unit_type]
-            unit.fuel  = max(0, unit.fuel - stats.fuel_per_turn)
+            stats = UNIT_STATS[unit.unit_type]
+            drain = idle_start_of_day_fuel_drain(unit, opp_co_id)
+            unit.fuel = max(0, unit.fuel - drain)
             if unit.fuel == 0 and stats.unit_class in ("air", "copter", "naval"):
-                unit.hp = 0   # crash / sink
+                prop = self.get_property_at(*unit.pos)
+                refuel_exempt = (
+                    prop is not None
+                    and prop.owner == opponent
+                    and (
+                        (stats.unit_class == "naval" and prop.is_port)
+                        or (stats.unit_class in ("air", "copter") and prop.is_airport)
+                    )
+                )
+                if not refuel_exempt:
+                    unit.hp = 0   # crash / sink
 
         # Remove units that crashed on fuel starvation
         self.units[opponent] = [u for u in self.units[opponent] if u.is_alive]
@@ -288,7 +376,22 @@ class GameState:
         """
         Apply per-turn income to ``player``'s treasury using AWBW rules:
         1000g per owned income-property (HQ/base/city/airport/port), excluding
-        comm towers and labs. Colin's DTD adds +100g per income-property.
+        comm towers and labs.
+
+        CO modifiers applied here:
+          * **Colin** (co_id 15) "Gold Rush" DTD — +100g per income-property.
+          * **Sasha** (co_id 19) "Market Crash" DTD — +100g per income-property
+            (mirrors Colin's per-property bonus; AWBW Sasha also gains funds on
+            damage dealt, handled in combat — not here). Without this, mid- and
+            late-game Sasha games consistently drift the engine treasury below
+            AWBW's by ~100g × props × turn, surfacing as ``Build no-op
+            (insufficient funds)`` at every Tank build (game ``1623012`` was
+            the first traced case; the Sasha bucket dominates this cluster).
+
+        SCOP / COP income multipliers (Colin's "Power of Money" funds ×1.5 of
+        base income, Sasha's "Market Crash" funds drain on opponent) are
+        modeled in ``_apply_power_effects`` / ``_apply_attack`` rather than
+        here so the per-turn baseline stays clean.
         """
         n = self.count_income_properties(player)
         income = n * 1000
@@ -296,7 +399,8 @@ class GameState:
         co = self.co_states[player]
         if co.co_id == 15:  # Colin: base +100 per prop (DTD), COP: ×1.5 of base income
             income += n * 100
-        # Sasha COP: steal power charge from enemy, not income-based — handled in power effects
+        elif co.co_id == 19:  # Sasha: +100g per income-property DTD (War Bonds)
+            income += n * 100
 
         self.funds[player] = min(self.funds[player] + income, 999_999)
 
@@ -342,7 +446,14 @@ class GameState:
             self.co_weather_segments_remaining = 2
 
     def _apply_power_effects(self, player: int, cop: bool):
-        """Apply immediate on-activation effects for special COs."""
+        """Apply immediate on-activation effects for special COs.
+
+        **Flat HP loss** (Drake, Olaf SCOP, Hawke, Von Bolt): AWBW uses integer
+        "display HP" steps on the usual 10× internal scale (1 HP = 10 points).
+        These are *not* run through the combat damage formula (no luck, no
+        ceil-to-0.05-then-floor). Units cannot be destroyed: remaining HP is
+        floored at **1 internal**, matching wiki wording (~0.1 display HP minimum).
+        """
         co       = self.co_states[player]
         opponent = 1 - player
 
@@ -352,10 +463,14 @@ class GameState:
             for u in self.units[player]:
                 u.hp = min(100, u.hp + heal)
 
-        # Hawke: heal own 1HP, damage enemy 1HP (COP & SCOP same immediate effect)
+        # Hawke: Black Wave (COP) 1 enemy HP / Black Storm (SCOP) 2 enemy HP;
+        # both heal own units +2 HP (co_data.json / AWBW wiki).
         elif co.co_id == 12:
-            for u in self.units[player]:   u.hp = min(100, u.hp + 20)
-            for u in self.units[opponent]: u.hp = max(1,   u.hp - 20)
+            enemy_loss = 10 if cop else 20
+            for u in self.units[player]:
+                u.hp = min(100, u.hp + 20)
+            for u in self.units[opponent]:
+                u.hp = max(1, u.hp - enemy_loss)
 
         # Sensei COP: spawn Mech on every owned base without a unit
         elif co.co_id == 13 and cop:
@@ -397,7 +512,8 @@ class GameState:
                 0, self.co_states[opponent].power_bar - (self.count_properties(player) * 9000)
             )
 
-        # Sturm SCOP: 3HP damage to all enemies
+        # Von Bolt SCOP (Ex Machina): simplified global 3 HP to all enemies
+        # (live AWBW is an AOE strike; stun not modeled here).
         elif co.co_id == 30 and not cop:
             for u in self.units[opponent]:
                 u.hp = max(1, u.hp - 30)
@@ -432,12 +548,23 @@ class GameState:
         att_co      = self.co_states[attacker.player]
         def_co      = self.co_states[defender.player]
 
+        # Oracle-supplied AWBW ground truth bypasses the random luck roll in
+        # ``calculate_damage`` / ``calculate_counterattack``. See the
+        # ``_oracle_combat_damage_override`` docstring on ``GameState``.
+        override = self._oracle_combat_damage_override
+        self._oracle_combat_damage_override = None
+        override_dmg = override[0] if override is not None else None
+        override_counter = override[1] if override is not None else None
+
         # Primary attack
-        dmg = calculate_damage(
-            attacker, defender,
-            att_terrain, def_terrain,
-            att_co, def_co,
-        )
+        if override_dmg is not None:
+            dmg = max(0, int(override_dmg))
+        else:
+            dmg = calculate_damage(
+                attacker, defender,
+                att_terrain, def_terrain,
+                att_co, def_co,
+            )
         if dmg is not None:
             defender.hp = max(0, defender.hp - dmg)
             self.losses_hp[defender.player] += dmg  # Track HP lost
@@ -450,12 +577,15 @@ class GameState:
         # Counterattack (only if defender survived and attacker is direct)
         att_stats = UNIT_STATS[attacker.unit_type]
         if defender.is_alive and not att_stats.is_indirect:
-            counter = calculate_counterattack(
-                attacker, defender,
-                att_terrain, def_terrain,
-                att_co, def_co,
-                attack_damage=dmg,
-            )
+            if override_counter is not None:
+                counter = max(0, int(override_counter))
+            else:
+                counter = calculate_counterattack(
+                    attacker, defender,
+                    att_terrain, def_terrain,
+                    att_co, def_co,
+                    attack_damage=dmg,
+                )
             if counter is not None and counter > 0:
                 attacker.hp = max(0, attacker.hp - counter)
                 self.losses_hp[attacker.player] += counter  # Track counterattack HP lost
@@ -480,6 +610,21 @@ class GameState:
                             self.losses_units[cargo.player] += 1
                             cargo.hp = 0
                     u.loaded_units = []
+
+        # AWBW capture-progress reset on death: when the unit holding mid-capture
+        # is killed (attacker counter-killed on the tile it just stepped onto, or
+        # defender killed while capturing its own property), the partial capture
+        # resets to 20. ``_move_unit`` already covers tile-vacated cases.
+        if not attacker.is_alive:
+            apos = attacker.pos
+            apr  = self.get_property_at(*apos)
+            if apr is not None and apr.capture_points < 20:
+                apr.capture_points = 20
+        if defender is not None and not defender.is_alive:
+            dpos = defender.pos
+            dpr  = self.get_property_at(*dpos)
+            if dpr is not None and dpr.capture_points < 20:
+                dpr.capture_points = 20
 
         # Prune dead units
         for p in (0, 1):
@@ -553,6 +698,13 @@ class GameState:
             prop.capture_points = max(0, prop.capture_points - capture_amount)
 
         shaping = 0.0
+        # First-attempt bonus: rewards the *behavior* of issuing CAPTURE once
+        # per (unit, episode) — survives credit-assignment across the 3-stage
+        # action chain even when the property does not flip on this attempt.
+        uid = int(getattr(unit, "unit_id", 0) or 0)
+        if uid > 0 and uid not in self.capture_attempted_unit_ids:
+            self.capture_attempted_unit_ids.add(uid)
+            shaping += _CAPTURE_FIRST_ATTEMPT_BONUS
         if contest:
             reduced = float(old_cp - max(prop.capture_points, 0))
             shaping += _CAPTURE_SHAPING_PROGRESS * (reduced / 20.0)
@@ -621,21 +773,10 @@ class GameState:
                 f"same-type ally at {action.move_pos}; use JOIN to merge."
             )
 
-        # Mirror the legal-action mask: capture-capable units on a neutral or
-        # enemy property with an available ATTACK or CAPTURE cannot idle.
-        stats = UNIT_STATS[unit.unit_type]
-        if stats.can_capture:
-            dest_info = get_terrain(self.map_data.terrain[action.move_pos[0]][action.move_pos[1]])
-            if dest_info.is_property:
-                prop_here = self.get_property_at(*action.move_pos)
-                if prop_here is not None and prop_here.owner != unit.player:
-                    can_attack = bool(get_attack_targets(self, unit, action.move_pos))
-                    can_capture = True  # owner != player and unit can_capture
-                    if can_attack or can_capture:
-                        raise ValueError(
-                            f"Illegal WAIT: {unit.unit_type.name} at {action.move_pos} "
-                            f"on neutral/enemy property must CAPTURE or ATTACK."
-                        )
+        # AWBW allows WAIT on a capturable enemy property (the player can
+        # decline to capture). Engine ⊂ AWBW: do *not* raise here. The
+        # ``get_legal_actions`` mask still hides WAIT in this case for RL
+        # shaping; ``step`` accepts hand-built / oracle-replay WAITs.
 
         self._move_unit(unit, action.move_pos)
 
@@ -653,6 +794,55 @@ class GameState:
             "player": unit.player,
             "from":   action.unit_pos,
             "to":     list(action.move_pos),
+        })
+
+    def _apply_dive_hide(self, action: Action):
+        """Toggle Sub dive / Stealth hide after moving (AWBW Fandom Sub + Stealth pages)."""
+        unit = self.get_unit_at(*action.unit_pos)
+        if unit is None:
+            return
+        if not UNIT_STATS[unit.unit_type].can_dive:
+            return
+
+        occupant = self.get_unit_at(*action.move_pos)
+        if (
+            occupant is not None
+            and occupant is not unit
+            and occupant.player == unit.player
+            and UNIT_STATS[occupant.unit_type].carry_capacity > 0
+            and unit.unit_type in get_loadable_into(occupant.unit_type)
+            and len(occupant.loaded_units) < UNIT_STATS[occupant.unit_type].carry_capacity
+        ):
+            raise ValueError(
+                f"Illegal DIVE_HIDE: {unit.unit_type.name} cannot stop on friendly "
+                f"transport {occupant.unit_type.name} at {action.move_pos}; use LOAD."
+            )
+
+        if (
+            occupant is not None
+            and occupant is not unit
+            and occupant.player == unit.player
+            and units_can_join(unit, occupant)
+        ):
+            raise ValueError(
+                f"Illegal DIVE_HIDE: {unit.unit_type.name} cannot idle on injured "
+                f"same-type ally at {action.move_pos}; use JOIN."
+            )
+
+        # Sub/Stealth cannot capture, so the "CAPTURE available" raise is
+        # unreachable; preserved as a comment alongside the WAIT change so the
+        # engine ⊂ AWBW guarantee is uniform.
+
+        self._move_unit(unit, action.move_pos)
+        unit.is_submerged = not unit.is_submerged
+
+        self._finish_action(unit)
+        self.game_log.append({
+            "type":       "dive_hide",
+            "player":     unit.player,
+            "from":       action.unit_pos,
+            "to":         list(action.move_pos),
+            "submerged":  unit.is_submerged,
         })
 
     def _apc_resupply(self, apc: Unit):
@@ -710,7 +900,10 @@ class GameState:
             return
 
         target = self.get_unit_at(*action.target_pos)
-        if target is None or target is boat or target.player != boat.player:
+        if target is None or target.player != boat.player:
+            self._finish_action(boat)
+            return
+        if int(target.unit_id) == int(boat.unit_id):
             # Explicit self-repair guard (``adj is boat``) — cannot happen via
             # orthogonal adjacency in a valid state, but scripted actions can
             # still craft the case and we refuse to heal the boat itself.
@@ -783,6 +976,30 @@ class GameState:
 
         tr, tc = target_pos
         tid = self.map_data.terrain[tr][tc]
+        # Broken HPipe/VPipe rubble (115/116): AWBW replays can still list AttackSeam
+        # vs rubble many times. Consume ammo and log seam-style damage, but **do not**
+        # flip terrain to plain(1) — rubble stays 115/116 (plains-like move costs already
+        # apply). Clearing to plain desynced replays that fire again on the same cell.
+        if tid in (115, 116):
+            att_terrain = get_terrain(self.map_data.terrain[action.move_pos[0]][action.move_pos[1]])
+            att_co = self.co_states[attacker.player]
+            dmg = calculate_seam_damage(attacker, att_terrain, att_co)
+            if dmg is None:
+                dmg = 0
+            att_stats = UNIT_STATS[attacker.unit_type]
+            if att_stats.max_ammo > 0:
+                attacker.ammo = max(0, attacker.ammo - 1)
+            self._finish_action(attacker)
+            self.game_log.append({
+                "type":    "attack_seam_rubble",
+                "player":  attacker.player,
+                "from":    list(action.unit_pos) if action.unit_pos else None,
+                "to":      list(action.move_pos) if action.move_pos else None,
+                "target":  list(target_pos),
+                "dmg":     dmg,
+            })
+            return True
+
         if tid not in SEAM_TERRAIN_IDS:
             return False
 
@@ -1299,6 +1516,8 @@ def make_initial_state(
     starting_funds: int = 0,
     tier_name: str = "T2",
     default_weather: str = "clear",
+    *,
+    replay_first_mover: Optional[int] = None,
 ) -> GameState:
     # Treasuries always start at 0g in AWBW; the opening player receives income
     # at the start of their first turn via _grant_income below. ``starting_funds``
@@ -1326,17 +1545,22 @@ def make_initial_state(
             if tid in (113, 114):
                 seam_hp[(r, c)] = 99
 
-    # AWBW opening rule: on maps with asymmetric predeployment, the side that
-    # starts with units moves *second*. The player without starting units
-    # opens so they aren't one tempo behind on day 1. When both sides have
-    # units (or neither does), fall back to the P0-first default.
-    n0, n1 = len(units[0]), len(units[1])
-    if n0 == 0 and n1 > 0:
-        opening = 0
-    elif n1 == 0 and n0 > 0:
-        opening = 1
+    # AWBW opening rule (skirmish / GL default): asymmetric predeploy — the
+    # empty side opens. Tie → P0. When replaying a site zip, pass
+    # ``replay_first_mover=0|1`` so the first ``p:`` envelope matches
+    # ``active_player`` (hosted games may not follow the predeploy heuristic).
+    if replay_first_mover is not None:
+        if replay_first_mover not in (0, 1):
+            raise ValueError(f"replay_first_mover must be 0 or 1, got {replay_first_mover}")
+        opening = replay_first_mover
     else:
-        opening = 0
+        n0, n1 = len(units[0]), len(units[1])
+        if n0 == 0 and n1 > 0:
+            opening = 0
+        elif n1 == 0 and n0 > 0:
+            opening = 1
+        else:
+            opening = 0
 
     state = GameState(
         map_data=map_data,
