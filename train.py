@@ -42,15 +42,43 @@ def main() -> None:
     )
     parser.add_argument(
         "--n-envs", type=int, default=6,
-        help="Parallel game workers for rollout collection (default: 6)",
+        help=(
+            "Parallel SubprocVecEnv game workers (default: 6). "
+            "More workers raise throughput (steps/s) but cost ~2-3 GB host RAM each "
+            "and keep the step loop synchronous — every step waits for the slowest env. "
+            "Scaling tip: if GPU utilization is low and host RAM has headroom, "
+            "raising n_envs is the most effective throughput lever."
+        ),
     )
     parser.add_argument(
         "--n-steps", type=int, default=512,
-        help="PPO rollout length per env before each update (default: 512)",
+        help=(
+            "PPO rollout length per env before each update (default: 512). "
+            "Increasing gives longer on-policy trajectories (can improve credit assignment) "
+            "at the cost of more VRAM (rollout buffer grows linearly). "
+            "Scaling tip: safe to raise if n_steps * n_envs still fits in VRAM after --batch-size is tuned."
+        ),
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=256,
+        help=(
+            "PPO minibatch size (default: 256; must be <= n_steps * n_envs). "
+            "Larger batches = more stable gradient estimates; "
+            "can raise up to n_steps * n_envs for full-batch PPO "
+            "as long as it fits in VRAM. Tuning tip: this is the lowest-VRAM-cost "
+            "knob to push toward the rollout cap."
+        ),
     )
     parser.add_argument(
         "--device", type=str, default="auto",
-        help='Torch device: "cuda", "cpu", or "auto" (default: auto)',
+        help=(
+            'Torch device for the PPO learner: "cuda", "cpu", or "auto" (default: auto). '
+            "Opponent inference always runs on CPU regardless of this flag. "
+            "VRAM is consumed by the policy network + optimizer + rollout buffer "
+            "(scales with n_steps * n_envs * obs_shape). "
+            "If VRAM is tight, reduce --batch-size first (smallest impact on sample efficiency), "
+            "then --n-steps; reducing --n-envs also helps but lowers throughput."
+        ),
     )
     parser.add_argument(
         "--map-id", type=int, default=None,
@@ -169,7 +197,10 @@ def main() -> None:
     # ── Training ──────────────────────────────────────────────────────────────
     print(f"[train] Device  : {device}")
     print(f"[train] Envs    : {args.n_envs} parallel workers")
-    print(f"[train] PPO     : n_steps={args.n_steps} (rollout {args.n_steps * args.n_envs:,} env steps/update)")
+    print(
+        f"[train] PPO     : n_steps={args.n_steps} batch_size={args.batch_size} "
+        f"(rollout {args.n_steps * args.n_envs:,} env steps/update)"
+    )
     print(f"[train] Steps   : {args.iters if args.iters is not None else 'unlimited'}")
     print(f"[train] Map     : {args.map_id or 'all'}")
     if args.tier or args.co_p0 is not None or args.co_p1 is not None:
@@ -226,6 +257,7 @@ def main() -> None:
         total_timesteps=args.iters,
         n_envs=args.n_envs,
         n_steps=args.n_steps,
+        batch_size=args.batch_size,
         device=device,
         save_every=args.save_every,
         checkpoint_pool_size=args.checkpoint_pool,

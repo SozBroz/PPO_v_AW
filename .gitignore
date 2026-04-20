@@ -13,6 +13,7 @@ replays/amarriner_gl/
 *.pt
 *.pth
 logs/
+.tmp/
 .venv/
 venv/
 dist/

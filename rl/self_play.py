@@ -182,7 +182,8 @@ class _CheckpointOpponent:
 
     Lazily loads a checkpoint on first call and refreshes every
     `refresh_every` calls so the opponent pool rotates naturally as
-    new checkpoints are written by the trainer.      Falls back to :func:`pick_capture_greedy_flat` when no checkpoints exist yet
+    new checkpoints are written by the trainer.
+    Falls back to :func:`pick_capture_greedy_flat` when no checkpoints exist yet
     (instead of uniform random) so early training sees property contests.
 
     With ``pool_from_fleet``, also samples ``checkpoint_*.zip`` under
@@ -226,8 +227,18 @@ class _CheckpointOpponent:
         path = random.choice(ckpts)
         try:
             from sb3_contrib import MaskablePPO as _PPO  # type: ignore[import]
-            self._model = _PPO.load(path, device="cpu")
+            # Load with minimal buffer dims so _setup_model() allocates a tiny
+            # rollout buffer (~KB) rather than replicating the learner's full
+            # n_steps × n_envs × obs_shape tensor (~GB). Policy weights are
+            # preserved; only inference (predict) is used from this model.
+            self._model = _PPO.load(
+                path, device="cpu", verbose=0,
+                n_envs=1, n_steps=1, batch_size=1,
+            )
             self.reload_count += 1
+        except MemoryError as exc:
+            print(f"[opponent] OOM loading {path}: {exc} — using random (retry next refresh)")
+            self._model = None
         except Exception as exc:
             print(f"[opponent] Could not load {path}: {exc} — using random")
             self._model = None
@@ -371,8 +382,23 @@ class SelfPlayTrainer:
         Total env steps across all workers. ``None`` runs until KeyboardInterrupt (Ctrl+C).
     n_envs : int
         Number of parallel SubprocVecEnv workers (default 4).
+        Each worker is a separate Python process that runs env simulation and
+        opponent inference on CPU.  More workers raise throughput but cost
+        ~2-3 GB host RAM each.
+
+        Step-sync note: SubprocVecEnv is synchronous — every call to
+        ``VecEnv.step()`` waits for the slowest worker before returning.
+        Within a rollout individual episodes reset independently (no waiting
+        for every env to finish a game), but per-timestep progress is still
+        gated by the laggard.  True per-worker async rollouts would require a
+        custom ``VecEnv`` + rollout collector and are not supported here.
     device : str
-        Torch device — "cuda", "cpu", or "auto".
+        Torch device for the **learner only** — "cuda", "cpu", or "auto".
+        Opponent inference always runs on CPU with a minimal rollout buffer
+        (``n_envs=1, n_steps=1``) so it does not compete for VRAM or
+        allocate a multi-GB NumPy array.  The learner's VRAM footprint scales
+        with ``n_steps * n_envs * obs_shape``; reduce ``batch_size`` first
+        if VRAM is tight, then ``n_steps``.
     save_every : int
         Save checkpoint every N total steps.
     checkpoint_pool_size : int
@@ -385,6 +411,11 @@ class SelfPlayTrainer:
         Per-episode probability of sampling full random matchups (mixture).
     curriculum_tag
         Stored in ``game_log.jsonl`` for slicing runs.
+    batch_size : int
+        PPO minibatch size; must be ``<= n_steps * n_envs``.
+        Raising toward the rollout cap (``n_steps * n_envs``) gives more
+        stable gradient estimates with little VRAM cost beyond the rollout
+        buffer already allocated.
     opponent_mix
         When a checkpoint opponent is loaded, probability of using capture-greedy
         for that ``predict`` call instead (0 = always checkpoint when available).
@@ -408,6 +439,7 @@ class SelfPlayTrainer:
         total_timesteps: Optional[int] = None,
         n_envs: int = 4,
         n_steps: int = 512,
+        batch_size: int = 256,
         device: str = "auto",
         save_every: int = 50_000,
         checkpoint_pool_size: int = 5,
@@ -424,9 +456,15 @@ class SelfPlayTrainer:
         load_promoted: bool = False,
         bc_init: Optional[Path | str] = None,
     ) -> None:
+        roll = n_steps * n_envs
+        if batch_size > roll:
+            raise ValueError(
+                f"batch_size ({batch_size}) must be <= n_steps * n_envs ({roll})"
+            )
         self.total_timesteps = total_timesteps
         self.n_envs = n_envs
         self.n_steps = n_steps
+        self.batch_size = batch_size
         self.save_every = save_every
         self.checkpoint_pool_size = checkpoint_pool_size
         self.map_id_filter = map_id
@@ -559,22 +597,26 @@ class SelfPlayTrainer:
         print(
             f"[self_play] Starting | steps={steps_msg} | "
             f"n_envs={self.n_envs} | n_steps={self.n_steps} "
-            f"(rollout {self.n_steps * self.n_envs:,} env steps) | device={self.device} | "
+            f"(rollout {self.n_steps * self.n_envs:,} env steps) | "
+            f"batch_size={self.batch_size} | device={self.device} | "
             f"maps={len(self.map_pool)} (Std sampling: {n_std}){cur_msg}"
         )
 
-        # One shared monotonic game_id sequence for all parallel workers this run (spawn inherits env).
-        fd, session_counter_db = tempfile.mkstemp(prefix="awbw_session_games_", suffix=".sqlite")
+        # Session DB under repo `.tmp/` so scratch stays on the same drive as the checkout.
+        session_tmp = ROOT / ".tmp"
+        session_tmp.mkdir(parents=True, exist_ok=True)
+        fd, session_counter_db = tempfile.mkstemp(
+            prefix="awbw_session_games_",
+            suffix=".sqlite",
+            dir=str(session_tmp),
+        )
         os.close(fd)
         os.environ[SESSION_GAME_COUNTER_DB_ENV] = session_counter_db
         atexit.register(lambda p=session_counter_db: Path(p).unlink(missing_ok=True))
 
         vec_env = self._build_vec_env()
 
-        # ── Hyperparameters tuned for i7-13700F + RTX 4070 @ 33% budget ──────
-        # n_steps=512 per env → 512 × n_envs total steps per rollout
-        #   (reduced from 2048 to cut rollout-buffer RAM ~4×; more frequent updates)
-        # batch_size=256 keeps GPU utilisation high without excess VRAM
+        # ── PPO hyperparameters (batch_size / n_steps tunable via train.py) ───
         # ent_coef=0.05 drives aggressive early exploration (decay manually later)
         # gamma=0.99 slightly lower than 0.995 to propagate win signal faster
 
@@ -613,7 +655,10 @@ class SelfPlayTrainer:
                 self.bc_init,
                 env=vec_env,
                 device=self.device,
-                custom_objects={"n_steps": self.n_steps},
+                custom_objects={
+                    "n_steps": self.n_steps,
+                    "batch_size": self.batch_size,
+                },
             )
         else:
             model = MaskablePPO(
@@ -624,7 +669,7 @@ class SelfPlayTrainer:
                 device=self.device,
                 learning_rate=3e-4,
                 n_steps=self.n_steps,
-                batch_size=256,
+                batch_size=self.batch_size,
                 n_epochs=10,
                 gamma=0.99,
                 gae_lambda=0.95,
