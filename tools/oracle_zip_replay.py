@@ -3921,6 +3921,82 @@ def _pick_singleton_join_or_load(state: GameState, legal: list[Action]) -> Optio
     return None
 
 
+_ORACLE_MOVE_SNAP_MAX_TELEPORT: int = 10
+
+
+def _oracle_snap_mover_to_awbw_path_end(
+    state: GameState,
+    unit: Unit,
+    awbw_end: tuple[int, int],
+    *,
+    max_teleport: int = _ORACLE_MOVE_SNAP_MAX_TELEPORT,
+) -> bool:
+    """Force engine ``unit.pos`` to AWBW path end after the Move terminator commits.
+
+    The Move resolver in :func:`_apply_move_paths_then_terminator` truncates to
+    the engine's reachable cells via :func:`_nearest_reachable_along_path`; when
+    state drift makes AWBW's intended tile unreachable in the engine (blocking
+    enemy unit shifted, terrain disagreement, fuel attrition divergence, etc.),
+    the unit ends up partway. Every subsequent envelope keying off ``unit.pos``
+    then cascades — ``oracle_fire``'s ``engine_pos_mismatch_post_move`` cluster,
+    ``oracle_move_no_unit`` rows whose path-start references the AWBW tile,
+    ``oracle_capt_no_path`` on the AWBW property tile.
+
+    Mirrors the per-envelope teleport feature in ``tools/oracle_state_sync.py``,
+    applied inline so the engine state stays synchronized after every move
+    rather than at envelope boundaries (where ``replay_state_diff.py --sync`` runs).
+
+    Skipped when:
+      * unit died in the terminator (counter-attack)
+      * unit already at the AWBW path end
+      * AWBW path end occupied by a different top-level unit (would stack)
+      * Manhattan distance from current ``unit.pos`` > ``max_teleport``
+        (suspect heavy drift; refuse silently rather than mask deeper bugs)
+      * AWBW path end off-map
+
+    Returns ``True`` when a snap actually occurred.
+    """
+    import os as _os_dbg
+    _DBG = _os_dbg.environ.get("ORACLE_SNAP_DEBUG") == "1"
+    if not unit.is_alive:
+        if _DBG:
+            print(f"[SNAP_DBG] skip: unit dead uid={unit.unit_id}")
+        return False
+    er, ec = int(awbw_end[0]), int(awbw_end[1])
+    if (er, ec) == unit.pos:
+        if _DBG:
+            print(f"[SNAP_DBG] skip: already at end {(er, ec)} uid={unit.unit_id}")
+        return False
+    h, w = state.map_data.height, state.map_data.width
+    if not (0 <= er < h and 0 <= ec < w):
+        if _DBG:
+            print(f"[SNAP_DBG] skip: off-map end {(er, ec)} uid={unit.unit_id}")
+        return False
+    occ = state.get_unit_at(er, ec)
+    if occ is not None and occ is not unit:
+        if _DBG:
+            print(
+                f"[SNAP_DBG] skip: occupied at {(er, ec)} by uid={occ.unit_id} "
+                f"player={occ.player} type={occ.unit_type.name} hp={occ.hp}; "
+                f"would have moved uid={unit.unit_id} from {unit.pos} type={unit.unit_type.name}"
+            )
+        return False
+    if abs(unit.pos[0] - er) + abs(unit.pos[1] - ec) > max_teleport:
+        if _DBG:
+            print(
+                f"[SNAP_DBG] skip: distance {abs(unit.pos[0] - er) + abs(unit.pos[1] - ec)} > {max_teleport} "
+                f"uid={unit.unit_id} from {unit.pos} to {(er, ec)}"
+            )
+        return False
+    if _DBG:
+        print(
+            f"[SNAP_DBG] DO: uid={unit.unit_id} type={unit.unit_type.name} "
+            f"player={unit.player} from {unit.pos} -> {(er, ec)}"
+        )
+    state._move_unit_forced(unit, (er, ec))
+    return True
+
+
 def _apply_move_paths_then_terminator(
     state: GameState,
     move: dict[str, Any],
@@ -4164,6 +4240,16 @@ def _apply_move_paths_then_terminator(
         before_engine_step,
     )
     after_move()
+    # State-drift snap: realign the engine mover with AWBW's intended path end
+    # whenever the engine truncated short (blocking ally, mismatched terrain).
+    # See :func:`_oracle_snap_mover_to_awbw_path_end` docstring — eliminates the
+    # ``engine_pos_mismatch_post_move`` cascade where every subsequent envelope
+    # keys off ``unit.pos`` and the wrong tile poisons Fire / Move / Capt
+    # resolvers downstream. Skipped automatically when unit died, when the AWBW
+    # tile is already occupied by a different unit, or when the gap exceeds
+    # ``_ORACLE_MOVE_SNAP_MAX_TELEPORT``.
+    if u is not None:
+        _oracle_snap_mover_to_awbw_path_end(state, u, (er, ec))
     return
 
 
@@ -6050,6 +6136,26 @@ def _apply_oracle_action_json_body(
                 f"Fire for engine P{eng} but active_player={state.active_player}"
             )
         if _oracle_fire_defender_row_is_postkill_noop(state, defender):
+            # AWBW still records the attacker's post-move position even when
+            # the defender row is a post-kill duplicate. Without snapping the
+            # mover to the path end, subsequent envelopes that key off
+            # ``unit.pos`` cascade into ``oracle_fire``'s
+            # ``engine_pos_mismatch_post_move`` (GL 1635846 day 12 j=11:
+            # Md.Tank id 192665470 path (2,10) -> (1,12) on duplicate Fire,
+            # next-day envelope tries to fire from (1,12) and finds nobody).
+            uid_pk = int(gu["units_id"])
+            mover_pk = _unit_by_awbw_units_id(state, uid_pk)
+            if mover_pk is None:
+                sr_pk, sc_pk = _path_start_rc(paths)
+                cand_pk = state.get_unit_at(sr_pk, sc_pk)
+                if (
+                    cand_pk is not None
+                    and cand_pk.is_alive
+                    and int(cand_pk.player) == eng
+                ):
+                    mover_pk = cand_pk
+            if mover_pk is not None and mover_pk.is_alive:
+                _oracle_snap_mover_to_awbw_path_end(state, mover_pk, (er, ec))
             return
         dr, dc = _oracle_fire_resolve_defender_target_pos(
             state, defender, attacker_eng=eng
@@ -6205,6 +6311,16 @@ def _apply_oracle_action_json_body(
             ),
             before_engine_step,
         )
+        # State-drift snap (Fire variant): the attacker may have ``fire_pos`` truncated
+        # by ``_oracle_resolve_fire_move_pos`` when the AWBW path end is unreachable
+        # (chained drift from earlier moves blocking the engine state). Without this
+        # snap the attacker stays on the truncated tile and every subsequent envelope
+        # keying off ``unit.pos`` cascades — same ``engine_pos_mismatch_post_move``
+        # pattern handled in :func:`_apply_move_paths_then_terminator`. Skipped when
+        # the attacker died in the counter, target tile is occupied, or distance
+        # exceeds ``_ORACLE_MOVE_SNAP_MAX_TELEPORT``.
+        if u is not None:
+            _oracle_snap_mover_to_awbw_path_end(state, u, (er, ec))
         return
 
     if kind == "AttackSeam":
