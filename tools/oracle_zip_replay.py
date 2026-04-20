@@ -1766,6 +1766,84 @@ def _oracle_fire_defender_row_is_postkill_noop(
     return occ is None or not occ.is_alive
 
 
+def _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(
+    state: GameState, defender: dict[str, Any]
+) -> bool:
+    """Duplicate no-path ``Fire`` after the victim disappeared but another unit holds the tile.
+
+    JSON defender hp<=0 and ``units_id`` no longer maps to any live unit, yet the map
+    tile still has a unit (lane B GL **1631194**): resolve would target the wrong
+    defender class. Skip the envelope instead of raising ``Fire (no path)``.
+    """
+    try:
+        ry = int(defender["units_y"])
+        rx = int(defender["units_x"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    raw_hp = defender.get("units_hit_points")
+    if raw_hp is None:
+        return False
+    try:
+        hp_i = int(raw_hp)
+    except (TypeError, ValueError):
+        return False
+    if hp_i > 0:
+        return False
+    raw_id = defender.get("units_id")
+    if raw_id is None:
+        return False
+    try:
+        did = int(raw_id)
+    except (TypeError, ValueError):
+        return False
+    if _unit_by_awbw_units_id(state, did) is not None:
+        return False
+    occ = state.get_unit_at(ry, rx)
+    return occ is not None and occ.is_alive
+
+
+def _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
+    state: GameState,
+    defender: dict[str, Any],
+    sr: int,
+    sc: int,
+    dr: int,
+    dc: int,
+) -> bool:
+    """Skip stale no-path ``Fire`` when orphan defender hp is 1–2 and no damage vs air here.
+
+    AWBW logs duplicate rows after the defender id leaves the unit table; snapshot hp
+    may still read 1–2 (lane B **1631068**, **1632124**). When the resolved defender
+    tile holds copter/plane but :func:`engine.combat.get_base_damage` is ``None`` for
+    the anchor unit (infantry **or** tank vs copter — both omitted in this engine),
+    no strike exists — safe to omit. Restricting **target** to air/copter excludes
+    tank-vs-naval gaps (**1630784**) where hp is typically >2 anyway.
+    """
+    from engine.combat import get_base_damage
+
+    raw_hp = defender.get("units_hit_points")
+    raw_id = defender.get("units_id")
+    if raw_hp is None or raw_id is None:
+        return False
+    try:
+        hp_i = int(raw_hp)
+        oid = int(raw_id)
+    except (TypeError, ValueError):
+        return False
+    if hp_i not in (1, 2):
+        return False
+    if _unit_by_awbw_units_id(state, oid) is not None:
+        return False
+    ax = state.get_unit_at(int(sr), int(sc))
+    tg = state.get_unit_at(int(dr), int(dc))
+    if ax is None or tg is None or not ax.is_alive or not tg.is_alive:
+        return False
+    stg = UNIT_STATS[tg.unit_type]
+    if stg.unit_class not in ("air", "copter"):
+        return False
+    return get_base_damage(ax.unit_type, tg.unit_type) is None
+
+
 def _oracle_fire_indirect_defender_from_attack_ring(
     state: GameState,
     *,
@@ -6104,6 +6182,10 @@ def _apply_oracle_action_json_body(
             eng = int(state.active_player)
             if _oracle_fire_defender_row_is_postkill_noop(state, defender):
                 return
+            if _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(
+                state, defender
+            ):
+                return
             dr, dc = _oracle_fire_resolve_defender_target_pos(
                 state,
                 defender,
@@ -6116,6 +6198,10 @@ def _apply_oracle_action_json_body(
             # defender tile is empty). Treat as oracle-only no-op like ``Delete``.
             tgt_live = state.get_unit_at(dr, dc)
             if tgt_live is None or not tgt_live.is_alive:
+                return
+            if _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
+                state, defender, sr, sc, dr, dc
+            ):
                 return
             u = _resolve_fire_or_seam_attacker(
                 state,
