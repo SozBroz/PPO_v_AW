@@ -3765,6 +3765,72 @@ def _optional_declared_unit_type_from_move_gu(gu: dict[str, Any]) -> Optional[Un
         return None
 
 
+def _oracle_move_med_tank_label_engine_tank_drift(
+    state: GameState,
+    eng: int,
+    declared_mover_type: Optional[UnitType],
+    paths: list[Any],
+    gu: dict[str, Any],
+    path_start: tuple[int, int],
+    global_rc: tuple[int, int],
+    path_end: tuple[int, int],
+) -> Optional[Unit]:
+    """Resolve ``Move`` when AWBW names ``Md.Tank`` but the engine still holds a ``TANK``.
+
+    GL **1607045**: long combat drift left **no** ``MED_TANK`` on the board while the zip
+    still labels the mover ``Md.Tank``. The usual ``declared_mover_type`` filter then
+    skips real ``TANK`` bodies on the path, surfacing ``Move: no unit for engine …``.
+
+    When waypoint geometry (plus dense orthogonal fill) carries **no** ``MED_TANK``,
+    pick a ``TANK`` by: unique HP match to ``units_hit_points`` when possible; else
+    the sole ``TANK`` on that geometry; else, when several tanks touch the corridor,
+    the unique occupant of **path start** ``(sr, sc)``.
+    """
+    if declared_mover_type != UnitType.MED_TANK:
+        return None
+    sr, sc = path_start
+    ur, uc = global_rc
+    er, ec = path_end
+    waypoints: list[tuple[int, int]] = []
+    for wp in paths:
+        try:
+            waypoints.append((int(wp["y"]), int(wp["x"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    # Waypoints + dense orthogonal span only (omit collinear bridge fills used
+    # elsewhere): GL 1607045 later ``Md.Tank`` moves share PHP id with a ``TANK``
+    # body, and bridge cells can pick up unrelated tanks on parallel rows.
+    geo: set[tuple[int, int]] = set(waypoints)
+    geo.update(_dense_path_cells_orthogonal(paths))
+    med_on_geo = [
+        x
+        for x in state.units[eng]
+        if x.is_alive and x.unit_type == UnitType.MED_TANK and x.pos in geo
+    ]
+    if med_on_geo:
+        return None
+    want_hp = _oracle_awbw_scalar_int_optional(gu.get("units_hit_points"))
+    tanks_any = [
+        x
+        for x in state.units[eng]
+        if x.is_alive and x.unit_type == UnitType.TANK and x.pos in geo
+    ]
+    if not tanks_any:
+        return None
+    if want_hp is not None:
+        tanks_hp = [x for x in tanks_any if int(x.display_hp) == int(want_hp)]
+        if len(tanks_hp) == 1:
+            return tanks_hp[0]
+        if len(tanks_hp) > 1:
+            return None
+    if len(tanks_any) == 1:
+        return tanks_any[0]
+    at_start = [x for x in tanks_any if x.pos == (sr, sc)]
+    if len(at_start) == 1:
+        return at_start[0]
+    return None
+
+
 def _nearest_reachable_along_path(
     paths: list[dict[str, Any]],
     reach: dict[tuple[int, int], int],
@@ -4269,6 +4335,17 @@ def _apply_move_paths_then_terminator(
     if u is None:
         u = _guess_unmoved_mover_from_site_unit_name(
             state, eng, paths, gu, anchor_hint=(ur, uc)
+        )
+    if u is None:
+        u = _oracle_move_med_tank_label_engine_tank_drift(
+            state,
+            eng,
+            declared_mover_type,
+            paths,
+            gu,
+            (sr, sc),
+            (ur, uc),
+            (er, ec),
         )
     if u is None and declared_mover_type is not None:
         unmoved_decl = [
