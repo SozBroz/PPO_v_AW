@@ -1076,7 +1076,7 @@ def _oracle_drift_spawn_mover_from_global(
     keeps the rest of the action stream applicable instead of bailing here
     and forfeiting the remaining envelopes.
 
-    Strict guards (decline -> caller re-raises ``Move: no unit``):
+    Strict guards (decline → caller re-raises ``Move: no unit``):
 
     1. ``declared_mover_type`` must be resolved (unit name in PHP global).
     2. Path-start ``(sr, sc)`` in bounds. **Friendly** at path-start declines
@@ -1085,16 +1085,9 @@ def _oracle_drift_spawn_mover_from_global(
        as a ghost AWBW already cleared and zeroed so the spawn can land.
     3. Terrain at path-start passable for the unit type
        (``effective_move_cost``) so the engine accepts the SELECT_UNIT.
-    4. Path-end may hold an **enemy ghost** AWBW already cleared -- zero
+    4. Path-end may hold an **enemy ghost** AWBW already cleared — zero
        its HP so the engine path-walker does not refuse the move. Friendly
        at path-end is left alone (could be a Join / Load partner).
-
-    One narrow ``Load``-envelope exception to (2): if path-start is held by a
-    friendly transport that can carry ``declared_mover_type`` and path-end is
-    empty + terrain-legal for the carrier, teleport the carrier to path-end so
-    the path-start tile frees up for the cargo spawn (game 1632702 pattern --
-    AWBW has the carrier at path-end and the cargo at path-start moving into
-    it, but engine drift left both consolidated on path-start).
 
     Spawned units take the AWBW ``units_id`` as ``unit_id`` so subsequent
     envelopes that look the unit up by AWBW id (``_unit_by_awbw_units_id``)
@@ -1117,6 +1110,15 @@ def _oracle_drift_spawn_mover_from_global(
 
     stats = UNIT_STATS[declared_mover_type]
 
+    # Path-start may hold an enemy ghost AWBW already cleared (drift). Zero
+    # its HP so the spawn lands. A friendly transport that can carry the
+    # declared mover, with an empty terrain-legal path-end — most likely a
+    # ``Load`` envelope where AWBW has the carrier at path-end and the cargo
+    # at path-start, but engine drift left both consolidated on path-start.
+    # Teleport the carrier to path-end so the path-start tile frees up for
+    # the cargo spawn (game 1632702: T-Copter at engine (3,3), AWBW says
+    # T-Copter at (4,3) and Mech at (3,3) loading into it). Other friendly
+    # occupants decline — could be a legit unit the resolver chain missed.
     start_occ = state.get_unit_at(sr, sc)
     if start_occ is not None:
         if int(start_occ.player) != int(eng):
@@ -1158,6 +1160,8 @@ def _oracle_drift_spawn_mover_from_global(
     if effective_move_cost(state, probe, state.map_data.terrain[sr][sc]) >= INF_PASSABLE:
         return None
 
+    # Clear an enemy ghost on path-end so the move terminates legally. Friendly
+    # at path-end may be a Join / Load partner — leave it alone.
     if 0 <= er < h and 0 <= ec < w and (er, ec) != (sr, sc):
         end_occ = state.get_unit_at(er, ec)
         if end_occ is not None and int(end_occ.player) != int(eng):
@@ -1196,6 +1200,72 @@ def _oracle_drift_spawn_mover_from_global(
         unit_id=new_uid,
     )
     state.units[eng].append(spawned)
+    return spawned
+
+
+def _oracle_drift_spawn_capturer_for_property(
+    state: GameState,
+    ap: int,
+    er: int,
+    ec: int,
+) -> Optional[Unit]:
+    """Spawn a default Infantry on a property tile to absorb a no-capturer ``Capt``.
+
+    Used by the ``Capt`` no-path branch when no engine capturer exists at all
+    on (or near) the property tile — deep state drift downstream of upstream
+    Fire / Move losses. AWBW's ground truth says capture progressed; spawning
+    Infantry on the property lets the standard CAPTURE step run so subsequent
+    envelopes (income, capture completion, follow-on actions) stay aligned.
+
+    Strict guards (decline → caller raises geom / missing-capturer):
+
+    1. Property tile in bounds.
+    2. Tile **empty** in engine — never overwrite an existing unit.
+    3. Terrain Infantry-passable (``effective_move_cost``); guards the few
+       odd ``is_property`` terrains where Infantry cannot stand.
+
+    Default is Infantry (most common capturer; same capture rate as Mech for
+    a given display HP). Spawned at full HP so the engine reduces capture
+    clock by 10 in the resulting CAPTURE step.
+    """
+    h, w = state.map_data.height, state.map_data.width
+    if not (0 <= er < h and 0 <= ec < w):
+        return None
+    if state.get_unit_at(er, ec) is not None:
+        return None
+    from engine.weather import effective_move_cost
+    from engine.terrain import INF_PASSABLE
+
+    stats = UNIT_STATS[UnitType.INFANTRY]
+    probe = Unit(
+        unit_type=UnitType.INFANTRY,
+        player=ap,
+        hp=100,
+        ammo=stats.max_ammo,
+        fuel=stats.max_fuel,
+        pos=(er, ec),
+        moved=False,
+        loaded_units=[],
+        is_submerged=False,
+        capture_progress=20,
+        unit_id=0,
+    )
+    if effective_move_cost(state, probe, state.map_data.terrain[er][ec]) >= INF_PASSABLE:
+        return None
+    spawned = Unit(
+        unit_type=UnitType.INFANTRY,
+        player=ap,
+        hp=100,
+        ammo=stats.max_ammo,
+        fuel=stats.max_fuel,
+        pos=(er, ec),
+        moved=False,
+        loaded_units=[],
+        is_submerged=False,
+        capture_progress=20,
+        unit_id=state._allocate_unit_id(),
+    )
+    state.units[ap].append(spawned)
     return spawned
 
 
@@ -4011,7 +4081,7 @@ def _apply_move_paths_then_terminator(
         # Drift recovery: AWBW emits the Move with full unit identity but every
         # engine-side scan has missed the mover (deep state drift downstream of
         # earlier Fire / Move / damage drift). Spawn the missing unit at
-        # path-start so the rest of the action stream remains applicable --
+        # path-start so the rest of the action stream remains applicable —
         # same family of recovery as ``_oracle_drift_spawn_unloaded_cargo``.
         spawned = _oracle_drift_spawn_mover_from_global(
             state, eng, gu, declared_mover_type, sr, sc, er, ec
@@ -5534,6 +5604,15 @@ def _apply_oracle_action_json_body(
                     # still advanced the building capture clock (GL 1625844 corner drift).
                     ph.capture_points = int(cpv)
                     return
+            if u is None and get_terrain(prop_tid).is_property:
+                # Drift recovery: zero capturers anywhere on the active seat
+                # near this property (deep state drift). AWBW says the capture
+                # progressed; spawn a default Infantry on the property tile so
+                # the standard CAPTURE step runs and downstream envelopes
+                # (income, capture completion) remain applicable. Sister of
+                # ``_oracle_drift_spawn_mover_from_global`` and
+                # ``_oracle_drift_spawn_unloaded_cargo``.
+                u = _oracle_drift_spawn_capturer_for_property(state, ap, er, ec)
             if u is None:
                 geom = _oracle_capt_no_path_geom_capturer_union(orth_all, outer, diag_all)
                 _oracle_capt_no_path_raise_geom_unreachable(state, er, ec, geom)
