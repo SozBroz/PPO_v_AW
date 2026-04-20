@@ -4136,6 +4136,48 @@ def _oracle_snap_mover_to_awbw_path_end(
     return True
 
 
+def _oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor(
+    state: GameState,
+    *,
+    eng: int,
+    awbw_units_id: int,
+    anchor_r: int,
+    anchor_c: int,
+    target_r: int,
+    target_c: int,
+    hp_hint: Optional[int],
+) -> bool:
+    """If the AWBW anchor is empty, snap a lone adjacent Infantry/Mech onto it.
+
+    GL lane A **1625784**: ``Move: []`` Fire lists the firing tile ``(5,10)`` but the
+    engine still holds the striker on ``(5,9)`` while ``units_id`` no longer maps.
+    Restricted to **Infantry/Mech** and **exactly one** qualifying neighbour so
+    vehicle stacks do not pick the wrong mover (full-pool regression guard).
+    """
+    if _unit_by_awbw_units_id(state, int(awbw_units_id)) is not None:
+        return False
+    ar, ac = int(anchor_r), int(anchor_c)
+    if state.get_unit_at(ar, ac) is not None:
+        return False
+    tr, tc = int(target_r), int(target_c)
+    tgt: tuple[int, int] = (tr, tc)
+    cands: list[Unit] = []
+    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        u = state.get_unit_at(ar + dr, ac + dc)
+        if u is None or not u.is_alive or int(u.player) != int(eng):
+            continue
+        if u.unit_type not in (UnitType.INFANTRY, UnitType.MECH):
+            continue
+        if UNIT_STATS[u.unit_type].is_indirect:
+            continue
+        if tgt not in get_attack_targets(state, u, (ar, ac)):
+            continue
+        cands.append(u)
+    if len(cands) != 1:
+        return False
+    return _oracle_snap_mover_to_awbw_path_end(state, cands[0], (ar, ac))
+
+
 def _apply_move_paths_then_terminator(
     state: GameState,
     move: dict[str, Any],
@@ -6204,6 +6246,16 @@ def _apply_oracle_action_json_body(
                 state, defender, sr, sc, dr, dc
             ):
                 return
+            _oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor(
+                state,
+                eng=eng,
+                awbw_units_id=uid,
+                anchor_r=sr,
+                anchor_c=sc,
+                target_r=dr,
+                target_c=dc,
+                hp_hint=hp_hint,
+            )
             u = _resolve_fire_or_seam_attacker(
                 state,
                 engine_player=eng,
