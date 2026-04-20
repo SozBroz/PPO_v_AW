@@ -43,6 +43,16 @@ Use `use_reloader=False` in `server/app.py` (or `flask run --no-reload`) so the 
 | Symmetric zip vs zip eval (both seats) | `scripts/symmetric_checkpoint_eval.py` |
 | Oracle zip → engine (Move/Build/Fire/End) | `tools/oracle_zip_replay.py` |
 | Replay export (not MVP UI) | `.cursor/skills/awbw-replay-system/SKILL.md`, `tools/export_awbw_replay.py` |
+| Fleet env / Z: mount validation | `rl/fleet_env.py` |
+| Aux eval daemon (checkpoints → verdicts → `promoted/`) | `scripts/fleet_eval_daemon.py` |
+| Promote `best.zip` (manual or auto from verdicts) | `scripts/promote.py` |
+
+## Fleet (main + auxiliary)
+
+- **Main (default):** `python train.py` uses local `checkpoints/` only. No share required. Optional flags: `--pool-from-fleet` (adds `checkpoints/pool/*/checkpoint_*.zip` to the opponent pool), `--load-promoted` (prefer newer `checkpoints/promoted/best.zip` over `latest.zip` on restart), `--bc-init <zip>` (warm-start when there is no resume zip).
+- **Auxiliary:** set `AWBW_MACHINE_ROLE=auxiliary`, `AWBW_MACHINE_ID`, and `AWBW_SHARED_ROOT` (default `Z:\`). Pool trainers use e.g. `python train.py --checkpoint-dir Z:\checkpoints\pool\<ID>\` with that ID matching `AWBW_MACHINE_ID`.
+- **BC:** aux runs `scripts/train_bc.py` with `--demos` pointing at `data/*_bc_rows.jsonl` on the share and `--save Z:\checkpoints\bc\bc_warmstart_<name>.zip`; main may pass `--bc-init` to consume on a fresh run.
+- **Tier 4 / `--shared-training`:** not implemented; reserved for shared async weights (MASTERPLAN §10).
 
 ## HTTP API (summary)
 

@@ -18,7 +18,7 @@ import argparse
 import signal
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).parent.resolve()
 
 
 def _install_sigint_first_only() -> None:
@@ -62,7 +62,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--rank", action="store_true",
-        help="Compute CO rankings from data/game_log.jsonl",
+        help="Compute CO rankings from logs/game_log.jsonl",
     )
     parser.add_argument(
         "--features", action="store_true",
@@ -95,6 +95,42 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint-pool", type=int, default=5,
         help="Historical checkpoints to rotate as opponent (default: 5)",
+    )
+    parser.add_argument(
+        "--ent-coef", type=float, default=0.05,
+        help="PPO entropy coefficient (default 0.05; narrow Misery-Andy runs often use 0.02)",
+    )
+    parser.add_argument(
+        "--opponent-mix", type=float, default=0.0,
+        help="With loaded checkpoint opponent, probability of using capture-greedy instead (0–1)",
+    )
+    parser.add_argument(
+        "--machine-role", type=str, default=None,
+        help="Override AWBW_MACHINE_ROLE: main (default) or auxiliary",
+    )
+    parser.add_argument(
+        "--shared-root", type=str, default=None,
+        help="Override AWBW_SHARED_ROOT (aux default Z:\\; main must match repo or be unset)",
+    )
+    parser.add_argument(
+        "--checkpoint-dir", type=Path, default=None,
+        help="Checkpoint directory (default repo/checkpoints; pool aux: .../checkpoints/pool/<ID>/)",
+    )
+    parser.add_argument(
+        "--pool-from-fleet", action="store_true",
+        help="Include checkpoints/pool/*/checkpoint_*.zip in opponent sampling",
+    )
+    parser.add_argument(
+        "--load-promoted", action="store_true",
+        help="On startup prefer checkpoints/promoted/best.zip over latest.zip when newer",
+    )
+    parser.add_argument(
+        "--bc-init", type=Path, default=None,
+        help="Fresh-run warm-start zip (e.g. checkpoints/bc/bc_warmstart_*.zip); ignored when resuming",
+    )
+    parser.add_argument(
+        "--shared-training", action="store_true",
+        help="Reserved for MASTERPLAN §10 async weight sync (not implemented)",
     )
     args = parser.parse_args()
 
@@ -142,6 +178,49 @@ def main() -> None:
             f"broad_prob={args.curriculum_broad_prob} tag={args.curriculum_tag!r}"
         )
 
+    import os as _os
+    _env_flags = [
+        ("AWBW_TIME_COST", _os.environ.get("AWBW_TIME_COST")),
+        ("AWBW_INCOME_TERM_COEF", _os.environ.get("AWBW_INCOME_TERM_COEF")),
+        ("AWBW_BUILD_MASK_INFANTRY_ONLY", _os.environ.get("AWBW_BUILD_MASK_INFANTRY_ONLY")),
+        ("AWBW_LOG_REPLAY_FRAMES", _os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
+    ]
+    _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
+    if _active:
+        print("[train] Env toggles: " + "; ".join(_active))
+
+    if args.shared_training:
+        print(
+            "[train] --shared-training is reserved (MASTERPLAN §10); "
+            "no runtime weight sync in this build."
+        )
+
+    from rl.fleet_env import (
+        FleetConfig,
+        REPO_ROOT,
+        bootstrap_fleet_layout,
+        load_machine_id,
+        load_machine_role,
+        load_shared_root_for_role,
+        resolve_checkpoint_dir,
+        validate_aux_pool_checkpoint_dir,
+        validate_fleet_at_startup,
+    )
+
+    role = load_machine_role(args.machine_role)
+    shared = load_shared_root_for_role(role, args.shared_root)
+    fleet_cfg = FleetConfig(
+        role=role,
+        machine_id=load_machine_id(),
+        shared_root=shared,
+        repo_root=REPO_ROOT,
+    )
+    validate_fleet_at_startup(fleet_cfg)
+    checkpoint_dir = resolve_checkpoint_dir(REPO_ROOT, args.checkpoint_dir, None)
+    validate_aux_pool_checkpoint_dir(fleet_cfg, checkpoint_dir)
+    layout_root = fleet_cfg.shared_root if fleet_cfg.is_auxiliary else fleet_cfg.repo_root
+    bootstrap_fleet_layout(layout_root, machine_id=fleet_cfg.machine_id, role=fleet_cfg.role)
+
     from rl.self_play import SelfPlayTrainer
     trainer = SelfPlayTrainer(
         total_timesteps=args.iters,
@@ -156,6 +235,12 @@ def main() -> None:
         tier_name=args.tier,
         curriculum_broad_prob=args.curriculum_broad_prob,
         curriculum_tag=args.curriculum_tag,
+        opponent_mix=args.opponent_mix,
+        ent_coef=args.ent_coef,
+        checkpoint_dir=checkpoint_dir,
+        pool_from_fleet=args.pool_from_fleet,
+        load_promoted=args.load_promoted,
+        bc_init=args.bc_init,
     )
     _install_sigint_first_only()
     trainer.train()

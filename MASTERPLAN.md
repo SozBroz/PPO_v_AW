@@ -1,6 +1,6 @@
 # AWBW-RL Master Plan
 
-*Last updated: 2026-04-18*
+*Last updated: 2026-04-19*
 
 This document is the strategic north star for the AWBW reinforcement learning project.
 It records where we are, where we are going, and — critically — the concrete thresholds
@@ -459,6 +459,45 @@ Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second
 - [ ] Curriculum includes a **meaningful fraction** of P1-opens games where the engine allows it
 - [ ] If gate fails: document whether remediation is (3) pool remap or (4) representation change before declaring Phase 1 Full for “fair seat” claims
 - [ ] **If Tier 4 is funded:** BC row format includes a `me ∈ {0, 1}` (or equivalent) flag and the encoder supports ego-centric channel swap; parallel envs are **seat-balanced** for the learner; critic targets use sign-flip on opponent-seat rows where applicable
+
+---
+
+## 10. Multi-PC training (strategy + backlog)
+
+**Canonical plan:** *Multi-machine checkpoint sync* — Cursor plan file `multi-machine_checkpoint_sync_32b867d3.plan.md` (async **weight** sync on a shared directory—not shared PPO rollout buffers).
+
+### 10.1 Doctrine (second PC)
+
+- **Primary ROI:** Two (or N) machines run `train.py` against a shared `AWBW_CHECKPOINT_DIR`; each process keeps **on-policy PPO** on **local** rollouts; they **publish / reload** `latest.zip` so the fleet shares one policy line and a richer `checkpoint_*.zip` opponent pool.
+- **Do not:** Feed another machine’s trajectories into PPO as if on-policy; use **shared weights** or a **separate BC / offline RL** pass ([`scripts/train_bc.py`](scripts/train_bc.py), docs in [`docs/play_ui.md`](docs/play_ui.md)).
+- **Do not:** “Shared pagefile” or mmap-as-RAM across PCs for weights—wrong layer, no coherency.
+- **Checkpoint contract:** Same repo revision / encoder on all machines; see §8 for fog vs std separation.
+
+### 10.2 Phase 1 — implementation backlog (code)
+
+*Implement in Agent mode; paths reference repo root.*
+
+| Deliverable | Detail |
+|-------------|--------|
+| [`rl/paths.py`](rl/paths.py) | `get_checkpoint_dir()`, `get_data_dir()`, `get_pool_path()`, `get_maps_dir()`, `get_game_log_path()`, `get_slow_games_log_path()` from `AWBW_CHECKPOINT_DIR` / `AWBW_DATA_DIR`. |
+| [`rl/shared_training.py`](rl/shared_training.py) | `training_sync.sqlite`: `BEGIN IMMEDIATE` monotonic version; `publish_latest()` writes temp zip → `os.replace` → `latest.zip`, then manifest (`sha256`, `size`, `version`, `worker_id`, `num_timesteps`); `reload_model_if_newer()` validates then `MaskablePPO.load`; `prune_worker_snapshots(max_files)`; `sanitize_worker_id()`. |
+| [`train.py`](train.py) | After `parse_args`, map `--checkpoint-dir` / `--data-dir` → `os.environ` **before** importing `rl.self_play`. Flags: `--shared-training`, `--worker-id`, `--publish-every` (default 1), `--checkpoint-retain` (0 = off). |
+| [`rl/self_play.py`](rl/self_play.py) | Thread `checkpoint_dir`, `shared_training`, `worker_id`, `publish_every`, `checkpoint_retain`; opponent `refresh_every` lower when shared (e.g. 200); snapshot names `checkpoint_{worker}_{seq}.zip` when shared else legacy `checkpoint_{NNNN}.zip`; loop: reload-if-newer → `learn` → snapshot → conditional `publish_latest`; optional `shared_training.publish` on SIGINT. |
+| [`rl/env.py`](rl/env.py) | Use `rl.paths` for game log, slow games, pool, maps (import after env-safe ordering—`paths` must not import `env`). |
+| Consumers | [`scripts/eval_imitation.py`](scripts/eval_imitation.py), [`analysis/co_ranker.py`](analysis/co_ranker.py), [`analysis/co_h2h.py`](analysis/co_h2h.py): resolve log path via `get_game_log_path()` or env-aware helper. |
+| Docs | [`README.md`](README.md) or [`docs/play_ui.md`](docs/play_ui.md): second-PC env vars, SMB tuning (`--publish-every`, `--save-every`), retention, subprocess opponent lag. |
+
+### 10.3 Phase 2 — deferred (not required for basic two-PC sync)
+
+- **BoN / Bo11 promotion:** alternating-seat series; promote winner to shared `latest` (wrap or extend [`scripts/bo3_checkpoint_playoff.py`](scripts/bo3_checkpoint_playoff.py) / [`scripts/symmetric_checkpoint_eval.py`](scripts/symmetric_checkpoint_eval.py)); high variance—document minimum games before automation.
+- **`best.zip`:** promote only when periodic eval beats a baseline threshold (stops `latest` being purely last-writer in async mode).
+- **Hostname / `curriculum_tag` in `game_log`:** when merging logs from multiple PCs for analysis.
+
+### 10.4 Phase 3 — research (only if Phase 1–2 plateau)
+
+- **Canonical symmetric / ego-centric observations** so one net can cover both seats without dual-policy training (ties to §9 Tier 4).
+- **Opponent sampling policy** driven by measured win-rate band vs pool (MASTERPLAN healthy band ~52–62% vs checkpoints).
+- **Ray / RLlib** or other true distributed PPO if disk-async remains insufficient.
 
 ---
 

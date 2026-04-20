@@ -6,7 +6,9 @@ Output shape: (H, W, N_CHANNELS) where H=W=30 (padded), N_CHANNELS is:
   - 1 HP channel
   - 15 terrain channels (one-hot, main terrain categories)
   - 15 property channels (5 property types × 3 states: neutral/p0/p1)
-  Total: 28 + 1 + 15 + 15 = 59 channels
+  - 2 capture-progress channels (P0 / P1 unit reducing ``capture_points`` on tile)
+  - 1 neutral contestable income-property mask (owner None, not lab/comm)
+  Total: 28 + 1 + 15 + 15 + 3 = 62 spatial channels
 
 Plus scalar features (appended after CNN flatten):
   - funds[0], funds[1] (normalized by 50000)
@@ -20,11 +22,12 @@ Plus scalar features (appended after CNN flatten):
   - weather_rain  (binary: 1.0 if rain active, else 0.0)
   - weather_snow  (binary: 1.0 if snow active, else 0.0)
   - weather_turns (co_weather_segments_remaining / 2.0; 0 = clear/default)
-  Total scalars: 16
+  - p0_income_share (income properties owned by P0 / total income tiles on map)
+  Total scalars: 17
 
-NOTE: N_SCALARS increased from 13 → 16.  Old checkpoints saved with 13 scalars
-are incompatible; use custom_objects={"n_steps": ...} only for n_steps overrides.
-For the scalar space change, retrain from scratch or snapshot-migrate manually.
+**Checkpoint compatibility:** any weights trained with 59×30×30 spatial + 16
+scalars are **incompatible** with this encoder — retrain from scratch after
+this bump (do not load old ``latest.zip`` into MaskablePPO without matching dims).
 """
 import numpy as np
 from engine.game import GameState, MAX_TURNS
@@ -35,8 +38,11 @@ GRID_SIZE = 30
 N_UNIT_CHANNELS = 28       # 14 unit types × 2 players
 N_TERRAIN_CHANNELS = 15
 N_PROPERTY_CHANNELS = 15   # 5 property types × 3 ownership states
-N_SPATIAL_CHANNELS = N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS  # 59
-N_SCALARS = 16
+N_CAPTURE_EXTRA_CHANNELS = 3  # p0 progress, p1 progress, neutral-income mask
+N_SPATIAL_CHANNELS = (
+    N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS + N_CAPTURE_EXTRA_CHANNELS
+)  # 62
+N_SCALARS = 17
 
 # Terrain one-hot categories
 TERRAIN_CATEGORIES: dict[str, int] = {
@@ -152,6 +158,25 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
 
         spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
 
+    # ── Capture progress + neutral income mask (after property ownership) ─────
+    cap_ch0 = N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS
+    cap_ch1 = cap_ch0 + 1
+    neutral_inc_ch = cap_ch1 + 1
+    for prop in state.properties:
+        r, c = prop.row, prop.col
+        if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
+            continue
+        if prop.owner is None and not prop.is_comm_tower and not prop.is_lab:
+            spatial[r, c, neutral_inc_ch] = 1.0
+        if prop.capture_points < 20:
+            occ = state.get_unit_at(r, c)
+            if occ is not None:
+                prog = (20 - prop.capture_points) / 20.0
+                if occ.player == 0:
+                    spatial[r, c, cap_ch0] = max(spatial[r, c, cap_ch0], prog)
+                elif occ.player == 1:
+                    spatial[r, c, cap_ch1] = max(spatial[r, c, cap_ch1], prog)
+
     # ── Unit presence + HP channels ───────────────────────────────────────────
     hp_ch = N_UNIT_CHANNELS  # single HP channel shared across all units
     for player in (0, 1):
@@ -196,8 +221,19 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
             1.0 if weather == "rain" else 0.0,
             1.0 if weather == "snow" else 0.0,
             getattr(state, "co_weather_segments_remaining", 0) / 2.0,
+            # Share of contestable income tiles owned by P0 (labs/comm excluded).
+            _p0_income_share(state),
         ],
         dtype=np.float32,
     )
 
     return spatial, scalars
+
+
+def _p0_income_share(state: GameState) -> float:
+    n_income = sum(
+        1 for p in state.properties if not p.is_comm_tower and not p.is_lab
+    )
+    if n_income <= 0:
+        return 0.0
+    return float(state.count_income_properties(0)) / float(n_income)

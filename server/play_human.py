@@ -33,12 +33,12 @@ from rl.env import (
     _flat_to_action,
     _get_action_mask,
 )
+from rl.paths import HUMAN_DEMOS_PATH
 from server.write_watch_state import board_dict
 
 ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
-HUMAN_DEMOS_PATH = ROOT / "data" / "human_demos.jsonl"
 
 # Seat invariants — match training: human always P0 (red / first seat), bot P1 (blue / second);
 # encode_state is always P0 view.

@@ -2,7 +2,9 @@
 import json
 from pathlib import Path
 
-from flask import Blueprint, render_template, jsonify, current_app
+from flask import Blueprint, render_template, jsonify
+
+from rl.paths import GAME_LOG_PATH
 
 bp = Blueprint("replay", __name__, url_prefix="/replay")
 
@@ -35,10 +37,7 @@ def _load_game_records(log_path: Path) -> list[dict]:
 @bp.route("/")
 def replay_list():
     """List recent games from game_log.jsonl."""
-    data_dir = current_app.config["DATA_DIR"]
-    log_path = data_dir / "game_log.jsonl"
-
-    all_records = _load_game_records(log_path)
+    all_records = _load_game_records(GAME_LOG_PATH)
     games = list(reversed(all_records[-50:]))
     return render_template("replay.html", games=games)
 
@@ -51,10 +50,7 @@ def replay_game(game_idx: int):
 @bp.route("/api/<int:game_idx>")
 def replay_api(game_idx: int):
     """Return game data for a specific game index."""
-    data_dir = current_app.config["DATA_DIR"]
-    log_path = data_dir / "game_log.jsonl"
-
-    records = _load_game_records(log_path)
+    records = _load_game_records(GAME_LOG_PATH)
     if not records:
         return jsonify({"error": "No game log"}), 404
 

@@ -33,6 +33,10 @@ SEAM_MAX_HP: int = 99
 
 MAX_TURNS = 100   # after this, winner = player with more properties; tie if equal
 
+# Dense shaping for CAPTURE (acting-player frame). Kept small vs terminal ±1.0.
+_CAPTURE_SHAPING_PROGRESS: float = 0.012  # per 20 capture_points reduced toward flip
+_CAPTURE_SHAPING_COMPLETE: float = 0.07   # bonus when ownership flips to capturer
+
 # Sami (CO 8): AWBW footsoldier capture points per capture action by display HP.
 # https://awbw.fandom.com/wiki/Sami — COP/SCOP do not stack extra capture beyond D2D
 # except Victory March (instant), handled separately.
@@ -167,6 +171,8 @@ class GameState:
             "unit_type":  action.unit_type.name   if action.unit_type  is not None else None,
         })
 
+        capture_shaping = 0.0
+
         if action.action_type == ActionType.END_TURN:
             self._end_turn()
 
@@ -189,7 +195,7 @@ class GameState:
             self._apply_attack(action)
 
         elif action.action_type == ActionType.CAPTURE:
-            self._apply_capture(action)
+            capture_shaping = self._apply_capture(action)
 
         elif action.action_type == ActionType.WAIT:
             self._apply_wait(action)
@@ -209,7 +215,7 @@ class GameState:
         elif action.action_type == ActionType.REPAIR:
             self._apply_repair(action)
 
-        reward = self._check_win_conditions(acting_player)
+        reward = self._check_win_conditions(acting_player) + capture_shaping
         return self, reward, self.done
 
     # ------------------------------------------------------------------
@@ -513,16 +519,25 @@ class GameState:
     # Capture
     # ------------------------------------------------------------------
 
-    def _apply_capture(self, action: Action):
+    def _apply_capture(self, action: Action) -> float:
+        """
+        Apply capture; return dense shaping reward in the **capturing unit's**
+        (acting player's) frame. No shaping when the tile is already owned by
+        that player (non-contest).
+        """
         unit = self.get_unit_at(*action.unit_pos)
         if unit is None:
-            return
+            return 0.0
 
         self._move_unit(unit, action.move_pos)
         prop = self.get_property_at(*action.move_pos)
         if prop is None:
             self._finish_action(unit)
-            return
+            return 0.0
+
+        old_owner = prop.owner
+        old_cp = prop.capture_points
+        contest = old_owner is None or old_owner != unit.player
 
         co = self.co_states[unit.player]
 
@@ -537,12 +552,18 @@ class GameState:
                 capture_amount = unit.display_hp
             prop.capture_points = max(0, prop.capture_points - capture_amount)
 
+        shaping = 0.0
+        if contest:
+            reduced = float(old_cp - max(prop.capture_points, 0))
+            shaping += _CAPTURE_SHAPING_PROGRESS * (reduced / 20.0)
+
         if prop.capture_points <= 0:
-            prop.owner          = unit.player
+            if contest:
+                shaping += _CAPTURE_SHAPING_COMPLETE
+            prop.owner = unit.player
             prop.capture_points = 20
             if prop.is_comm_tower:
                 self._refresh_comm_towers()
-            # AWBW: building sprite follows owner — terrain grid must match faction tile IDs.
             old_tid = self.map_data.terrain[prop.row][prop.col]
             new_tid = property_terrain_id_after_owner_change(
                 old_tid, unit.player, self.map_data.country_to_player
@@ -559,6 +580,7 @@ class GameState:
             "to":           list(action.move_pos),
             "cp_remaining": prop.capture_points,
         })
+        return shaping
 
     # ------------------------------------------------------------------
     # Wait

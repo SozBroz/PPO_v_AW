@@ -25,7 +25,7 @@ class AWBWFeaturesExtractor(BaseFeaturesExtractor):
     SB3-compatible features extractor wrapping the AWBWNet CNN trunk.
 
     Replaces SB3's default CombinedExtractor on Dict observations.
-    Accepts {'spatial': Box(30,30,59), 'scalars': Box(N_SCALARS,)} and outputs
+    Accepts {'spatial': Box(30,30,62), 'scalars': Box(N_SCALARS,)} and outputs
     a flat (batch, features_dim) tensor consumed by the policy/value heads.
     """
 

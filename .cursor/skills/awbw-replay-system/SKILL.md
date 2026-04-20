@@ -11,7 +11,7 @@ Replay work spans **two independent surfaces** in this repo, plus the **upstream
 
 **Purpose:** Step through games produced by the RL stack without leaving the browser.
 
-- **Data:** `data/game_log.jsonl` — one JSON object per completed game (append model in `rl/env.py::_append_game_log_line`). Lines may be separated by blank lines; stable indexing skips empties (`server/routes/replay.py::_load_game_records`).
+- **Data:** `logs/game_log.jsonl` — one JSON object per completed game (append model in `rl/env.py::_append_game_log_line`). Lines may be separated by blank lines; stable indexing skips empties (`server/routes/replay.py::_load_game_records`).
 - **Optional frames:** Set env `AWBW_LOG_REPLAY_FRAMES=1` so each log record includes a `frames` array (per-engine-step snapshots). Default is off due to log size.
 - **Server:** Flask blueprint `replay` — `GET /replay`, `/replay/<game_idx>`, `/replay/api/<game_idx>` (`server/routes/replay.py`). `DATA_DIR` is `ROOT / "data"` (`server/app.py`).
 - **Client:** `server/static/replay.js` + `server/templates/replay.html`. Expects API payload with `board` plus optional `frames` (see header comment in `replay.js`).

@@ -9,7 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-GAME_LOG_PATH = ROOT / "data" / "game_log.jsonl"
+GAME_LOG_PATH = ROOT / "logs" / "game_log.jsonl"
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 OUT_PATH = ROOT / "data" / "co_rankings.json"
 

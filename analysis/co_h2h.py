@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 import argparse
 
 ROOT = Path(__file__).parent.parent
-GAME_LOG_PATH = ROOT / "data" / "game_log.jsonl"
+GAME_LOG_PATH = ROOT / "logs" / "game_log.jsonl"
 OUTPUT_PATH = ROOT / "data" / "co_matchups.json"
 
 

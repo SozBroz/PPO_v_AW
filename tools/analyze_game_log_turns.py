@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Drill-down stats on ``turns`` (engine day counter at episode end) from ``data/game_log.jsonl``.
+Drill-down stats on ``turns`` (engine day counter at episode end) from ``logs/game_log.jsonl``.
 
 Default: only games that finished on or after **today** (local calendar), excluding older runs.
 Stratifies by ``opponent_type`` and ``curriculum_tag``.
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LOG = ROOT / "data" / "game_log.jsonl"
+DEFAULT_LOG = ROOT / "logs" / "game_log.jsonl"
 
 
 def _episode_local_date(rec: dict[str, Any]) -> Optional[date]:

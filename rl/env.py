@@ -31,12 +31,12 @@ from engine.unit import UnitType, UNIT_STATS
 
 from rl.encoder import encode_state, N_SPATIAL_CHANNELS, N_SCALARS, GRID_SIZE
 from rl.network import ACTION_SPACE_SIZE
+from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
 from server.write_watch_state import board_dict
 
 ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
-GAME_LOG_PATH = ROOT / "data" / "game_log.jsonl"
 
 # Session game counter: set by training (SelfPlayTrainer) so all SubprocVecEnv workers share one sequence.
 SESSION_GAME_COUNTER_DB_ENV = "AWBW_SESSION_GAME_COUNTER_DB"
@@ -47,10 +47,16 @@ SESSION_GAME_COUNTER_DB_ENV = "AWBW_SESSION_GAME_COUNTER_DB"
 LOG_REPLAY_FRAMES_ENV = "AWBW_LOG_REPLAY_FRAMES"
 
 # Slow-game threshold (wall seconds). Episodes exceeding this get a compact red-flag
-# line appended to data/slow_games.jsonl alongside the normal game_log row. Override
+# line appended to logs/slow_games.jsonl alongside the normal game_log row. Override
 # via AWBW_SLOW_GAME_WALL_S env var. Zero/negative disables.
 SLOW_GAME_WALL_S_ENV = "AWBW_SLOW_GAME_WALL_S"
-SLOW_GAMES_LOG_PATH = ROOT / "data" / "slow_games.jsonl"
+
+# Optional per-P0-step stall penalty (subtracted from reward while episode continues).
+TIME_COST_ENV = "AWBW_TIME_COST"
+# Terminal shaping: ``AWBW_INCOME_TERM_COEF`` × (income_props_p0 − p1) / cap_limit when episode ends.
+INCOME_TERM_COEF_ENV = "AWBW_INCOME_TERM_COEF"
+# When ``1``, zero all BUILD action-mask entries except ``INFANTRY`` (narrow bootstrap).
+BUILD_MASK_INFANTRY_ONLY_ENV = "AWBW_BUILD_MASK_INFANTRY_ONLY"
 
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
@@ -226,6 +232,15 @@ def _get_action_mask(state: GameState) -> np.ndarray:
         if 0 <= idx < ACTION_SPACE_SIZE:
             mask[idx] = True
     return mask
+
+
+def _strip_non_infantry_builds(mask: np.ndarray, state: GameState) -> None:
+    """In-place: clear BUILD entries except ``INFANTRY`` (bootstrap curriculum)."""
+    for action in get_legal_actions(state):
+        if action.action_type == ActionType.BUILD and action.unit_type != UnitType.INFANTRY:
+            idx = _action_to_flat(action)
+            if 0 <= idx < ACTION_SPACE_SIZE:
+                mask[idx] = False
 
 
 class AWBWEnv(gym.Env):
@@ -488,6 +503,7 @@ class AWBWEnv(gym.Env):
         self._opponent_reloads_at_start: int = int(
             getattr(self.opponent_policy, "reload_count", 0) or 0
         )
+        self._first_p0_capture_step: int | None = None
 
         # If P1 opens, run the opponent before the learner's first step — same contract as
         # server/play_human.new_session: observations must always be on P0's clock.
@@ -521,6 +537,9 @@ class AWBWEnv(gym.Env):
 
         self.state, reward, done = self.state.step(action)
         self._capture_frame(action=action)
+
+        if action.action_type == ActionType.CAPTURE and self._first_p0_capture_step is None:
+            self._first_p0_capture_step = self._p0_env_steps
 
         # Dense shaping: property advantage + unit value differential.
         # Coefficients are small relative to terminal ±1.0 but large enough to
@@ -566,6 +585,27 @@ class AWBWEnv(gym.Env):
             "truncated": truncated,
         }
 
+        if terminated:
+            raw_inc = os.environ.get(INCOME_TERM_COEF_ENV, "0").strip()
+            if raw_inc:
+                try:
+                    coef = float(raw_inc)
+                    if coef != 0.0:
+                        cap_lim = max(1, self.state.map_data.cap_limit)
+                        inc0 = self.state.count_income_properties(0)
+                        inc1 = self.state.count_income_properties(1)
+                        reward += coef * (inc0 - inc1) / float(cap_lim)
+                except ValueError:
+                    pass
+
+        if not self.state.done and not truncated:
+            raw_tc = os.environ.get(TIME_COST_ENV, "0").strip()
+            if raw_tc:
+                try:
+                    reward -= float(raw_tc)
+                except ValueError:
+                    pass
+
         # Log finished game (Phase A requirement)
         if terminated:
             self._log_finished_game()
@@ -579,7 +619,11 @@ class AWBWEnv(gym.Env):
         """Return valid-action bool mask. Required by MaskablePPO wrappers."""
         if self.state is None:
             return np.zeros(ACTION_SPACE_SIZE, dtype=bool)
-        return _get_action_mask(self.state)
+        mask = _get_action_mask(self.state)
+        flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
+        if flag in ("1", "true", "yes", "on"):
+            _strip_non_infantry_builds(mask, self.state)
+        return mask
 
     def render(self) -> str | None:
         if self.render_mode == "ansi" and self.state is not None:
@@ -668,7 +712,7 @@ class AWBWEnv(gym.Env):
 
     def _log_finished_game(self):
         """
-        Log finished game to data/game_log.jsonl (Phase A requirement).
+        Log finished game to logs/game_log.jsonl (Phase A requirement).
 
         Appends one line via ``_append_game_log_line`` so ``game_id`` and the full
         JSON blob are written under a single lock (threading, or SQLite
@@ -701,6 +745,28 @@ class AWBWEnv(gym.Env):
                 self.state.count_properties(0),
                 self.state.count_properties(1),
             ],
+            "income_property_count": [
+                self.state.count_income_properties(0),
+                self.state.count_income_properties(1),
+            ],
+            "first_p0_capture_p0_step": getattr(self, "_first_p0_capture_step", None),
+            "captures_completed_p0": sum(
+                1
+                for e in self.state.game_log
+                if e.get("type") == "capture" and e.get("player") == 0
+            ),
+            "captures_completed_p1": sum(
+                1
+                for e in self.state.game_log
+                if e.get("type") == "capture" and e.get("player") == 1
+            ),
+            "infantry_builds_p0": sum(
+                1
+                for e in self.state.game_log
+                if e.get("type") == "build"
+                and e.get("player") == 0
+                and str(e.get("unit", "")).upper() == "INFANTRY"
+            ),
             "turns": self.state.turn,
             "win_condition": self.state.win_reason,
             "losses_hp": self.state.losses_hp.copy(),
@@ -771,7 +837,7 @@ class AWBWEnv(gym.Env):
         _append_game_log_line(log_record)
 
         # Slow / degenerate-episode alert: append a compact row to
-        # data/slow_games.jsonl when this game looks abnormal. Cheap
+        # logs/slow_games.jsonl when this game looks abnormal. Cheap
         # (one extra file write on rare events) and easy to tail.
         try:
             threshold = float(os.environ.get(SLOW_GAME_WALL_S_ENV, "60") or 60)

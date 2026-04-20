@@ -7,7 +7,7 @@ Uses MaskablePPO.policy.evaluate_actions with stored masks — aggressive LR can
 destroy generalisation; checkpoint before running.
 
 Example:
-  python scripts/train_bc.py --demos data/human_demos.jsonl \\
+  python scripts/train_bc.py --demos logs/human_demos.jsonl \\
     --load checkpoints/latest.zip --save checkpoints/post_bc.zip --epochs 2
 """
 from __future__ import annotations
@@ -24,10 +24,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from rl.paths import HUMAN_DEMOS_PATH  # noqa: E402
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--demos", type=Path, default=Path("data/human_demos.jsonl"))
+    ap.add_argument("--demos", type=Path, default=HUMAN_DEMOS_PATH)
     ap.add_argument("--load", type=Path, required=True, help="MaskablePPO zip to warm-start")
     ap.add_argument("--save", type=Path, required=True, help="Output zip path")
     ap.add_argument("--epochs", type=int, default=2)

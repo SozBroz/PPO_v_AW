@@ -391,9 +391,17 @@ class TestEncodeStateWeatherScalars(unittest.TestCase):
         self.assertAlmostEqual(float(scalars[14]), 1.0)  # snow
         self.assertAlmostEqual(float(scalars[15]), 0.5)  # 1/2
 
-    def test_n_scalars_is_16(self):
+    def test_n_scalars_matches_encoder(self):
         from rl.encoder import N_SCALARS
-        self.assertEqual(N_SCALARS, 16)
+        self.assertEqual(N_SCALARS, 17)
+
+    def test_income_share_scalar_bounded(self):
+        from rl.encoder import encode_state, N_SCALARS
+        state = _state_with_weather("clear")
+        _, scalars = encode_state(state)
+        self.assertEqual(len(scalars), N_SCALARS)
+        self.assertGreaterEqual(float(scalars[16]), 0.0)
+        self.assertLessEqual(float(scalars[16]), 1.0)
 
 
 if __name__ == "__main__":

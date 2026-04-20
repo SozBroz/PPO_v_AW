@@ -84,7 +84,7 @@ def _open_replay_output_folder(replay_zip: Path) -> None:
     folder = replay_zip.resolve().parent
     _log(f"viewer: outputs in {folder}")
     _log(
-        "viewer: training games logged to data/game_log.jsonl — run `python -m server.app` "
+        "viewer: training games logged to logs/game_log.jsonl — run `python -m server.app` "
         "and open http://127.0.0.1:5000/replay/"
     )
     try:

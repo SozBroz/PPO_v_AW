@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Trend of property holdings at game end from ``data/game_log.jsonl``.
+Trend of property holdings at game end from ``logs/game_log.jsonl``.
 
 The log does **not** store a per-turn “captured this game” counter — only
 ``property_count: [p0, p1]`` (buildings owned at termination). We treat:
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LOG = ROOT / "data" / "game_log.jsonl"
+DEFAULT_LOG = ROOT / "logs" / "game_log.jsonl"
 
 
 def _episode_local_date(rec: dict[str, Any]) -> Optional[date]:

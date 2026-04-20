@@ -12,8 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-ROOT             = Path(__file__).parent.parent
-WATCH_STATE_PATH = ROOT / "data" / "watch_state.json"
+from rl.paths import WATCH_STATE_PATH, ensure_logs_dir
 
 
 def units_list(state) -> list[dict]:
@@ -75,7 +74,7 @@ def write_watch_state(
 ) -> None:
     """
     Serialise current game state and write it atomically to
-    data/watch_state.json so the live viewer can pick it up.
+    logs/watch_state.json so the live viewer can pick it up.
 
     Args:
         state:       GameState object from engine (duck-typed, see below).
@@ -111,7 +110,7 @@ def write_watch_state(
     }
 
     # Atomic write: write to a temp file then rename to avoid partial reads
-    WATCH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_logs_dir()
     tmp_path = WATCH_STATE_PATH.with_suffix(".tmp")
     with open(tmp_path, "w") as f:
         json.dump(watch_data, f)

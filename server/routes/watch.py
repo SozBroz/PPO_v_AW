@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from flask import Blueprint, render_template, jsonify, current_app, request
 
+from rl.paths import WATCH_STATE_PATH
+
 bp = Blueprint("watch", __name__)
 
 
@@ -17,16 +19,13 @@ def watch():
 @bp.route("/api/watch/state")
 def watch_state():
     """Return current watch_state.json for live polling."""
-    data_dir = current_app.config["DATA_DIR"]
-    state_path = data_dir / "watch_state.json"
-
-    if not state_path.exists():
+    if not WATCH_STATE_PATH.exists():
         return jsonify({
             "status": "no_game",
             "message": "No active game. Run: python train.py --watch-only"
         })
 
-    with open(state_path) as f:
+    with open(WATCH_STATE_PATH) as f:
         state = json.load(f)
     return jsonify(state)
 
