@@ -1055,6 +1055,150 @@ def _oracle_drift_spawn_unloaded_cargo(
     return True
 
 
+def _oracle_drift_spawn_mover_from_global(
+    state: GameState,
+    eng: int,
+    gu: dict[str, Any],
+    declared_mover_type: Optional["UnitType"],
+    sr: int,
+    sc: int,
+    er: int,
+    ec: int,
+) -> Optional[Unit]:
+    """Last-resort drift spawn: instantiate the missing mover at path-start.
+
+    Sister of :func:`_oracle_drift_spawn_unloaded_cargo`. Triggered by
+    :func:`_apply_move_paths_then_terminator` when AWBW emits a
+    ``Move`` / ``Load`` / ``Join`` / ``Supply`` etc. with a clearly identified
+    unit (``unit.global.units_id``) and the engine has fully lost it (deep
+    state drift downstream of an earlier missed Fire / Move / damage roll).
+    AWBW remains the ground truth for unit presence; spawning a drift mover
+    keeps the rest of the action stream applicable instead of bailing here
+    and forfeiting the remaining envelopes.
+
+    Strict guards (decline -> caller re-raises ``Move: no unit``):
+
+    1. ``declared_mover_type`` must be resolved (unit name in PHP global).
+    2. Path-start ``(sr, sc)`` in bounds. **Friendly** at path-start declines
+       (could be a legitimate same-tile presence earlier resolvers missed;
+       overwriting would mask a real bug). **Enemy** at path-start is treated
+       as a ghost AWBW already cleared and zeroed so the spawn can land.
+    3. Terrain at path-start passable for the unit type
+       (``effective_move_cost``) so the engine accepts the SELECT_UNIT.
+    4. Path-end may hold an **enemy ghost** AWBW already cleared -- zero
+       its HP so the engine path-walker does not refuse the move. Friendly
+       at path-end is left alone (could be a Join / Load partner).
+
+    One narrow ``Load``-envelope exception to (2): if path-start is held by a
+    friendly transport that can carry ``declared_mover_type`` and path-end is
+    empty + terrain-legal for the carrier, teleport the carrier to path-end so
+    the path-start tile frees up for the cargo spawn (game 1632702 pattern --
+    AWBW has the carrier at path-end and the cargo at path-start moving into
+    it, but engine drift left both consolidated on path-start).
+
+    Spawned units take the AWBW ``units_id`` as ``unit_id`` so subsequent
+    envelopes that look the unit up by AWBW id (``_unit_by_awbw_units_id``)
+    still find it. Engine's monotonic ``_allocate_unit_id`` starts at 1 and
+    never reaches AWBW PHP id magnitudes (~10^8), so no collision.
+
+    PHP ``units_fuel`` / ``units_ammo`` reflect *post-move* state and would
+    leave the spawn unable to execute the move it was just spawned for; we
+    use ``UNIT_STATS`` maxes instead. ``units_hit_points`` is honoured when
+    sane (1..10 display).
+    """
+    if declared_mover_type is None:
+        return None
+    h, w = state.map_data.height, state.map_data.width
+    if not (0 <= sr < h and 0 <= sc < w):
+        return None
+
+    from engine.weather import effective_move_cost
+    from engine.terrain import INF_PASSABLE
+
+    stats = UNIT_STATS[declared_mover_type]
+
+    start_occ = state.get_unit_at(sr, sc)
+    if start_occ is not None:
+        if int(start_occ.player) != int(eng):
+            start_occ.hp = 0
+        else:
+            teleported = False
+            if (
+                (sr, sc) != (er, ec)
+                and 0 <= er < h
+                and 0 <= ec < w
+                and state.get_unit_at(er, ec) is None
+                and UNIT_STATS[start_occ.unit_type].carry_capacity > 0
+                and declared_mover_type
+                in get_loadable_into(start_occ.unit_type)
+                and effective_move_cost(
+                    state, start_occ, state.map_data.terrain[er][ec]
+                )
+                < INF_PASSABLE
+            ):
+                start_occ.pos = (er, ec)
+                start_occ.moved = True
+                teleported = True
+            if not teleported:
+                return None
+
+    probe = Unit(
+        unit_type=declared_mover_type,
+        player=eng,
+        hp=100,
+        ammo=stats.max_ammo,
+        fuel=stats.max_fuel,
+        pos=(sr, sc),
+        moved=False,
+        loaded_units=[],
+        is_submerged=False,
+        capture_progress=20,
+        unit_id=0,
+    )
+    if effective_move_cost(state, probe, state.map_data.terrain[sr][sc]) >= INF_PASSABLE:
+        return None
+
+    if 0 <= er < h and 0 <= ec < w and (er, ec) != (sr, sc):
+        end_occ = state.get_unit_at(er, ec)
+        if end_occ is not None and int(end_occ.player) != int(eng):
+            end_occ.hp = 0
+
+    php_hp_internal = 100
+    raw_hp = gu.get("units_hit_points")
+    if raw_hp is not None:
+        try:
+            v = int(raw_hp) * 10
+            if 1 <= v <= 100:
+                php_hp_internal = v
+        except (TypeError, ValueError):
+            pass
+
+    awbw_uid: Optional[int] = None
+    raw_uid = gu.get("units_id")
+    if raw_uid is not None:
+        try:
+            awbw_uid = int(raw_uid)
+        except (TypeError, ValueError):
+            awbw_uid = None
+    new_uid = awbw_uid if awbw_uid is not None else state._allocate_unit_id()
+
+    spawned = Unit(
+        unit_type=declared_mover_type,
+        player=eng,
+        hp=php_hp_internal,
+        ammo=stats.max_ammo,
+        fuel=stats.max_fuel,
+        pos=(sr, sc),
+        moved=False,
+        loaded_units=[],
+        is_submerged=False,
+        capture_progress=20,
+        unit_id=new_uid,
+    )
+    state.units[eng].append(spawned)
+    return spawned
+
+
 def _oracle_drift_teleport_blocker_off_build_tile(
     state: GameState,
     r: int,
@@ -3863,6 +4007,17 @@ def _apply_move_paths_then_terminator(
         ]
         if len(pool) == 1:
             u = pool[0]
+    if u is None:
+        # Drift recovery: AWBW emits the Move with full unit identity but every
+        # engine-side scan has missed the mover (deep state drift downstream of
+        # earlier Fire / Move / damage drift). Spawn the missing unit at
+        # path-start so the rest of the action stream remains applicable --
+        # same family of recovery as ``_oracle_drift_spawn_unloaded_cargo``.
+        spawned = _oracle_drift_spawn_mover_from_global(
+            state, eng, gu, declared_mover_type, sr, sc, er, ec
+        )
+        if spawned is not None:
+            u = spawned
     if u is None:
         raise UnsupportedOracleAction(
             f"Move: no unit for engine P{eng} (awbw id {uid}) at path ({sr},{sc}) "
