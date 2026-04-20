@@ -1810,14 +1810,15 @@ def _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
     dr: int,
     dc: int,
 ) -> bool:
-    """Skip stale no-path ``Fire`` when orphan defender hp is 1–2 and no damage vs air here.
+    """Skip stale no-path ``Fire`` when orphan defender hp is 1–2 and chart has no damage vs air.
 
-    AWBW logs duplicate rows after the defender id leaves the unit table; snapshot hp
-    may still read 1–2 (lane B **1631068**, **1632124**). When the resolved defender
-    tile holds copter/plane but :func:`engine.combat.get_base_damage` is ``None`` for
-    the anchor unit (infantry **or** tank vs copter — both omitted in this engine),
-    no strike exists — safe to omit. Restricting **target** to air/copter excludes
-    tank-vs-naval gaps (**1630784**) where hp is typically >2 anyway.
+    Replay exports sometimes duplicate ``Move: []`` / ``Fire`` rows while the defender
+    row is orphaned (lane B **1632124**, **1631068** resolves without this when the chart
+    already damages air from the anchor). Gate on :func:`engine.combat.get_base_damage`
+    ``None`` **empirically** for this engine build — do not assume Advance Wars canon;
+    AWBW parity is tracked via ``awbw.fandom.com`` unit pages and replay fixtures. Targets
+    are restricted to ``air`` / ``copter`` classes so tank-vs-naval (**1630784**) is out
+    when defender hp orphans are rarely paired with naval targets here.
     """
     from engine.combat import get_base_damage
 

@@ -69,8 +69,8 @@ class TestOracleFireDefenderPostkillNoopLaneB(unittest.TestCase):
             _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(s, defender)
         )
 
-    def test_low_hp_orphan_vs_air_unmodelled_skip_infantry_and_tank(self) -> None:
-        """GL **1632124** (infantry); **1631068** (tank): no chart row vs copter."""
+    def test_low_hp_orphan_vs_air_when_get_base_damage_none(self) -> None:
+        """Regression: INFANTRY vs B-COPTER returns ``None`` from chart — skip predicate true."""
         s = self._empty_state()
         bc_st = UNIT_STATS[UnitType.B_COPTER]
         bc = Unit(
@@ -108,27 +108,6 @@ class TestOracleFireDefenderPostkillNoopLaneB(unittest.TestCase):
             "units_hit_points": 1,
             "units_id": 9919991,
         }
-        self.assertTrue(
-            _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
-                s, defender, 10, 10, 10, 11
-            )
-        )
-        s.units[0].clear()
-        tk_st = UNIT_STATS[UnitType.TANK]
-        tk = Unit(
-            UnitType.TANK,
-            0,
-            90,
-            tk_st.max_ammo,
-            tk_st.max_fuel,
-            (10, 10),
-            False,
-            [],
-            False,
-            20,
-            803,
-        )
-        s.units[0].append(tk)
         self.assertTrue(
             _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
                 s, defender, 10, 10, 10, 11
