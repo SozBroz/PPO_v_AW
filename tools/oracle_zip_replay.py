@@ -1477,6 +1477,59 @@ def _oracle_move_paths_for_envelope(
     return []
 
 
+def _oracle_merge_global_move_unit_with_seat_hints(
+    uwrap: dict[str, Any],
+    gl: dict[str, Any],
+    envelope_awbw_player_id: Optional[int],
+) -> dict[str, Any]:
+    """Overlay per-seat unit fields when ``unit.global`` uses fog sentinels (GL 1628722).
+
+    Global League PHP can set ``units_hit_points`` to ``"?"`` in ``global`` while the
+    envelope's player bucket (key ``players[].id``) still lists the real display HP.
+    Downstream parsers and drift-spawn HP clamps need a numeric scalar; without this
+    merge, ``int("?")`` can abort the action or leave ``gu`` inconsistent with the seat.
+
+    Only merges when ``units_id`` matches between ``global`` and the seat dict.
+    """
+    if envelope_awbw_player_id is None:
+        return gl
+    pid = int(envelope_awbw_player_id)
+    seat = uwrap.get(str(pid))
+    if not isinstance(seat, dict):
+        seat = uwrap.get(pid)
+    if not isinstance(seat, dict):
+        return gl
+    try:
+        if int(seat["units_id"]) != int(gl["units_id"]):
+            return gl
+    except (KeyError, TypeError, ValueError):
+        return gl
+    out = dict(gl)
+    gh = out.get("units_hit_points")
+    fog_hp = gh == "?" or (isinstance(gh, str) and gh.strip() == "?")
+    if not fog_hp:
+        return out
+    sh = seat.get("units_hit_points")
+    usable = False
+    if isinstance(sh, int) and not isinstance(sh, bool):
+        usable = True
+    elif isinstance(sh, str) and sh.strip() not in ("", "?"):
+        try:
+            int(sh, 10)
+            usable = True
+        except ValueError:
+            usable = False
+    elif isinstance(sh, float) and sh == sh:
+        try:
+            int(sh)
+            usable = True
+        except (TypeError, ValueError):
+            usable = False
+    if usable:
+        out["units_hit_points"] = sh
+    return out
+
+
 def _oracle_move_unit_global_for_envelope(
     move: dict[str, Any],
     envelope_awbw_player_id: Optional[int],
@@ -1487,7 +1540,9 @@ def _oracle_move_unit_global_for_envelope(
         return {}
     gl = u.get("global")
     if isinstance(gl, dict) and gl.get("units_id") is not None:
-        return gl
+        return _oracle_merge_global_move_unit_with_seat_hints(
+            u, gl, envelope_awbw_player_id
+        )
     if envelope_awbw_player_id is not None:
         pid = int(envelope_awbw_player_id)
         seat = u.get(str(pid))
@@ -2091,7 +2146,12 @@ def _oracle_fallback_repair_boat_and_ally(
             # Multiple allies at the same Manhattan distance from this boat (crowded front).
             chosen = min(tops, key=lambda t: int(t[2].unit_id))
         else:
-            continue
+            # Several Black Boats each sit ``best_d`` tiles from a different same-HP ally
+            # (GL 1624764: three INF at display 10 all Manhattan 3 from distinct BBs). The
+            # old ``continue`` left ``_oracle_fallback_nearest_allied_repair_target_pos`` as
+            # ``None`` and broke ``Repair`` resolution. Deterministic (boat_id, ally_id) tie
+            # break matches AWBW's stable id ordering in practice for this class of ties.
+            chosen = min(tops, key=lambda t: (int(t[1].unit_id), int(t[2].unit_id)))
         # Black Boats cover long sea legs; move-drift can leave the ally several tiles off
         # until :func:`_oracle_snap_black_boat_toward_repair_ally` (reg. 1634889).
         if best_d <= 12:
