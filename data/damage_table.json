@@ -7,7 +7,8 @@
     "Modifiers from CO bonuses, terrain, and luck are applied by the engine at runtime.",
     "2026-04: Filled Lander/Gunboat/BlackBoat for Mech/Recon/Tank/MedTank/NeoTank/MegaTank (AWBW ground-vs-transport; cross-check https://awbw.fandom.com/wiki/Damage_Chart \u2014 automated fetch may hit Cloudflare). Was null, which hid legal adjacent fire in get_attack_targets and oracle Fire (no path).",
     "2026-04: Tank vs B-Copter / T-Copter set to 55 / 85 (MG vs light air per AWBW; confirm at https://awbw.fandom.com/wiki/Damage_Chart). Was null; GL replay 1624764 records Tank vs B-Copter adjacent direct fire (PHP snapshot + combatInfo), which get_attack_targets must allow.",
-    "2026-04: MedTank/NeoTank/MegaTank vs BCopter/TCopter set to 35/35 (MG). Was null; GL lane A 1621898 / 1629921 (Neo vs B-Copter). Recon/Infantry/Mech unchanged here; awbw.fandom.com/wiki/Damage_Chart returned 404 when authored \u2014 values taken from AWBW replay combat envelopes for those games."
+    "2026-04: MedTank/NeoTank/MegaTank vs BCopter/TCopter set to 35/35 (MG). Was null; GL lane A 1621898 / 1629921 (Neo vs B-Copter). Recon/Infantry/Mech unchanged here; awbw.fandom.com/wiki/Damage_Chart returned 404 when authored \u2014 values taken from AWBW replay combat envelopes for those games.",
+    "2026-04 (agent4): Infantry/Mech vs B-Copter/T-Copter filled with AW2 canon (Inf 7/3, Mech MG 9/5) per awbw.fandom.com/wiki/Damage_Chart; previously null hid the strike entirely (engine refused legitimate foot-vs-rotor fire \u2014 e.g. GL 1635708 P0 Inf vs P1 T-Copter). Foot vs Fighter/Bomber/Stealth left null: per AW2/AWBW, ground MGs cannot target fixed-wing; null is the documented \"cannot target\" sentinel here."
   ],
   "unit_order": [
     "Infantry",
@@ -55,8 +56,8 @@
       null,
       null,
       null,
-      null,
-      null,
+      7,
+      3,
       null,
       null,
       null,
@@ -84,8 +85,8 @@
       null,
       null,
       null,
-      null,
-      null,
+      9,
+      5,
       null,
       null,
       null,

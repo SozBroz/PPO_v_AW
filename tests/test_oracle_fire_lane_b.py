@@ -13,6 +13,7 @@ from tools.oracle_zip_replay import (
     _oracle_fire_defender_row_is_postkill_noop,
     _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air,
     _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied,
+    _oracle_get_killed_awbw_ids,
 )
 
 
@@ -55,7 +56,15 @@ class TestOracleFireDefenderPostkillNoopLaneB(unittest.TestCase):
         self.assertTrue(_oracle_fire_defender_row_is_postkill_noop(s, defender))
 
     def test_dead_defender_orphan_reoccupied_tile_is_noop(self) -> None:
-        """GL **1631194**: hp 0, defender id gone, unrelated unit on recorded tile."""
+        """GL **1631194**: hp 0, defender id gone, unrelated unit on recorded tile.
+
+        The original gate (``_unit_by_awbw_units_id is None``) was uninformative
+        in the zip-replay lane (engine units don't carry AWBW ids), so the skip
+        is now keyed on the per-state set of AWBW ids the oracle has already
+        applied as killed by a prior ``Fire`` row. We seed that set here to
+        model "earlier envelope already killed defender 192332445; this row is
+        the duplicate re-emit".
+        """
         s = self._empty_state()
         r, c = 9, 4
         s.units[1].append(_t_copter(1, (r, c), uid=1001))
@@ -65,12 +74,41 @@ class TestOracleFireDefenderPostkillNoopLaneB(unittest.TestCase):
             "units_hit_points": 0,
             "units_id": 192332445,
         }
+        _oracle_get_killed_awbw_ids(s).add(192332445)
         self.assertTrue(
             _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(s, defender)
         )
 
+    def test_dead_defender_first_strike_is_not_noop(self) -> None:
+        """GL **1628985**: first ``hp=0`` row IS the killing strike; do not skip.
+
+        Engine has the original defender alive on the recorded tile; the
+        oracle has not yet applied any strike on this AWBW id. The function
+        must return False so the caller proceeds to apply the kill (rather
+        than orphaning the engine unit and corrupting the state into a stack
+        on the next envelope).
+        """
+        s = self._empty_state()
+        r, c = 10, 9
+        s.units[1].append(_t_copter(1, (r, c), uid=7))
+        defender = {
+            "units_y": r,
+            "units_x": c,
+            "units_hit_points": 0,
+            "units_id": 192111511,
+        }
+        self.assertFalse(
+            _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(s, defender)
+        )
+
     def test_low_hp_orphan_vs_air_when_get_base_damage_none(self) -> None:
-        """Regression: INFANTRY vs B-COPTER returns ``None`` from chart — skip predicate true."""
+        """Regression: orphan air defender hp 1-2 + live unrelated unit on tile -> skip predicate true.
+
+        Originally gated on ``get_base_damage(INFANTRY, B_COPTER) is None``; agent4
+        filled that chart cell (see ``data/damage_table.json``) so the gate is now
+        class-based on the orphan-tile occupant. Test name retained for blame
+        history; behaviour is unchanged for this fixture (Inf vs B-Copter, hp 1).
+        """
         s = self._empty_state()
         bc_st = UNIT_STATS[UnitType.B_COPTER]
         bc = Unit(

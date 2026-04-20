@@ -207,6 +207,17 @@ python tools/run_desync_cluster.py --baseline logs/baselines/desync_register_202
 | `engine_bug` | Engine raised under a mapped action — investigate against AWBW rules |
 | `state_mismatch_investigate` | Reserved for register integration — use [`replay_state_diff.py`](../tools/replay_state_diff.py) for per-snapshot engine vs PHP diffs today |
 
+### Mandatory closure log — `replay_no_action_stream` deletions
+
+Per [`.cursor/skills/desync-triage-viewer/SKILL.md`](../.cursor/skills/desync-triage-viewer/SKILL.md)
+"Mandatory closure" column 1, RV1 snapshot-only zips are deleted from
+`replays/amarriner_gl/` because the audit cannot step them. Re-fetch only if
+the mission needs a good copy from a different mirror.
+
+| Deleted at | `games_id` | Reason | Verified by |
+|------------|-----------:|--------|-------------|
+| 2026-04-20 | 1629304, 1629357, 1630259, 1630263, 1635371 | RV1 PHP-snapshot-only zip; `parse_p_envelopes_from_zip` returns empty (no `a<games_id>` action gzip). Each archive contains exactly one entry (`{games_id}` snapshot) and is 1.5–2.4 KB, vs typical action-stream zips that are tens of KB. | `tools/desync_audit.py --register logs/desync_register_validate_20260420_full.jsonl` rows tagged `replay_no_action_stream`. |
+
 ### `wait_on_capturable_*` (telemetry only)
 
 A capturing unit (`Infantry` / `Mech`) `Move` envelope ending on a property

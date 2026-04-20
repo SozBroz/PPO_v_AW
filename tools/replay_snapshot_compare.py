@@ -148,8 +148,12 @@ def compare_units(
         php_name = str(pu.get("name", "")).strip()
         eng_name = UNIT_STATS[eu.unit_type].name
         if php_name and eng_name != php_name:
-            # AWBW sometimes omits spaces ("Md.Tank"); tolerate alias
-            aliases = {"Md.Tank": "Md. Tank"}
+            # AWBW sometimes omits spaces ("Md.Tank") and uses short forms;
+            # tolerate the aliases the comparator sees in PHP snapshots.
+            aliases = {
+                "Md.Tank": "Medium Tank",
+                "Md. Tank": "Medium Tank",
+            }
             eng_cmp = aliases.get(eng_name, eng_name)
             php_cmp = aliases.get(php_name, php_name)
             if eng_cmp != php_cmp:

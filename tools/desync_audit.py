@@ -38,12 +38,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+# Canonical seed for the regression gate. Pin this and never touch it without
+# coordinating a new baseline — the gate compares register diffs and any
+# borderline luck-roll-sensitive game (e.g. ``Fire (no path)`` strikes that
+# fall back to engine RNG when AWBW combatInfo is missing) will flip class on
+# any seed change. See ``logs/desync_regression_log.md`` for the rationale.
+CANONICAL_SEED = 1
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -292,6 +300,13 @@ def _audit_catalog_incomplete(
     )
 
 
+def _seed_for_game(seed: int, games_id: int) -> int:
+    """Mix the audit's process-wide seed with the games_id so each game has a
+    deterministic-but-distinct RNG stream. Bit-mixing (rather than a string
+    seed) keeps reseeding cheap and avoids hash-randomization sensitivity."""
+    return ((int(seed) & 0xFFFFFFFF) << 32) | (int(games_id) & 0xFFFFFFFF)
+
+
 def _audit_one(
     *,
     games_id: int,
@@ -299,7 +314,17 @@ def _audit_one(
     meta: dict[str, Any],
     map_pool: Path,
     maps_dir: Path,
+    seed: int,
 ) -> AuditRow:
+    # Pin Python's process-wide RNG to a value derived from games_id (mixed
+    # with the audit's --seed). engine.combat.calculate_damage falls back to
+    # ``random.randint(0, 9)`` whenever AWBW's per-strike combatInfo override
+    # is missing (seam attacks, missing units_hit_points, etc.). Without this
+    # reseed every audit run rolled a different luck stream, cascading into
+    # unit-position drift and flipping borderline games (e.g. 1634965)
+    # between ``ok`` and ``oracle_gap`` from one process to the next.
+    random.seed(_seed_for_game(seed, games_id))
+
     co_p0, co_p1 = pair_catalog_cos_ids(meta)
     map_id = _meta_int(meta, "map_id")
     tier = str(meta.get("tier", ""))
@@ -412,6 +437,16 @@ def main() -> int:
         action="store_true",
         help="Print full Python tracebacks to stderr for engine_bug rows",
     )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=CANONICAL_SEED,
+        help=(
+            "Process-wide RNG seed mixed with each games_id before that game's "
+            "replay (default: CANONICAL_SEED=%(default)s). Required for the "
+            "regression gate to be deterministic; see logs/desync_regression_log.md."
+        ),
+    )
     args = ap.parse_args()
 
     if not args.catalog.is_file():
@@ -461,6 +496,7 @@ def main() -> int:
                         meta=meta,
                         map_pool=args.map_pool,
                         maps_dir=args.maps_dir,
+                        seed=args.seed,
                     )
             except Exception as exc:  # safety net — never let one zip stop the batch
                 row = AuditRow(

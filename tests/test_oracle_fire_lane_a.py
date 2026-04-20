@@ -31,7 +31,17 @@ class TestOracleFireLaneA(unittest.TestCase):
         self.assertEqual(get_base_damage(UnitType.NEO_TANK, UnitType.B_COPTER), 35)
         self.assertEqual(get_base_damage(UnitType.NEO_TANK, UnitType.T_COPTER), 35)
         self.assertEqual(get_base_damage(UnitType.MED_TANK, UnitType.B_COPTER), 35)
-        self.assertIsNone(get_base_damage(UnitType.INFANTRY, UnitType.B_COPTER))
+        # Foot-vs-rotor canon (AW2 / awbw.fandom.com/wiki/Damage_Chart): Infantry
+        # 7/3 vs B-/T-Copter, Mech MG 9/5. Filled by agent4 (was null, hid the
+        # strike entirely — see GL 1635708 P0 Inf -> P1 T-Copter).
+        self.assertEqual(get_base_damage(UnitType.INFANTRY, UnitType.B_COPTER), 7)
+        self.assertEqual(get_base_damage(UnitType.INFANTRY, UnitType.T_COPTER), 3)
+        self.assertEqual(get_base_damage(UnitType.MECH, UnitType.B_COPTER), 9)
+        self.assertEqual(get_base_damage(UnitType.MECH, UnitType.T_COPTER), 5)
+        # Foot vs fixed-wing remains null (cannot target — AW2/AWBW: ground MGs
+        # cannot lock fixed-wing aircraft).
+        self.assertIsNone(get_base_damage(UnitType.INFANTRY, UnitType.FIGHTER))
+        self.assertIsNone(get_base_damage(UnitType.MECH, UnitType.STEALTH))
 
     def test_foot_snap_single_neighbor_gl1625784(self) -> None:
         md = load_map(69201, POOL, MAPS)

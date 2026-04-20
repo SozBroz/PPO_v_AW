@@ -1729,8 +1729,14 @@ def _oracle_set_combat_damage_override_from_combat_info(
         counter = max(0, int(attacker.hp) - awbw_att_hp)
 
     if dmg is None and counter is None:
+        # Even if we have no override to set (no AWBW HP for either side) we
+        # still want to remember that AWBW reported the defender as dead, so
+        # later duplicate ``hp=0`` rows for the same id are recognised as
+        # post-kill no-ops in the orphan-tile check.
+        _oracle_record_defender_killed(state, def_ci if isinstance(def_ci, dict) else {})
         return
     state._oracle_combat_damage_override = (dmg, counter)
+    _oracle_record_defender_killed(state, def_ci if isinstance(def_ci, dict) else {})
 
 
 def _oracle_fire_chebyshev1_neighbours(r: int, c: int) -> list[tuple[int, int]]:
@@ -1766,14 +1772,83 @@ def _oracle_fire_defender_row_is_postkill_noop(
     return occ is None or not occ.is_alive
 
 
+def _oracle_get_killed_awbw_ids(state: GameState) -> set[int]:
+    """Per-state set of AWBW ``units_id`` values that the oracle has already
+    applied as killed by a prior ``Fire`` row in this replay.
+
+    Lazily attached to the state so we don't have to extend the engine
+    dataclass. The zip-replay path does not stamp engine ``unit_id`` with the
+    AWBW ``units_id``, so ``_unit_by_awbw_units_id`` cannot tell us whether a
+    ``hp=0`` defender row is the original killing strike or a duplicate
+    re-emit. The only ground truth available in this lane is whether *we*
+    have already applied a strike on that AWBW id.
+    """
+    s = getattr(state, "_oracle_killed_awbw_units_ids", None)
+    if s is None:
+        s = set()
+        state._oracle_killed_awbw_units_ids = s  # type: ignore[attr-defined]
+    return s
+
+
+def _oracle_record_defender_killed(state: GameState, defender: dict[str, Any]) -> None:
+    """Record the JSON defender's AWBW ``units_id`` if AWBW reports it dead.
+
+    Called from the combat-damage override helper, which runs immediately
+    before every ``Fire`` envelope's ATTACK step. Idempotent: re-adding an
+    id is a no-op.
+    """
+    if not isinstance(defender, dict):
+        return
+    raw_hp = defender.get("units_hit_points")
+    if raw_hp is None:
+        return
+    try:
+        if int(raw_hp) > 0:
+            return
+    except (TypeError, ValueError):
+        return
+    raw_id = defender.get("units_id")
+    if raw_id is None:
+        return
+    try:
+        did = int(raw_id)
+    except (TypeError, ValueError):
+        return
+    _oracle_get_killed_awbw_ids(state).add(did)
+
+
 def _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(
-    state: GameState, defender: dict[str, Any]
+    state: GameState,
+    defender: dict[str, Any],
+    attacker_eng: Optional[int] = None,
+    attacker_anchor: Optional[tuple[int, int]] = None,
 ) -> bool:
     """Duplicate no-path ``Fire`` after the victim disappeared but another unit holds the tile.
 
-    JSON defender hp<=0 and ``units_id`` no longer maps to any live unit, yet the map
-    tile still has a unit (lane B GL **1631194**): resolve would target the wrong
-    defender class. Skip the envelope instead of raising ``Fire (no path)``.
+    The original gate ``_unit_by_awbw_units_id(state, did) is None`` only works
+    in the live-audit lane (``tools/desync_audit_amarriner_live``) where
+    engine units carry AWBW ids. In the zip-replay lane engine units use small
+    sequential ``unit_id``s, so that lookup is *always* ``None`` and the
+    orphan check turned into "skip whenever any unit is on the recorded tile",
+    which silently swallowed the legitimate killing strike (GL **1628985**:
+    Artillery 192111507 -> Black Boat 192111511 at engine (10,9) on env 14).
+
+    The faithful signals available in this lane:
+
+    1. **Friendly occupant.** If the engine occupant is friendly to the JSON
+       attacker, it cannot be the defender (drift case).
+    2. **Already-killed id.** If the AWBW ``units_id`` is in the per-state
+       kill set, an earlier Fire row in this replay already took it to 0
+       hp; this row is a duplicate re-emit (lane B GL **1631194**).
+    3. **Attacker anchor missing.** If the JSON attacker has no friendly
+       unit at the recorded anchor, the engine state has drifted enough
+       that the row's strike is unsafe to apply (GL **1631858** env 26
+       j=16: AWBW expects a P0 attacker at engine (6,10) but engine has
+       a P1 Tank stuck there from earlier turns; applying would target
+       the wrong defender). Skip.
+    4. **First kill, enemy occupant, attacker present.** Otherwise the
+       engine occupant is most plausibly the original defender — apply
+       the strike (GL 1628985).
     """
     try:
         ry = int(defender["units_y"])
@@ -1796,10 +1871,21 @@ def _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(
         did = int(raw_id)
     except (TypeError, ValueError):
         return False
+    occ = state.get_unit_at(ry, rx)
+    if occ is None or not occ.is_alive:
+        return False
+    if attacker_eng is not None and int(occ.player) == int(attacker_eng):
+        return True
+    if did in _oracle_get_killed_awbw_ids(state):
+        return True
     if _unit_by_awbw_units_id(state, did) is not None:
         return False
-    occ = state.get_unit_at(ry, rx)
-    return occ is not None and occ.is_alive
+    if attacker_eng is not None and attacker_anchor is not None:
+        ar, ac = int(attacker_anchor[0]), int(attacker_anchor[1])
+        au = state.get_unit_at(ar, ac)
+        if au is None or not au.is_alive or int(au.player) != int(attacker_eng):
+            return True
+    return False
 
 
 def _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
@@ -1810,18 +1896,21 @@ def _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
     dr: int,
     dc: int,
 ) -> bool:
-    """Skip stale no-path ``Fire`` when orphan defender hp is 1–2 and chart has no damage vs air.
+    """Skip stale no-path ``Fire`` when orphan air defender hp is 1-2 and tile holds an unrelated live unit.
 
     Replay exports sometimes duplicate ``Move: []`` / ``Fire`` rows while the defender
     row is orphaned (lane B **1632124**, **1631068** resolves without this when the chart
-    already damages air from the anchor). Gate on :func:`engine.combat.get_base_damage`
-    ``None`` **empirically** for this engine build — do not assume Advance Wars canon;
-    AWBW parity is tracked via ``awbw.fandom.com`` unit pages and replay fixtures. Targets
-    are restricted to ``air`` / ``copter`` classes so tank-vs-naval (**1630784**) is out
-    when defender hp orphans are rarely paired with naval targets here.
+    already damages air from the anchor). The original gate combined the orphan condition
+    with ``get_base_damage(...) is None`` to scope the no-op to engine builds that could
+    not model the strike at all. After agent4 filled Infantry/Mech vs B-/T-Copter
+    (see ``data/damage_table.json``), the chart-None gate evaporates for the foot-vs-rotor
+    case — but the underlying defect (PHP defender already dead, engine tile reoccupied
+    by an unrelated live unit) still demands a no-op: re-firing would strike the wrong
+    unit. The gate is therefore class-based (``air`` / ``copter``) on the orphan-tile-
+    occupant, independent of chart contents. Lane B fixtures continue to assert this
+    branch via ``test_low_hp_orphan_vs_air_when_get_base_damage_none`` (renamed
+    semantically to "air" in docs; symbol kept stable for downstream callers).
     """
-    from engine.combat import get_base_damage
-
     raw_hp = defender.get("units_hit_points")
     raw_id = defender.get("units_id")
     if raw_hp is None or raw_id is None:
@@ -1840,9 +1929,7 @@ def _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
     if ax is None or tg is None or not ax.is_alive or not tg.is_alive:
         return False
     stg = UNIT_STATS[tg.unit_type]
-    if stg.unit_class not in ("air", "copter"):
-        return False
-    return get_base_damage(ax.unit_type, tg.unit_type) is None
+    return stg.unit_class in ("air", "copter")
 
 
 def _oracle_fire_indirect_defender_from_attack_ring(
@@ -4199,6 +4286,25 @@ def _oracle_snap_mover_to_awbw_path_end(
             f"player={unit.player} from {unit.pos} -> {(er, ec)}"
         )
     state._move_unit_forced(unit, (er, ec))
+    # If the snap fired while the engine still holds this unit in ACTION
+    # (deferred ``Unload`` after a transport ``Move``, deferred ``Capt`` /
+    # ``Fire`` etc.), ``state.selected_move_pos`` still references the
+    # engine-truncated end from the preceding ``_engine_step(SELECT_UNIT,
+    # move_pos=…)``. The next terminator the oracle drains via
+    # ``_oracle_finish_action_if_stale`` (or ``_apply_unload`` keying off its
+    # own ``move_pos``) would then call ``_move_unit(unit, stale_tile)`` from
+    # the snapped ``unit.pos`` and raise ``Illegal move … is not reachable``
+    # at ``engine/game.py`` ~L1326 (desync register: 1619108 / 1631302 /
+    # 1634717 — ``engine_bug`` triggered by AWBW ``Unload`` after a snapped
+    # transport ``Move``). Re-anchor ``selected_move_pos`` on the new
+    # ``unit.pos`` so the deferred terminator commits a no-op ``WAIT`` /
+    # legal ``UNLOAD`` from the post-snap tile instead.
+    if (
+        state.action_stage == ActionStage.ACTION
+        and state.selected_unit is unit
+        and state.selected_move_pos != unit.pos
+    ):
+        state.selected_move_pos = unit.pos
     return True
 
 
@@ -6303,7 +6409,7 @@ def _apply_oracle_action_json_body(
             if _oracle_fire_defender_row_is_postkill_noop(state, defender):
                 return
             if _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(
-                state, defender
+                state, defender, attacker_eng=eng, attacker_anchor=(sr, sc)
             ):
                 return
             dr, dc = _oracle_fire_resolve_defender_target_pos(
