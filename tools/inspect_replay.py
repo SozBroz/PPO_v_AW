@@ -52,7 +52,7 @@ with zipfile.ZipFile(path) as z:
         try:
             with gzip.open(io.BytesIO(raw)) as gz:
                 text2 = gz.read().decode("utf-8")
-        except:
+        except Exception:
             text2 = raw.decode("utf-8", errors="replace")
         if text2.startswith("p:"):
             print(f"  Action stream found in '{name}': first 300 chars:")

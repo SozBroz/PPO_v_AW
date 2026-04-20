@@ -5,8 +5,9 @@
     {
       "row": 3,
       "col": 17,
-      "player": 1,
-      "unit_type": "INFANTRY"
+      "player": 0,
+      "unit_type": "INFANTRY",
+      "hp": 100
     }
   ]
 }

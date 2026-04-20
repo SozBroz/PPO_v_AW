@@ -145,6 +145,10 @@ Walk this checklist before reading code:
 - Tests live at the repo root as `test_*.py`, run via `python -m unittest`.
 - The exporter's appended action stream must remain best-effort — never fail the snapshot zip if the stream errors.
 
+## Replay ingest (download → normalize → audit)
+
+- **Downloading GL replays** and keeping **Orange Star / Blue Moon** map colors + `desync_audit` register: see **`.cursor/skills/awbw-replay-ingest/SKILL.md`** (`tools/amarriner_download_replays.py`, `tools/normalize_map_to_os_bm.py`).
+
 ## Additional resources
 
 - For PHP-serialization layout, p: action JSON shapes, player_id mapping rules, the full UnitType→cost/move table, and the CO id table, see `reference.md`.

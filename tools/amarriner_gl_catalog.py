@@ -20,11 +20,17 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from tools.amarriner_catalog_cos import catalog_row_has_both_cos
 
 BASE = "https://awbw.amarriner.com"
 LIST_URL = BASE + "/gamescompleted.php?league=Y&type=std&start={start}"
@@ -32,8 +38,11 @@ LIST_URL = BASE + "/gamescompleted.php?league=Y&type=std&start={start}"
 # Split listing into per-game HTML chunks (50 games per full page when present).
 _RE_GAME_ANCHOR = re.compile(r'<a class="anchor" name="game_(\d+)"></a>', re.I)
 # Player portraits in the matchup row (excludes small "CO ban" strip portraits).
+# Must match both ``ds/`` (DS-style sheets) and ``aw2/`` (e.g. Sturm, Von Bolt) —
+# the old ``.../ds/...``-only pattern yielded ``co_p*_id: null`` whenever a row used aw2.
+# Filename stops at ``?`` so ``[^?]+\.png`` cannot swallow ``?v=`` into the name.
 _RE_PLAYER_CO = re.compile(
-    r"class='co_portrait'\s+src=terrain/co-portraits/ds/[^\"]+\.png\?v=(\d+)\?v=",
+    r"class='co_portrait'\s+src=terrain/co-portraits/[^/]+/[^?]+\.png\?v=(\d+)\?v=",
     re.I,
 )
 # Map name follows a thumbnail <br>Name</span> inside the prevmaps cell.
@@ -211,6 +220,12 @@ def main() -> int:
     c.add_argument("--co-id", type=int, default=1, help="Both players' AWBW co_id (e.g. Andy = 1)")
     c.add_argument("--catalog", type=Path, default=default_out, help="Catalog JSON from ``build``")
 
+    li = sub.add_parser(
+        "list-incomplete-cos",
+        help="List games whose catalog row is missing co_p0_id or co_p1_id (cannot run engine)",
+    )
+    li.add_argument("--catalog", type=Path, default=default_out, help="Catalog JSON from ``build``")
+
     args = ap.parse_args()
     if args.cmd == "build":
         payload = build_catalog(
@@ -242,6 +257,27 @@ def main() -> int:
             )
         if len(hits) > 40:
             print(f"    ... +{len(hits) - 40} more")
+        return 0
+
+    if args.cmd == "list-incomplete-cos":
+        if not args.catalog.is_file():
+            print(f"[amarriner_gl_catalog] no catalog at {args.catalog} — run ``build`` first.")
+            return 2
+        cat = load_catalog(args.catalog)
+        bad: list[dict[str, Any]] = []
+        for g in cat.get("games", {}).values():
+            if isinstance(g, dict) and not catalog_row_has_both_cos(g):
+                bad.append(g)
+        bad.sort(key=lambda x: int(x["games_id"]))
+        print(
+            f"[amarriner_gl_catalog] games missing one or both CO ids: {len(bad)} "
+            f"(of {cat['meta'].get('n_games', '?')} total)"
+        )
+        for g in bad:
+            print(
+                f"  games_id={g['games_id']} co=({g.get('co_p0_id')!r},{g.get('co_p1_id')!r}) "
+                f"tier={g.get('tier')!r} map_id={g.get('map_id')}"
+            )
         return 0
 
     return 1

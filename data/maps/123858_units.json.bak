@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "_source": "1635846 turn-0: both awbwUnits are players_id 3778617 → engine P1. Game 1631881 snapshot had the opposite seating; GL replays need engine seats matching PHP map_snapshot.",
+  "units": [
+    {
+      "row": 12,
+      "col": 8,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 2,
+      "col": 20,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

@@ -1475,6 +1475,92 @@ def _oracle_fire_chebyshev1_neighbours(r: int, c: int) -> list[tuple[int, int]]:
     return out
 
 
+def _oracle_fire_defender_row_is_postkill_noop(
+    state: GameState, defender: dict[str, Any]
+) -> bool:
+    """AWBW duplicate ``Fire`` after the defender died: JSON hp<=0 and tile empty (GL 1628985)."""
+    try:
+        ry = int(defender["units_y"])
+        rx = int(defender["units_x"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    raw_hp = defender.get("units_hit_points")
+    if raw_hp is None:
+        return False
+    try:
+        hp_i = int(raw_hp)
+    except (TypeError, ValueError):
+        return False
+    if hp_i > 0:
+        return False
+    occ = state.get_unit_at(ry, rx)
+    return occ is None or not occ.is_alive
+
+
+def _oracle_fire_indirect_defender_from_attack_ring(
+    state: GameState,
+    *,
+    aeng: int,
+    anchor: tuple[int, int],
+    record: tuple[int, int],
+    hint_hp: Optional[int],
+) -> Optional[tuple[int, int]]:
+    """When vision names a Chebyshev neighbour, snap to a foe in the indirect Manhattan ring.
+
+    Indirect units cannot strike Chebyshev-adjacent tiles; :func:`get_attack_targets`
+    from the declared anchor is authoritative (GL **1609533**: artillery at ``(5,3)``
+    vs defender recorded one step inside minimum range).
+    """
+    ar, ac = int(anchor[0]), int(anchor[1])
+    u_a = state.get_unit_at(ar, ac)
+    if u_a is None or not u_a.is_alive or int(u_a.player) != int(aeng):
+        return None
+    st = UNIT_STATS[u_a.unit_type]
+    if not st.is_indirect:
+        return None
+    ring = get_attack_targets(state, u_a, u_a.pos)
+    if not ring:
+        return None
+    pr, pc = int(record[0]), int(record[1])
+
+    def _foe_at(tr: int, tc: int) -> Optional[Unit]:
+        eu = state.get_unit_at(tr, tc)
+        if eu is None or not eu.is_alive or int(eu.player) == int(aeng):
+            return None
+        return eu
+
+    ring_foes: list[tuple[int, int, Unit]] = []
+    for tr, tc in ring:
+        eu = _foe_at(tr, tc)
+        if eu is not None:
+            ring_foes.append((tr, tc, eu))
+    if not ring_foes:
+        return None
+    if hint_hp is not None:
+        want = int(hint_hp)
+        strict = [(tr, tc, u) for tr, tc, u in ring_foes if int(u.display_hp) == want]
+        if len(strict) == 1:
+            return (strict[0][0], strict[0][1])
+        relaxed = [
+            (tr, tc, u)
+            for tr, tc, u in ring_foes
+            if _repair_display_hp_matches_hint(int(u.display_hp), want)
+        ]
+        if len(relaxed) == 1:
+            return (relaxed[0][0], relaxed[0][1])
+    if len(ring_foes) == 1:
+        return (ring_foes[0][0], ring_foes[0][1])
+    ring_foes.sort(
+        key=lambda t: (
+            abs(t[0] - pr) + abs(t[1] - pc),
+            t[0],
+            t[1],
+            int(t[2].unit_id),
+        )
+    )
+    return (ring_foes[0][0], ring_foes[0][1])
+
+
 def _oracle_fire_resolve_defender_target_pos(
     state: GameState,
     defender: dict[str, Any],
@@ -1512,6 +1598,17 @@ def _oracle_fire_resolve_defender_target_pos(
 
     def _is_foe(u: Optional[Unit]) -> bool:
         return u is not None and u.is_alive and int(u.player) != aeng
+
+    if attacker_anchor is not None:
+        ir_snap = _oracle_fire_indirect_defender_from_attack_ring(
+            state,
+            aeng=aeng,
+            anchor=attacker_anchor,
+            record=(dr, dc),
+            hint_hp=hint_hp,
+        )
+        if ir_snap is not None:
+            return ir_snap
 
     if did is not None:
         du = _unit_by_awbw_units_id(state, did)
@@ -5625,6 +5722,8 @@ def _apply_oracle_action_json_body(
                             state, apid, awbw_to_engine, before_engine_step
                         )
             eng = int(state.active_player)
+            if _oracle_fire_defender_row_is_postkill_noop(state, defender):
+                return
             dr, dc = _oracle_fire_resolve_defender_target_pos(
                 state,
                 defender,
@@ -5716,6 +5815,8 @@ def _apply_oracle_action_json_body(
             raise UnsupportedOracleAction(
                 f"Fire for engine P{eng} but active_player={state.active_player}"
             )
+        if _oracle_fire_defender_row_is_postkill_noop(state, defender):
+            return
         dr, dc = _oracle_fire_resolve_defender_target_pos(
             state, defender, attacker_eng=eng
         )

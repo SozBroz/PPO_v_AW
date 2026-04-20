@@ -6,19 +6,22 @@
       "row": 8,
       "col": 1,
       "player": 0,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 0,
       "col": 14,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 7,
       "col": 21,
       "player": 1,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     }
   ]
 }

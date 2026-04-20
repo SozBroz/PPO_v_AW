@@ -6,7 +6,8 @@
       "row": 2,
       "col": 20,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     }
   ]
 }

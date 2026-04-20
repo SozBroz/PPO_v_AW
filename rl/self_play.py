@@ -133,7 +133,7 @@ def _greedy_action_score(state: GameState, a: Action) -> float:
         return 120.0
     if at == ActionType.REPAIR:
         return 110.0
-    if at == ActionType.WAIT:
+    if at in (ActionType.WAIT, ActionType.DIVE_HIDE):
         return 80.0
     if at == ActionType.SELECT_UNIT:
         if state.action_stage == ActionStage.SELECT:
@@ -176,6 +176,64 @@ def pick_capture_greedy_flat(state: GameState, mask: np.ndarray) -> int:
     return int(random.choice(best))
 
 
+_VALID_COLD_OPPONENTS = ("random", "greedy_capture", "end_turn")
+
+
+def _passive_cold_action(state: GameState, mask: np.ndarray) -> int | None:
+    """Pick an action that keeps the active player passive this microstep.
+
+    Implements the "true punching bag" semantics for ``cold_opponent='end_turn'``
+    when the engine refuses END_TURN (mandatory unit activation). The walk is:
+
+    - At SELECT: pick any unmoved unit via SELECT_UNIT (forced; END_TURN was
+      already filtered by the caller via mask[0]==False).
+    - At MOVE  : pick the destination equal to the selected unit's current
+      tile (a 0-cost stay-in-place move; always reachable).
+    - At ACTION: pick WAIT (flat ``_WAIT_IDX``) — ends the action chain
+      without attacking, capturing, or building.
+
+    Returns ``None`` if no defensible passive action could be chosen, in
+    which case the caller falls back to a random legal action.
+    """
+    from rl.env import _action_to_flat, _WAIT_IDX
+    from rl.network import ACTION_SPACE_SIZE
+
+    stage = state.action_stage
+    if stage == ActionStage.SELECT:
+        # Some unit must move; pick the first SELECT_UNIT in legal order.
+        for act in get_legal_actions(state):
+            if act.action_type == ActionType.SELECT_UNIT and act.move_pos is None:
+                idx = _action_to_flat(act)
+                if 0 <= idx < ACTION_SPACE_SIZE and bool(mask[idx]):
+                    return idx
+        return None
+
+    if stage == ActionStage.MOVE:
+        unit = state.selected_unit
+        if unit is None:
+            return None
+        # Stay-in-place move: SELECT_UNIT with move_pos = unit.pos.
+        for act in get_legal_actions(state):
+            if (
+                act.action_type == ActionType.SELECT_UNIT
+                and act.move_pos == unit.pos
+            ):
+                idx = _action_to_flat(act)
+                if 0 <= idx < ACTION_SPACE_SIZE and bool(mask[idx]):
+                    return idx
+        # Stay-in-place not in legal moves (rare); fall through to None
+        # so caller picks random legal MOVE.
+        return None
+
+    if stage == ActionStage.ACTION:
+        # Prefer WAIT to terminate without attacking/capturing/building.
+        if 0 <= _WAIT_IDX < ACTION_SPACE_SIZE and bool(mask[_WAIT_IDX]):
+            return int(_WAIT_IDX)
+        return None
+
+    return None
+
+
 class _CheckpointOpponent:
     """
     Picklable opponent policy that loads random historical checkpoints.
@@ -183,8 +241,19 @@ class _CheckpointOpponent:
     Lazily loads a checkpoint on first call and refreshes every
     `refresh_every` calls so the opponent pool rotates naturally as
     new checkpoints are written by the trainer.
-    Falls back to :func:`pick_capture_greedy_flat` when no checkpoints exist yet
-    (instead of uniform random) so early training sees property contests.
+
+    Cold-start behaviour (no checkpoints yet) is selectable via
+    ``cold_opponent``:
+
+    - ``"random"`` (default, post fix): uniform random legal action. The
+      weakest reasonable opponent — gives the learner a chance to discover
+      capture before facing a teacher.
+    - ``"greedy_capture"``: pre-fix legacy default; uses
+      :func:`pick_capture_greedy_flat`. Strong, asymmetric — manufactures
+      a property-skew gradient if the learner has no matching teacher.
+    - ``"end_turn"``: punching-bag opponent; picks END_TURN whenever
+      legal so P0 has the entire map to itself. Used for the smoke gate
+      in plan p0-capture-architecture-fix.
 
     With ``pool_from_fleet``, also samples ``checkpoint_*.zip`` under
     ``<checkpoint_dir>/pool/*/`` (divergent aux trainers writing into
@@ -197,11 +266,18 @@ class _CheckpointOpponent:
         refresh_every: int = 500,
         opponent_mix: float = 0.0,
         pool_from_fleet: bool = False,
+        cold_opponent: str = "random",
     ) -> None:
         self._dir = checkpoint_dir
         self._refresh_every = refresh_every
         self._opponent_mix = max(0.0, min(1.0, float(opponent_mix)))
         self._pool_from_fleet = bool(pool_from_fleet)
+        cold = str(cold_opponent or "random").strip().lower()
+        if cold not in _VALID_COLD_OPPONENTS:
+            raise ValueError(
+                f"cold_opponent must be one of {_VALID_COLD_OPPONENTS}; got {cold_opponent!r}"
+            )
+        self._cold_opponent = cold
         self._model = None
         self._n_calls = 0
         # Exposed so AWBWEnv can count per-episode reloads. Incremented
@@ -244,32 +320,57 @@ class _CheckpointOpponent:
             self._model = None
 
     def mode(self) -> str:
-        """Return ``checkpoint``, ``greedy``, or ``mixed`` for game logs."""
+        """Return the opponent mode label for game_log records."""
         if self._model is None:
-            return "greedy_capture"
+            return f"cold_{self._cold_opponent}"
         if self._opponent_mix > 0.0:
             return "mixed"
         return "checkpoint"
+
+    def _cold_action(self, mask: np.ndarray) -> int:
+        """Pick an action under the configured cold-opponent policy."""
+        if self._cold_opponent == "end_turn":
+            # END_TURN flat=0 is only legal once every friendly unit has
+            # moved this turn (engine forces unit activity; see
+            # _get_select_actions). When END_TURN is illegal, walk every
+            # unit through SELECT -> stay-in-place MOVE -> WAIT so the
+            # turn ends without doing anything substantive — the true
+            # punching-bag semantics.
+            if len(mask) > 0 and bool(mask[0]):
+                return 0
+            env = self._env_ref() if self._env_ref is not None else None
+            st: GameState | None = getattr(env, "state", None) if env is not None else None
+            if st is not None:
+                idx = _passive_cold_action(st, mask)
+                if idx is not None:
+                    return idx
+            legal = np.where(mask)[0]
+            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+        if self._cold_opponent == "greedy_capture":
+            env = self._env_ref() if self._env_ref is not None else None
+            st: GameState | None = getattr(env, "state", None) if env is not None else None
+            if st is not None:
+                return pick_capture_greedy_flat(st, mask)
+            legal = np.where(mask)[0]
+            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+        # default: random legal action
+        legal = np.where(mask)[0]
+        return int(np.random.choice(legal)) if len(legal) > 0 else 0
 
     def __call__(self, obs: dict, mask: np.ndarray) -> int:
         if self._n_calls % self._refresh_every == 0:
             self._load_random()
         self._n_calls += 1
 
-        use_greedy = self._model is None
+        # When opponent_mix is set, sometimes substitute the *cold opponent*
+        # (capture-greedy historically; now configurable) for the loaded
+        # checkpoint to inject a teacher signal mid-training.
         if self._model is not None and self._opponent_mix > 0.0:
             if random.random() < self._opponent_mix:
-                use_greedy = True
-
-        if use_greedy:
-            env = self._env_ref() if self._env_ref is not None else None
-            st: GameState | None = getattr(env, "state", None) if env is not None else None
-            if st is not None:
-                return pick_capture_greedy_flat(st, mask)
+                return self._cold_action(mask)
 
         if self._model is None:
-            legal = np.where(mask)[0]
-            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+            return self._cold_action(mask)
 
         action, _ = self._model.predict(obs, action_masks=mask, deterministic=False)
         return int(action)
@@ -285,6 +386,7 @@ def _make_env_factory(
     curriculum_tag: str | None = None,
     opponent_mix: float = 0.0,
     pool_from_fleet: bool = False,
+    cold_opponent: str = "random",
 ) -> Callable:
     """Return a picklable env factory for SubprocVecEnv."""
     def _init():
@@ -294,6 +396,7 @@ def _make_env_factory(
             checkpoint_dir,
             opponent_mix=opponent_mix,
             pool_from_fleet=pool_from_fleet,
+            cold_opponent=cold_opponent,
         )
         env = AWBWEnv(
             map_pool=map_pool,
@@ -455,6 +558,7 @@ class SelfPlayTrainer:
         pool_from_fleet: bool = False,
         load_promoted: bool = False,
         bc_init: Optional[Path | str] = None,
+        cold_opponent: str = "random",
     ) -> None:
         roll = n_steps * n_envs
         if batch_size > roll:
@@ -481,6 +585,12 @@ class SelfPlayTrainer:
         self.pool_from_fleet = bool(pool_from_fleet)
         self.load_promoted = bool(load_promoted)
         self.bc_init = Path(bc_init).resolve() if bc_init else None
+        cold = str(cold_opponent or "random").strip().lower()
+        if cold not in _VALID_COLD_OPPONENTS:
+            raise ValueError(
+                f"cold_opponent must be one of {_VALID_COLD_OPPONENTS}; got {cold_opponent!r}"
+            )
+        self.cold_opponent = cold
 
         if device == "auto":
             try:
@@ -544,6 +654,7 @@ class SelfPlayTrainer:
             curriculum_tag=self.curriculum_tag,
             opponent_mix=self.opponent_mix,
             pool_from_fleet=self.pool_from_fleet,
+            cold_opponent=self.cold_opponent,
         )
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
@@ -593,6 +704,7 @@ class SelfPlayTrainer:
             cur_bits.append("load_promoted=1")
         if self.bc_init is not None:
             cur_bits.append(f"bc_init={self.bc_init}")
+        cur_bits.append(f"cold_opponent={self.cold_opponent}")
         cur_msg = (" | " + " ".join(cur_bits)) if cur_bits else ""
         print(
             f"[self_play] Starting | steps={steps_msg} | "

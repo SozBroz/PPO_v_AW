@@ -467,7 +467,7 @@ def _emit_move_or_fire(
     p0_id: int,
     p1_id: int,
 ) -> Optional[dict[str, Any]]:
-    """Apply one WAIT/ATTACK/CAPTURE/LOAD action and return the JSON to append.
+    """Apply one WAIT/DIVE_HIDE/ATTACK/CAPTURE/LOAD action and return the JSON to append.
 
     Snapshots attacker (and defender for ATTACK) **before** ``state.step`` so
     the emitted ``Move`` sub-action carries pre-combat HP / ammo / fuel. For
@@ -648,7 +648,7 @@ def _rebuild_and_emit(
                 ))
             continue
 
-        if atype in (ActionType.WAIT, ActionType.ATTACK,
+        if atype in (ActionType.WAIT, ActionType.DIVE_HIDE, ActionType.ATTACK,
                      ActionType.CAPTURE, ActionType.LOAD,
                      ActionType.REPAIR):
             payload = _emit_move_or_fire(state, action, pid_of, p0_id, p1_id)
@@ -742,7 +742,7 @@ def _rebuild_and_emit_with_snapshots(
                 ))
             continue
 
-        if atype in (ActionType.WAIT, ActionType.ATTACK,
+        if atype in (ActionType.WAIT, ActionType.DIVE_HIDE, ActionType.ATTACK,
                      ActionType.CAPTURE, ActionType.LOAD,
                      ActionType.REPAIR):
             payload = _emit_move_or_fire(state, action, pid_of, p0_id, p1_id)

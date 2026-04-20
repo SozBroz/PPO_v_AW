@@ -56,8 +56,12 @@ class UnitStats:
     move_type: str          # MOVE_* constant
     move_range: int
     max_fuel: int
-    fuel_per_turn: int      # consumed at start of each of this unit's turns
-    max_ammo: int           # -1 = unlimited (Recon MG); 0 = unarmed
+    fuel_per_turn: int      # consumed at start of each of this unit's turns (see AWBW chart)
+    # Expendable ammo capacity (AWBW ``units.php`` / amarriner Unit Chart):
+    #   0 = no tracked magazine (MG-only infantry/recon, transports, bombs…);
+    #       attacks still use ``min_range``/``max_range`` / damage table; no −1 ammo.
+    #   >0 = finite shots; each direct/seam fire consumes 1 from ``Unit.ammo``.
+    max_ammo: int
     vision: int
     cost: int               # in funds
     unit_class: str         # "infantry" | "mech" | "vehicle" | "copter" | "air" | "naval" | "pipe"
@@ -73,12 +77,16 @@ class UnitStats:
 # ---------------------------------------------------------------------------
 # Full stats table for all 27 units
 # ---------------------------------------------------------------------------
+# Fuel / ammo: chart numbers from https://awbw.fandom.com/wiki/Units .
+# Movement fuel is terrain-based in ``terrain.py`` / ``weather.py``.
+# Start-of-turn idle drain for air/sea is ``idle_start_of_day_fuel_drain``
+# (Sub dive + Stealth hide, Eagle air discount) per the same page § Fuel.
 UNIT_STATS: dict[UnitType, UnitStats] = {
     UnitType.INFANTRY: UnitStats(
         unit_type=UnitType.INFANTRY, name="Infantry",
         move_type=MOVE_INF, move_range=3,
         max_fuel=99, fuel_per_turn=0,
-        max_ammo=9, vision=2, cost=1000,
+        max_ammo=0, vision=2, cost=1000,
         unit_class="infantry", can_capture=True,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
@@ -96,7 +104,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_type=UnitType.RECON, name="Recon",
         move_type=MOVE_TIRE_A, move_range=8,
         max_fuel=80, fuel_per_turn=0,
-        max_ammo=-1, vision=5, cost=4000,
+        max_ammo=0, vision=5, cost=4000,
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
@@ -148,7 +156,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
     ),
     UnitType.ARTILLERY: UnitStats(
         unit_type=UnitType.ARTILLERY, name="Artillery",
-        move_type=MOVE_TIRE_B, move_range=5,
+        move_type=MOVE_TREAD, move_range=5,
         max_fuel=50, fuel_per_turn=0,
         max_ammo=9, vision=1, cost=6000,
         unit_class="vehicle", can_capture=False,
@@ -157,7 +165,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
     ),
     UnitType.ROCKET: UnitStats(
         unit_type=UnitType.ROCKET, name="Rocket",
-        move_type=MOVE_TIRE_B, move_range=5,
+        move_type=MOVE_TREAD, move_range=5,
         max_fuel=50, fuel_per_turn=0,
         max_ammo=6, vision=1, cost=15000,
         unit_class="vehicle", can_capture=False,
@@ -175,7 +183,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
     ),
     UnitType.MISSILES: UnitStats(
         unit_type=UnitType.MISSILES, name="Missiles",
-        move_type=MOVE_TIRE_B, move_range=4,
+        move_type=MOVE_TREAD, move_range=4,
         max_fuel=50, fuel_per_turn=0,
         max_ammo=6, vision=2, cost=12000,
         unit_class="vehicle", can_capture=False,
@@ -294,7 +302,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_type=UnitType.BLACK_BOMB, name="Black Bomb",
         move_type=MOVE_AIR, move_range=9,
         max_fuel=45, fuel_per_turn=5,
-        max_ammo=1, vision=1, cost=25000,
+        max_ammo=0, vision=1, cost=25000,
         unit_class="air", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
@@ -302,7 +310,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
     UnitType.PIPERUNNER: UnitStats(
         unit_type=UnitType.PIPERUNNER, name="Piperunner",
         move_type=MOVE_PIPELINE, move_range=9,
-        max_fuel=99, fuel_per_turn=2,
+        max_fuel=99, fuel_per_turn=0,
         max_ammo=9, vision=4, cost=20000,
         unit_class="pipe", can_capture=False,
         carry_capacity=0, min_range=2, max_range=5,
@@ -318,6 +326,40 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         is_indirect=False, is_submarine=False, can_dive=False,
     ),
 }
+
+
+def idle_start_of_day_fuel_drain(unit: "Unit", co_id: int) -> int:
+    """Fuel consumed at the start of this unit owner's turn (AWBW idle / \"day\" drain).
+
+    Authoritative rules: https://awbw.fandom.com/wiki/Units#Fuel — sea 1/day
+    with +4 when a Sub is submerged (5 total); copters 2/day; planes 5/day
+    with +3 when a Stealth is hidden (8 total); Eagle (CO id 10) applies −2/day
+    to his *air* units (wiki: copters 0, planes 3, hidden Stealth 6). Naval
+    idle drain is not reduced by Eagle.
+    """
+    st = UNIT_STATS[unit.unit_type]
+    cls = st.unit_class
+    eagle_air = 2 if co_id == 10 else 0
+
+    if cls in ("infantry", "mech", "vehicle", "pipe"):
+        return 0
+
+    if cls == "naval":
+        n = 1
+        if st.is_submarine and unit.is_submerged:
+            n += 4
+        return n
+
+    if cls == "copter":
+        return max(0, 2 - eagle_air)
+
+    if cls == "air":
+        plane_base = max(0, 5 - eagle_air)
+        if unit.unit_type == UnitType.STEALTH and unit.is_submerged:
+            return plane_base + 3
+        return plane_base
+
+    return 0
 
 
 # ---------------------------------------------------------------------------

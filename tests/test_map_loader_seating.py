@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from engine.map_loader import PropertyState, apply_p0_country_id_seating
+from pathlib import Path
+
+from engine.map_loader import PropertyState, apply_p0_country_id_seating, load_map
 from engine.predeployed import PredeployedUnitSpec
 from engine.unit import UnitType
 
@@ -38,8 +40,10 @@ def test_apply_p0_country_id_identity():
     ]
     scan = {5: 0, 1: 1}
     spec = PredeployedUnitSpec(0, 1, 0, UnitType.INFANTRY)
+    # Tile (0,1): terrain 95 → country 5 (matches new_ctp seat for p0_country_id=5).
+    terrain = [[0, 95], [0, 0]]
     new_ctp, specs, hq, lab = apply_p0_country_id_seating(
-        props, scan, 5, [spec], map_id=0, map_name="test"
+        props, scan, 5, [spec], terrain, map_id=0, map_name="test"
     )
     assert new_ctp == {5: 0, 1: 1}
     assert props[0].owner == 0 and props[1].owner == 1
@@ -55,8 +59,9 @@ def test_apply_p0_country_id_swaps_os_to_red_seat():
     ]
     scan = {5: 0, 1: 1}
     spec = PredeployedUnitSpec(0, 1, 0, UnitType.INFANTRY)
+    terrain = [[0, 95], [0, 0]]
     new_ctp, specs, hq, lab = apply_p0_country_id_seating(
-        props, scan, 1, [spec], map_id=0, map_name="test"
+        props, scan, 1, [spec], terrain, map_id=0, map_name="test"
     )
     assert new_ctp == {1: 0, 5: 1}
     assert props[0].owner == 1
@@ -67,11 +72,22 @@ def test_apply_p0_country_id_swaps_os_to_red_seat():
     assert lab[0] == [] and lab[1] == []
 
 
+def test_inland_viking_gl_map_pool_seats_orange_star_on_engine_p0():
+    """146797 CSV is normalized to OS/BM; pool ``p0_country_id=1`` — OS=P0, BM=P1."""
+    root = Path(__file__).resolve().parents[1]
+    m = load_map(146797, root / "data" / "gl_map_pool.json", root / "data" / "maps")
+    assert m.country_to_player == {1: 0, 2: 1}
+    os_base = next(p for p in m.properties if p.row == 9 and p.col == 26)
+    bm_base = next(p for p in m.properties if p.row == 0 and p.col == 14)
+    assert os_base.owner == 0
+    assert bm_base.owner == 1
+
+
 def test_apply_p0_country_id_rejects_bad_country():
     props = [_prop(95, 0, 0, 0, is_hq=True)]
     try:
         apply_p0_country_id_seating(
-            props, {5: 0, 1: 1}, 99, [], map_id=0, map_name="test"
+            props, {5: 0, 1: 1}, 99, [], [[95]], map_id=0, map_name="test"
         )
     except ValueError as e:
         assert "p0_country_id=99" in str(e)

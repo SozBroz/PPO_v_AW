@@ -11,6 +11,9 @@ Schema (JSON object):
     "player": 0 | 1,
     "unit_type": str,   # UnitType enum name, e.g. "INFANTRY"
     "hp": int (optional, default 100),
+    "force_engine_player": 0 | 1 (optional) — after ``p0_country_id`` remap, use this
+        engine seat instead of inferring from terrain country under the unit (rare;
+        e.g. map 69201 predeploy on another country's base).
   }
 """
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from engine.unit import Unit, UnitType, UNIT_STATS
 
@@ -30,6 +33,7 @@ class PredeployedUnitSpec:
     player: int
     unit_type: UnitType
     hp: int = 100
+    force_engine_player: Optional[int] = None
 
 
 def _parse_unit_type(name: str) -> UnitType:
@@ -71,11 +75,25 @@ def load_predeployed_units_file(path: Path) -> list[PredeployedUnitSpec]:
         if not 1 <= hp <= 100:
             raise ValueError(f"{path}: units[{i}].hp must be 1–100, got {hp}")
 
+        raw_fe = u.get("force_engine_player")
+        if raw_fe is None:
+            fe: Optional[int] = None
+        else:
+            fe = int(raw_fe)
+            if fe not in (0, 1):
+                raise ValueError(
+                    f"{path}: units[{i}].force_engine_player must be 0 or 1, got {fe}"
+                )
+
         pos = (row, col)
         if pos in seen:
             raise ValueError(f"{path}: duplicate unit at {pos}")
         seen.add(pos)
-        out.append(PredeployedUnitSpec(row=row, col=col, player=player, unit_type=ut, hp=hp))
+        out.append(
+            PredeployedUnitSpec(
+                row=row, col=col, player=player, unit_type=ut, hp=hp, force_engine_player=fe
+            )
+        )
 
     return out
 

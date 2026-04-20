@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from engine.action import Action, ActionType, get_reachable_tiles
+from engine.action import Action, ActionType, compute_reachable_costs, get_reachable_tiles
 from engine.game import make_initial_state
 from engine.map_loader import load_map
 from engine.unit import Unit, UnitType, UNIT_STATS
@@ -21,6 +21,9 @@ MAPS_DIR = ROOT / "data" / "maps"
 
 MOUNTAIN_ID = 2
 MAP_166877 = 166877
+# GL "A Dance With Magnums" — Lash vs Lash mirror (e.g. games 1627935) needs
+# Terrain Tactics / Prime Tactics movement flattening (AWBW wiki).
+MAP_159501 = 159501
 
 
 def _make_unit(unit_type: UnitType, player: int, pos: tuple[int, int]) -> Unit:
@@ -40,7 +43,7 @@ def _make_unit(unit_type: UnitType, player: int, pos: tuple[int, int]) -> Unit:
 
 
 class TestMountainReachability(unittest.TestCase):
-    """Artillery (tire B) must NOT reach mountains; infantry/mech must."""
+    """Artillery (tread, like tanks) must NOT reach mountains; infantry/mech must."""
 
     def setUp(self) -> None:
         self.md = load_map(MAP_166877, POOL, MAPS_DIR)
@@ -61,7 +64,7 @@ class TestMountainReachability(unittest.TestCase):
         reachable = get_reachable_tiles(self.state, unit)
         self.assertNotIn(
             (1, 18), reachable,
-            "Artillery (MOVE_TIRE_B) must not be able to enter a mountain tile.",
+            "Artillery (MOVE_TREAD) must not be able to enter a mountain tile.",
         )
 
     def test_tank_cannot_enter_mountain(self) -> None:
@@ -112,6 +115,49 @@ class TestMoveUnitGuard(unittest.TestCase):
         self.state.units[0].append(inf)
         self.state._move_unit(inf, (1, 18))
         self.assertEqual(inf.pos, (1, 18))
+
+
+class TestLashTerrainTacticsMovement(unittest.TestCase):
+    """Lash COP/SCOP: passable terrain costs 1 MP (AWBW wiki), except under snow weather."""
+
+    def setUp(self) -> None:
+        self.md = load_map(MAP_159501, POOL, MAPS_DIR)
+        self.assertEqual(
+            [self.md.terrain[5][c] for c in (4, 5, 6)],
+            [MOUNTAIN_ID, MOUNTAIN_ID, MOUNTAIN_ID],
+            "Map 159501 row 5 cols 4–6 expected three consecutive mountains.",
+        )
+        self.assertEqual(self.md.terrain[6][4], 3, "Expected woods south of that ridge.")
+
+    def test_infantry_cannot_cross_three_mountains_without_lash_power(self) -> None:
+        st = make_initial_state(self.md, 16, 16, starting_funds=0, tier_name="T2")
+        st.units = {0: [], 1: []}
+        inf = _make_unit(UnitType.INFANTRY, 0, (6, 4))
+        st.units[0].append(inf)
+        st.co_states[0].cop_active = False
+        st.co_states[0].scop_active = False
+        reach = compute_reachable_costs(st, inf)
+        self.assertNotIn((5, 6), reach)
+
+    def test_infantry_crosses_three_mountains_during_lash_cop(self) -> None:
+        st = make_initial_state(self.md, 16, 16, starting_funds=0, tier_name="T2")
+        st.units = {0: [], 1: []}
+        inf = _make_unit(UnitType.INFANTRY, 0, (6, 4))
+        st.units[0].append(inf)
+        st.co_states[0].cop_active = True
+        reach = compute_reachable_costs(st, inf)
+        self.assertIn((5, 6), reach)
+        self.assertEqual(reach[(5, 6)], 3)
+
+    def test_lash_flattening_disabled_under_snow_weather(self) -> None:
+        st = make_initial_state(self.md, 16, 16, starting_funds=0, tier_name="T2")
+        st.units = {0: [], 1: []}
+        inf = _make_unit(UnitType.INFANTRY, 0, (6, 4))
+        st.units[0].append(inf)
+        st.weather = "snow"
+        st.co_states[0].cop_active = True
+        reach = compute_reachable_costs(st, inf)
+        self.assertNotIn((5, 6), reach)
 
 
 class TestDay1Income(unittest.TestCase):

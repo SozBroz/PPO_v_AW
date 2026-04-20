@@ -21,7 +21,7 @@ def _load_game_records(log_path: Path) -> list[dict]:
         return []
     records: list[dict] = []
     with open(log_path, encoding="utf-8") as f:
-        for idx, raw in enumerate(f):
+        for raw in f:
             line = raw.strip()
             if not line:
                 continue
@@ -34,17 +34,22 @@ def _load_game_records(log_path: Path) -> list[dict]:
     return records
 
 
+def _recent_games_sidebar() -> list[dict]:
+    all_records = _load_game_records(GAME_LOG_PATH)
+    return list(reversed(all_records[-50:]))
+
+
 @bp.route("/")
 def replay_list():
     """List recent games from game_log.jsonl."""
-    all_records = _load_game_records(GAME_LOG_PATH)
-    games = list(reversed(all_records[-50:]))
-    return render_template("replay.html", games=games)
+    return render_template("replay.html", games=_recent_games_sidebar())
 
 
 @bp.route("/<int:game_idx>")
 def replay_game(game_idx: int):
-    return render_template("replay.html", game_idx=game_idx, games=[])
+    # Same sidebar as `/replay/` so deep links do not show "No games yet" while
+    # the canvas loads via `/replay/api/<game_idx>`.
+    return render_template("replay.html", game_idx=game_idx, games=_recent_games_sidebar())
 
 
 @bp.route("/api/<int:game_idx>")

@@ -5873,7 +5873,7 @@
       "map_id": 77060,
       "map_name": "A Hope Forlorn",
       "co_p0_id": 12,
-      "co_p1_id": null,
+      "co_p1_id": 29,
       "list_index": 489,
       "source_start": 451,
       "scraped_at": "2026-04-18T11:15:09.764004+00:00"
@@ -8164,8 +8164,8 @@
       "matchup": "Ghidorah vs \u1d18\u1d0b\u1d0d\u0274Raisin",
       "map_id": 77060,
       "map_name": "A Hope Forlorn",
-      "co_p0_id": null,
-      "co_p1_id": null,
+      "co_p0_id": 29,
+      "co_p1_id": 29,
       "list_index": 680,
       "source_start": 651,
       "scraped_at": "2026-04-18T11:15:13.964740+00:00"

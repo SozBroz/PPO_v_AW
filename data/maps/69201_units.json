@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "_source": "fetched from awbw game 1634041 turn-0 snapshot",
+  "_source": "1634041 turn-0; GL seating (e.g. 1619589) has this infantry on engine P1 \u2014 do not force_engine_player.",
   "units": [
     {
       "row": 2,
       "col": 1,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     }
   ]
 }

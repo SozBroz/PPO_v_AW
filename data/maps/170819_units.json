@@ -5,20 +5,23 @@
     {
       "row": 10,
       "col": 5,
-      "player": 0,
-      "unit_type": "CRUISER"
+      "player": 1,
+      "unit_type": "CRUISER",
+      "hp": 100
     },
     {
       "row": 8,
       "col": 11,
-      "player": 1,
-      "unit_type": "CRUISER"
+      "player": 0,
+      "unit_type": "CRUISER",
+      "hp": 100
     },
     {
       "row": 2,
       "col": 16,
-      "player": 1,
-      "unit_type": "INFANTRY"
+      "player": 0,
+      "unit_type": "INFANTRY",
+      "hp": 100
     }
   ]
 }

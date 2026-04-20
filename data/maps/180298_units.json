@@ -13,13 +13,15 @@
       "row": 6,
       "col": 6,
       "player": 1,
-      "unit_type": "ARTILLERY"
+      "unit_type": "ARTILLERY",
+      "hp": 100
     },
     {
       "row": 2,
       "col": 7,
       "player": 0,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 8,
@@ -39,19 +41,22 @@
       "row": 16,
       "col": 13,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 12,
       "col": 14,
       "player": 0,
-      "unit_type": "ARTILLERY"
+      "unit_type": "ARTILLERY",
+      "hp": 100
     },
     {
       "row": 0,
       "col": 16,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 13,
@@ -64,7 +69,8 @@
       "row": 14,
       "col": 17,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     }
   ]
 }

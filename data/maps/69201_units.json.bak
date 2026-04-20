@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "_source": "1634041 turn-0; GL seating (e.g. 1619589) has this infantry on engine P1 — do not force_engine_player.",
+  "units": [
+    {
+      "row": 2,
+      "col": 1,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

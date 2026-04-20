@@ -195,6 +195,19 @@ class TestSeamAttackResolution(unittest.TestCase):
         ))
         self.assertEqual(state.map_data.terrain[2][2], RUBBLE_V)
 
+    def test_rubble_tile_stays_rubble_across_extra_seam_strikes(self) -> None:
+        """AWBW allows repeated AttackSeam vs 115/116; terrain must not flip to plain(1)."""
+        state = _fresh(seam_id=SEAM_V)
+        arty = _make_unit(state, UnitType.ARTILLERY, 0, (2, 0))
+        state.map_data.terrain[2][2] = RUBBLE_V
+        state.seam_hp.pop((2, 2), None)
+        _select_and_move(state, arty, arty.pos)
+        state.step(Action(
+            ActionType.ATTACK,
+            unit_pos=arty.pos, move_pos=arty.pos, target_pos=(2, 2),
+        ))
+        self.assertEqual(state.map_data.terrain[2][2], RUBBLE_V)
+
     def test_calculate_seam_damage_luck_free(self) -> None:
         """Seam damage must not vary across calls (no luck roll)."""
         from engine.co import make_co_state_safe

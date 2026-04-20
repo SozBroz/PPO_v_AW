@@ -5,11 +5,13 @@ Two rules enforced in ``engine/action.py``:
   1. ``END_TURN`` at SELECT stage is only legal once every friendly unit has
      ``moved=True`` (or the player has no units at all). The no-op path is
      still available as ``SELECT_UNIT -> WAIT`` on the unit's own tile.
-  2. A capture-capable unit (infantry/mech) standing on a neutral or enemy
-     capturable property cannot ``WAIT`` when an ``ATTACK`` or ``CAPTURE``
-     action is available. Missile silos (non-property) and owned buildings
-     are unaffected; if neither attack nor capture is possible the unit may
-     still WAIT so it is never deadlocked.
+  2. A capture-capable unit (infantry/mech) on a neutral or enemy capturable
+     property cannot ``WAIT`` when ``CAPTURE`` is available (same rule for
+     mid-capture). ``ATTACK`` alone does not remove ``WAIT``. To leave the
+     tile without capturing, use ``SELECT`` / ``MOVE`` on a later turn.
+     Missile silos (non-property) and owned buildings are unaffected; if
+     ``CAPTURE`` is not offered the unit may still ``WAIT`` so it is never
+     deadlocked.
 """
 from __future__ import annotations
 
@@ -52,12 +54,12 @@ def _build_map(terrain: list[list[int]], properties: list[PropertyState]) -> Map
     )
 
 
-def _neutral_city(row: int, col: int) -> PropertyState:
+def _neutral_city(row: int, col: int, *, capture_points: int = 20) -> PropertyState:
     return PropertyState(
         terrain_id=NEUTRAL_CITY,
         row=row, col=col,
         owner=None,
-        capture_points=20,
+        capture_points=capture_points,
         is_hq=False, is_lab=False, is_comm_tower=False,
         is_base=False, is_airport=False, is_port=False,
     )
@@ -174,6 +176,18 @@ class TestWaitPruningOnProperty(unittest.TestCase):
         self.assertIn(ActionType.CAPTURE, types)
         self.assertNotIn(ActionType.WAIT, types)
 
+    def test_infantry_on_partially_capped_neutral_city_loses_wait(self) -> None:
+        """Mid-capture: still no WAIT while CAPTURE is legal."""
+        terrain = [[PLAIN] * 5 for _ in range(5)]
+        terrain[2][2] = NEUTRAL_CITY
+        st = _fresh_state(terrain, [_neutral_city(2, 2, capture_points=12)])
+        inf = _make_unit(st, UnitType.INFANTRY, 0, (2, 3))
+
+        _select_and_move(st, inf, (2, 2))
+        types = {a.action_type for a in get_legal_actions(st)}
+        self.assertIn(ActionType.CAPTURE, types)
+        self.assertNotIn(ActionType.WAIT, types)
+
     def test_mech_on_enemy_base_loses_wait(self) -> None:
         terrain = [[PLAIN] * 5 for _ in range(5)]
         terrain[2][2] = NEUTRAL_BASE
@@ -225,15 +239,41 @@ class TestWaitPruningOnProperty(unittest.TestCase):
         self.assertIn(ActionType.WAIT, types)
         self.assertNotIn(ActionType.CAPTURE, types)
 
-    def test_step_rejects_hand_crafted_wait_on_neutral_city(self) -> None:
+    def test_step_accepts_hand_crafted_wait_on_neutral_city(self) -> None:
+        """Engine ⊂ AWBW: WAIT on a capturable property is legal in AWBW
+        (the player can decline to capture). ``get_legal_actions`` still
+        prunes WAIT here for RL shaping, but ``step`` must accept it."""
         terrain = [[PLAIN] * 5 for _ in range(5)]
         terrain[2][2] = NEUTRAL_CITY
-        st = _fresh_state(terrain, [_neutral_city(2, 2)])
+        prop = _neutral_city(2, 2)
+        st = _fresh_state(terrain, [prop])
         inf = _make_unit(st, UnitType.INFANTRY, 0, (2, 3))
 
         _select_and_move(st, inf, (2, 2))
-        with self.assertRaises(ValueError):
-            st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
+        st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
+
+        self.assertTrue(inf.moved)
+        self.assertEqual(prop.capture_points, 20)  # WAIT did not start a capture
+
+    def test_step_accepts_wait_on_partially_capped_city(self) -> None:
+        """Same as above with a partial-capture pre-state. AWBW lets the
+        capturer step away (or here, just WAIT in place); the pre-existing
+        capture progress is preserved (only resets on tile vacate or death)."""
+        terrain = [[PLAIN] * 5 for _ in range(5)]
+        terrain[2][2] = NEUTRAL_CITY
+        prop = _neutral_city(2, 2, capture_points=8)
+        st = _fresh_state(terrain, [prop])
+        inf = _make_unit(st, UnitType.INFANTRY, 0, (2, 3))
+
+        _select_and_move(st, inf, (2, 2))
+        st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
+
+        self.assertTrue(inf.moved)
+        # ``_move_unit`` only resets the *source* tile (here a plain), not the
+        # destination. The pre-existing partial cap therefore persists; AWBW
+        # would clear it on the prior owner's tile-vacate event, which the
+        # engine already models elsewhere.
+        self.assertEqual(prop.capture_points, 8)
 
 
 if __name__ == "__main__":

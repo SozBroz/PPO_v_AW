@@ -29,7 +29,7 @@ Use `use_reloader=False` in `server/app.py` (or `flask run --no-reload`) so the 
 | Red/blue seats (P0 first, human = P0) | `docs/player_seats.md` |
 | Slice `game_log.jsonl` by who opens (seat / tempo) | `docs/seat_measurement.md` |
 | Play API + sessions + bot + demo log | `server/play_human.py` |
-| Routes | `server/routes/game.py` |
+| Routes | `server/routes/game.py`; `server/routes/replay.py` (`/replay/` lists `game_log.jsonl`) |
 | App factory | `server/app.py` |
 | Checkpoint opponent / training | `rl/self_play.py` |
 | Network | `rl/network.py` |

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1631228 turn-0 snapshot",
+  "units": [
+    {
+      "row": 17,
+      "col": 1,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 17,
+      "col": 4,
+      "player": 1,
+      "unit_type": "LANDER"
+    },
+    {
+      "row": 0,
+      "col": 10,
+      "player": 0,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 20,
+      "col": 18,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 3,
+      "col": 24,
+      "player": 0,
+      "unit_type": "LANDER"
+    }
+  ]
+}

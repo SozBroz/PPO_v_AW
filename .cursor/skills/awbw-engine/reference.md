@@ -39,7 +39,7 @@ Read this only when you need exact field-by-field information beyond `SKILL.md`.
 Move types: `MOVE_INF`, `MOVE_MECH`, `MOVE_TREAD`, `MOVE_TIRE_A`, `MOVE_TIRE_B`, `MOVE_AIR`, `MOVE_SEA`, `MOVE_LANDER`, `MOVE_PIPELINE` (engine/terrain.py).
 
 Producible-by-terrain (engine/action.py::`get_producible_units`):
-- `is_base` → ground units (excluding Piperunner, Oozium)
+- `is_base` → ground units (including Piperunner; excluding Oozium)
 - `is_airport` → air units
 - `is_port` → naval units
 - Bans (`unit_bans` on MapData) filter Black Bomb, Stealth, Piperunner, Oozium

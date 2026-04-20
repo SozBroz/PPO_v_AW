@@ -16,7 +16,16 @@ from rl.paths import WATCH_STATE_PATH, ensure_logs_dir
 
 
 def units_list(state) -> list[dict]:
-    """Serialize all alive units to the shape expected by board.js."""
+    """Serialize all alive units to the shape expected by board.js.
+
+    HP is emitted **bucket-aligned** (``display_hp * 10``, i.e. one of
+    10, 20, …, 100) so the exact 0–100 integer never leaves the engine
+    across the JSON boundary into any viewer or replay frame. This
+    matches the information an AWBW player actually sees and keeps the
+    viewer / bot on the same footing (``docs/hp_belief.md``). Callers
+    that need exact HP (regression tests, engine debugging) should read
+    ``GameState`` directly instead of this payload.
+    """
     out: list[dict] = []
     for player in (0, 1):
         for unit in state.units.get(player, []):
@@ -26,7 +35,7 @@ def units_list(state) -> list[dict]:
                 "type_id": int(unit.unit_type),
                 "row":     unit.pos[0],
                 "col":     unit.pos[1],
-                "hp":      unit.hp,
+                "hp":      unit.display_hp * 10,
                 "moved":   unit.moved,
             })
     return out

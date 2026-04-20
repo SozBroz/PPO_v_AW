@@ -6,8 +6,12 @@ import pytest
 
 from engine.action import Action, ActionType
 from engine.game import make_initial_state
-from engine.map_loader import load_map
-from engine.terrain import property_terrain_id_after_owner_change
+from engine.map_loader import PropertyState, load_map
+from engine.terrain import (
+    country_id_for_player_seat,
+    property_terrain_id_after_owner_change,
+    property_terrain_id_for_country_and_kind,
+)
 from engine.unit import UNIT_STATS, Unit, UnitType
 
 from server.play_human import MAPS_DIR, POOL_PATH
@@ -50,8 +54,118 @@ def test_full_capture_updates_terrain_on_misery_neutral_city():
     s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
 
     assert prop.owner == 0
-    assert s.map_data.terrain[r][c] == 38
-    assert prop.terrain_id == 38
+    cid = country_id_for_player_seat(s.map_data.country_to_player, 0)
+    assert cid is not None
+    expected = property_terrain_id_for_country_and_kind(
+        cid,
+        is_hq=False,
+        is_lab=False,
+        is_comm_tower=False,
+        is_base=False,
+        is_airport=False,
+        is_port=False,
+    )
+    assert expected is not None
+    assert s.map_data.terrain[r][c] == expected
+    assert prop.terrain_id == expected
+
+
+def test_full_capture_neutral_comm_tower_swaps_tid():
+    """Neutral comm tower (133) flips to the capturer's country (GL seating parity)."""
+    from test_lander_and_fuel import _fresh_state
+
+    s = _fresh_state()
+    s.map_data.country_to_player = {5: 0, 1: 1}
+    r, c = 2, 2
+    s.map_data.terrain[r][c] = 133
+    s.properties.append(
+        PropertyState(
+            terrain_id=133,
+            row=r,
+            col=c,
+            owner=None,
+            capture_points=10,
+            is_hq=False,
+            is_lab=False,
+            is_comm_tower=True,
+            is_base=False,
+            is_airport=False,
+            is_port=False,
+        )
+    )
+    prop = s.properties[-1]
+    st = UNIT_STATS[UnitType.INFANTRY]
+    s.units[0].append(
+        Unit(
+            UnitType.INFANTRY,
+            0,
+            100,
+            st.max_ammo,
+            st.max_fuel,
+            (r, c),
+            False,
+            [],
+            False,
+            20,
+            1,
+        )
+    )
+    s.active_player = 0
+    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
+    assert prop.owner == 0
+    exp = property_terrain_id_after_owner_change(133, 0, s.map_data.country_to_player)
+    assert exp == 128
+    assert s.map_data.terrain[r][c] == 128
+    assert prop.terrain_id == 128
+
+
+def test_full_capture_neutral_lab_swaps_tid():
+    """Neutral lab (145) flips to the capturer's country."""
+    from test_lander_and_fuel import _fresh_state
+
+    s = _fresh_state()
+    s.map_data.country_to_player = {5: 0, 1: 1}
+    r, c = 2, 2
+    s.map_data.terrain[r][c] = 145
+    s.properties.append(
+        PropertyState(
+            terrain_id=145,
+            row=r,
+            col=c,
+            owner=None,
+            capture_points=10,
+            is_hq=False,
+            is_lab=True,
+            is_comm_tower=False,
+            is_base=False,
+            is_airport=False,
+            is_port=False,
+        )
+    )
+    prop = s.properties[-1]
+    st = UNIT_STATS[UnitType.INFANTRY]
+    s.units[0].append(
+        Unit(
+            UnitType.INFANTRY,
+            0,
+            100,
+            st.max_ammo,
+            st.max_fuel,
+            (r, c),
+            False,
+            [],
+            False,
+            20,
+            1,
+        )
+    )
+    s.active_player = 0
+    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
+    assert prop.owner == 0
+    exp = property_terrain_id_after_owner_change(145, 0, s.map_data.country_to_player)
+    assert exp == 139
+    assert s.map_data.terrain[r][c] == 139
+    assert prop.terrain_id == 139
 
 
 def _ground_repair_tile(prop) -> bool:

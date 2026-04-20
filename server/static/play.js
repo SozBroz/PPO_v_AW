@@ -12,6 +12,7 @@
   const btnWait = document.getElementById('btnWait');
   const btnCapture = document.getElementById('btnCapture');
   const btnJoin = document.getElementById('btnJoin');
+  const btnDiveHide = document.getElementById('btnDiveHide');
   const powerHud = document.getElementById('powerHud');
   const buildModal = document.getElementById('buildModal');
   const buildModalTitle = document.getElementById('buildModalTitle');
@@ -139,6 +140,12 @@
       btnJoin.style.display = showJoin ? 'inline-block' : 'none';
       btnJoin.disabled =
         !showJoin || !p.selected_unit_pos || !p.selected_move_pos;
+    }
+    if (btnDiveHide) {
+      const showDh = inAction && opts.includes('DIVE_HIDE');
+      btnDiveHide.style.display = showDh ? 'inline-block' : 'none';
+      btnDiveHide.disabled =
+        !showDh || !p.selected_unit_pos || !p.selected_move_pos;
     }
   }
 
@@ -312,6 +319,19 @@
       if (!opts.includes('JOIN')) return;
       step({
         kind: 'join',
+        unit_pos: last.selected_unit_pos,
+        move_pos: last.selected_move_pos,
+      });
+    });
+  }
+
+  if (btnDiveHide) {
+    btnDiveHide.addEventListener('click', () => {
+      if (!last || !last.selected_unit_pos || !last.selected_move_pos) return;
+      const opts = last.action_options || [];
+      if (!opts.includes('DIVE_HIDE')) return;
+      step({
+        kind: 'dive_hide',
         unit_pos: last.selected_unit_pos,
         move_pos: last.selected_move_pos,
       });

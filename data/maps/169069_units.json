@@ -6,67 +6,78 @@
       "row": 1,
       "col": 0,
       "player": 1,
-      "unit_type": "APC"
+      "unit_type": "APC",
+      "hp": 100
     },
     {
       "row": 7,
       "col": 0,
       "player": 0,
-      "unit_type": "LANDER"
+      "unit_type": "LANDER",
+      "hp": 100
     },
     {
       "row": 16,
       "col": 0,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 16,
       "col": 10,
       "player": 0,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 12,
       "col": 11,
       "player": 1,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 16,
       "col": 11,
       "player": 0,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 5,
       "col": 15,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 8,
       "col": 15,
       "player": 0,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 5,
       "col": 16,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 13,
       "col": 26,
       "player": 1,
-      "unit_type": "LANDER"
+      "unit_type": "LANDER",
+      "hp": 100
     },
     {
       "row": 19,
       "col": 26,
       "player": 0,
-      "unit_type": "APC"
+      "unit_type": "APC",
+      "hp": 100
     }
   ]
 }

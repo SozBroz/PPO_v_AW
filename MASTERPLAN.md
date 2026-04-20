@@ -1,6 +1,6 @@
 # AWBW-RL Master Plan
 
-*Last updated: 2026-04-19*
+*Last updated: 2026-04-20*
 
 This document is the strategic north star for the AWBW reinforcement learning project.
 It records where we are, where we are going, and — critically — the concrete thresholds

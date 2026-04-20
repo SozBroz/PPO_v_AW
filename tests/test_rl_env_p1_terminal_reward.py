@@ -52,6 +52,10 @@ def _craft_p0_active_p1_hq_capture_win() -> tuple[object, tuple[int, int]]:
     s.units[1].append(inf)
     hq.capture_points = 1
     hq.owner = 0
+    # P0 must be able to pass immediately (``env.step`` uses flat index 0 = END_TURN).
+    for u in s.units[0]:
+        if u.is_alive:
+            u.moved = True
     s.active_player = 0
     s.action_stage = ActionStage.SELECT
     s.selected_unit = None
@@ -96,11 +100,15 @@ def test_p1_hq_capture_terminal_reward_reaches_p0(monkeypatch: pytest.MonkeyPatc
         # ``reset`` / sampling use ``random.choice`` on non-action lists.
         if not legal or not isinstance(legal[0], Action):
             return _real_choice(legal)
-        want = scripted.pop(0)
+        if not scripted:
+            return _real_choice(legal)
+        want = scripted[0]
         for a in legal:
             if _same_action_shape(a, want):
+                scripted.pop(0)
                 return a
-        raise AssertionError(f"wanted {want!r} not in {legal!r}")
+        # Opening random-opponent walk during ``reset()`` — do not burn scripted P1 capture.
+        return _real_choice(legal)
 
     monkeypatch.setattr("rl.env.random.choice", controlled_choice)
 

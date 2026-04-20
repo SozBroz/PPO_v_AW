@@ -110,7 +110,8 @@ def _mountain_costs() -> dict[str, int]:
     return {MOVE_INF: 2, MOVE_MECH: 1, MOVE_AIR: 1}
 
 def _wood_costs() -> dict[str, int]:
-    return {MOVE_INF: 1, MOVE_MECH: 1, MOVE_TREAD: 3,
+    # AWBW clear-weather: tread pays **2** per woods (tanks, APC, …), not 3.
+    return {MOVE_INF: 1, MOVE_MECH: 1, MOVE_TREAD: 2,
             MOVE_TIRE_A: 3, MOVE_TIRE_B: 3, MOVE_AIR: 1}
 
 def _road_costs() -> dict[str, int]:
@@ -135,6 +136,23 @@ def _reef_costs() -> dict[str, int]:
 def _property_costs() -> dict[str, int]:
     return {MOVE_INF: 1, MOVE_MECH: 1, MOVE_TREAD: 1,
             MOVE_TIRE_A: 1, MOVE_TIRE_B: 1, MOVE_AIR: 1}
+
+
+def _port_property_costs() -> dict[str, int]:
+    """Movement costs for **port** property tiles.
+
+    Ports are production / repair hubs for **naval** units (see AWBW Port wiki).
+    ``_property_costs()`` alone omits ``MOVE_LANDER`` / ``MOVE_SEA``, which made
+    ``get_move_cost`` fall through to impassable and broke Black Boat / Lander
+    paths that AWBW records as legal (desync_audit engine_bug cluster on
+    neutral ports adjacent to sea).
+
+    Ground costs match other properties; naval costs match :func:`_sea_costs`.
+    """
+    out = dict(_property_costs())
+    out.update(_sea_costs())
+    return out
+
 
 def _pipe_costs() -> dict[str, int]:
     return {MOVE_PIPELINE: 1}
@@ -212,11 +230,12 @@ def _prop(tid: int, label: str, country_id: Optional[int] = None,
           defense: int = 3) -> TerrainInfo:
     """Construct a standard capturable property."""
     cname = _COUNTRY_NAMES.get(country_id, "Unknown") if country_id else "neutral"
+    move_costs = _port_property_costs() if is_port else _property_costs()
     return _T(tid, f"{label} ({cname})", defense,
               is_property=True, is_hq=is_hq, is_lab=is_lab,
               is_comm_tower=is_comm_tower, is_base=is_base,
               is_airport=is_airport, is_port=is_port,
-              country_id=country_id, move_costs=_property_costs())
+              country_id=country_id, move_costs=move_costs)
 
 
 # ---------------------------------------------------------------------------

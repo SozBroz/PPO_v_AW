@@ -6,43 +6,50 @@
       "row": 16,
       "col": 0,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 8,
       "col": 1,
       "player": 1,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 0,
       "col": 7,
       "player": 0,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 3,
       "col": 10,
       "player": 0,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 14,
       "col": 13,
       "player": 1,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 17,
       "col": 16,
       "player": 1,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 9,
       "col": 22,
       "player": 0,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     }
   ]
 }

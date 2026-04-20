@@ -223,6 +223,16 @@ def calculate_damage(
     if base is None:
         return None
 
+    # Hidden Stealth: only Fighter or Stealth may attack (Fandom Stealth page).
+    # Submerged Sub: Cruiser or Submarine (Fandom Units § Fuel + standard AWBW naval rules).
+    if defender.is_submerged:
+        if defender.unit_type == UnitType.STEALTH:
+            if attacker.unit_type not in (UnitType.FIGHTER, UnitType.STEALTH):
+                return None
+        elif UNIT_STATS[defender.unit_type].is_submarine:
+            if attacker.unit_type not in (UnitType.CRUISER, UnitType.SUBMARINE):
+                return None
+
     unit_class     = UNIT_STATS[attacker.unit_type].unit_class
     def_unit_class = UNIT_STATS[defender.unit_type].unit_class
 
@@ -268,6 +278,54 @@ def calculate_damage(
 
 
 # ---------------------------------------------------------------------------
+# Damage range (observer belief layer)
+# ---------------------------------------------------------------------------
+
+def damage_range(
+    attacker: Unit,
+    defender: Unit,
+    attacker_terrain: TerrainInfo,
+    defender_terrain: TerrainInfo,
+    attacker_co: COState,
+    defender_co: COState,
+) -> Optional[tuple[int, int]]:
+    """Min/max damage (inclusive) the attacker *could* deal to the defender
+    given the observer's view of CO state, terrain, and display-HP buckets.
+
+    Used by ``engine.belief.BeliefState`` to shrink per-unit HP intervals
+    after a visible combat event. Inputs are the same objects ``calculate_damage``
+    consumes, so CO powers (Lash terrain ATK, Sonja SCOP side-effects, etc.)
+    are honoured identically.
+
+    Returns ``None`` if the attacker cannot hit the defender (missing damage
+    table entry). Otherwise returns ``(min_dmg, max_dmg)`` on the internal
+    0–100 scale with ``0 <= min_dmg <= max_dmg``.
+
+    Implementation note: instead of reimplementing the formula, we sweep
+    every legal ``luck_roll`` in ``[0, 9]`` through ``calculate_damage``
+    (luck is the only stochastic input; everything else is deterministic
+    from these args) and return the observed extremes. This automatically
+    covers Nell's ×6 scaling, Flak/Jugger's negative-luck tails, and any
+    future CO-specific luck curve without duplication.
+    """
+    if get_base_damage(attacker.unit_type, defender.unit_type) is None:
+        return None
+
+    vals: list[int] = []
+    for roll in range(10):
+        d = calculate_damage(
+            attacker, defender,
+            attacker_terrain, defender_terrain,
+            attacker_co, defender_co,
+            luck_roll=roll,
+        )
+        if d is None:
+            return None
+        vals.append(d)
+    return min(vals), max(vals)
+
+
+# ---------------------------------------------------------------------------
 # Counterattack
 # ---------------------------------------------------------------------------
 
@@ -300,13 +358,16 @@ def calculate_counterattack(
 
     if def_stats.is_indirect:
         return None
-    if def_stats.max_ammo == 0:
-        return None
     if not defender.is_alive:
         return None
 
-    # Cannot counter if out of ammo
-    if defender.ammo == 0 and def_stats.max_ammo > 0:
+    # No counter if this defender cannot damage the attacker (MG-only units use
+    # max_ammo == 0 per AWBW chart but still have machine-gun entries).
+    if get_base_damage(defender.unit_type, attacker.unit_type) is None:
+        return None
+
+    # Cannot counter if out of expendable ammo (rockets / tank shells, etc.)
+    if def_stats.max_ammo > 0 and defender.ammo == 0:
         return None
 
     if defender_co.co_id == 18 and defender_co.scop_active:

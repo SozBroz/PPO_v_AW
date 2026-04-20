@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "_source": "GL: P1 infantry at (3,6). After OS/BM map normalize, tile is Blue Moon faction art; gl_map_pool p0_country_id=1 (Orange Star = engine P0). Two infs on frame-1 snapshots are P0 builds, not predeploy.",
+  "units": [
+    {
+      "row": 3,
+      "col": 6,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

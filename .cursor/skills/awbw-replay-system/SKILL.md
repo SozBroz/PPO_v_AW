@@ -27,6 +27,7 @@ This path is **JSON**, not the AWBW Replay Player `.zip` format.
 - **Our generators:** Python tools under `tools/` build zips from `GameState` / `full_trace`:
   - `tools/export_awbw_replay.py` — gzip-compressed snapshot stream (`<game_id>` entry: lines starting with `O:8:"awbwGame":`).
   - `tools/export_awbw_replay_actions.py` — `a<game_id>` entry with `p:` action envelopes; documents limitations (e.g. which action types are fully emitted vs snapshot-sync only).
+- **Engine vs Replay Player snapshots:** `tools/replay_state_diff.py` + `tools/replay_snapshot_compare.py` compare the Python engine to the **gzipped PHP `awbwGame` lines** inside a site zip — the same serialized state the **C# AWBW Replay Player** loads. This is **not** the Flask `/replay` JSONL path (engine-only). We do not invoke the C# binary in CI; we parse the viewer’s on-disk format in Python.
 - **Diagnostics:** `tools/diff_replay_zips.py`, `tools/compare_awbw_replays.py`, `tools/deep_diff_replays.py`, `tools/inspect_replay.py`, `tools/validate_new_replay.py` — use when reconciling bytes, positions, or PHP layout.
 
 Ground-truth zip semantics, serialization details, and engine invariants live in the sibling skill **[awbw-engine](../awbw-engine/SKILL.md)** (and `reference.md` there for line-by-line layout).

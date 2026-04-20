@@ -6,19 +6,22 @@
       "row": 1,
       "col": 4,
       "player": 0,
-      "unit_type": "LANDER"
+      "unit_type": "LANDER",
+      "hp": 100
     },
     {
       "row": 16,
       "col": 4,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 16,
       "col": 17,
       "player": 1,
-      "unit_type": "LANDER"
+      "unit_type": "LANDER",
+      "hp": 100
     }
   ]
 }

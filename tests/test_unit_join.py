@@ -55,14 +55,20 @@ def _empty_two_seat_state():
     return s, mover, partner
 
 
-def test_units_can_join_requires_injured_partner():
+def test_units_can_join_requires_at_least_one_damaged():
+    """AWBW: JOIN allowed when *either* the mover or partner is below full HP.
+    Only refused when both are at 100. (Previously the engine wrongly required
+    an injured partner; that was restrictive vs AWBW.)"""
     st = UNIT_STATS[UnitType.INFANTRY]
-    mover = Unit(UnitType.INFANTRY, 0, 100, st.max_ammo, st.max_fuel, (0, 0), False, [], False, 20, 1)
-    injured = Unit(UnitType.INFANTRY, 0, 50, st.max_ammo, st.max_fuel, (0, 1), False, [], False, 20, 2)
-    assert units_can_join(mover, injured)
+    full_a   = Unit(UnitType.INFANTRY, 0, 100, st.max_ammo, st.max_fuel, (0, 0), False, [], False, 20, 1)
+    full_b   = Unit(UnitType.INFANTRY, 0, 100, st.max_ammo, st.max_fuel, (0, 1), False, [], False, 20, 2)
+    injured  = Unit(UnitType.INFANTRY, 0,  50, st.max_ammo, st.max_fuel, (0, 1), False, [], False, 20, 3)
+    damaged_mover = Unit(UnitType.INFANTRY, 0, 60, st.max_ammo, st.max_fuel, (0, 0), False, [], False, 20, 4)
 
-    full = Unit(UnitType.INFANTRY, 0, 100, st.max_ammo, st.max_fuel, (0, 1), False, [], False, 20, 3)
-    assert not units_can_join(mover, full)
+    assert units_can_join(full_a, injured)         # full mover + injured partner
+    assert units_can_join(damaged_mover, full_b)   # damaged mover + full partner
+    assert units_can_join(damaged_mover, injured)  # both damaged
+    assert not units_can_join(full_a, full_b)      # both full -> refused
 
 
 def test_join_merges_hp_and_gold_aw_formula():

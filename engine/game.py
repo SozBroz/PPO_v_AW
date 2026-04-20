@@ -341,10 +341,16 @@ class GameState:
         # AWBW kept them alive (see desync_audit ``move_no_unit`` cluster on
         # game 1629104 — fuel-starved Black Boat parked on its own port).
         opp_co_id = self.co_states[opponent].co_id
+        import os as _os_dbg
+        _DBG_LANDER = _os_dbg.environ.get("_DBG_LANDER_GID") == "1631302"
         for unit in list(self.units[opponent]):
             unit.moved = False
             stats = UNIT_STATS[unit.unit_type]
             drain = idle_start_of_day_fuel_drain(unit, opp_co_id)
+            if _DBG_LANDER and unit.unit_type.name == "LANDER" and opponent == 0:
+                import traceback as _tb
+                print(f"[DBG] _advance_turn drain Lander pos={unit.pos} fuel {unit.fuel}->{max(0, unit.fuel - drain)} drain={drain}")
+                _tb.print_stack(limit=15)
             unit.fuel = max(0, unit.fuel - drain)
             if unit.fuel == 0 and stats.unit_class in ("air", "copter", "naval"):
                 prop = self.get_property_at(*unit.pos)

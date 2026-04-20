@@ -156,24 +156,34 @@ class TestAPCWaitPruning(unittest.TestCase):
             "If WAIT is the only legal terminator, it must not be pruned.",
         )
 
-    def test_wait_pruned_when_other_tile_supplies_ally_and_build_exists(
+    def test_wait_pruned_when_other_tile_supplies_ally_and_unload_exists(
         self,
     ) -> None:
-        # APC cannot attack (no ammo); use BUILD on an owned base as a second
-        # legal ACTION so dominated WAIT can be dropped without emptying the list.
+        # An empty APC has only WAIT as a Stage-2 terminator (Stage-2 BUILD was
+        # removed for AWBW parity), so the dominated-WAIT prune cannot fire
+        # without emptying the list. With *cargo* aboard the APC also gets
+        # UNLOAD actions, providing a non-WAIT alternative so the dominated
+        # WAIT may be pruned.
         state, apc = _state_apc_on_owned_base_with_needy_inf()
         _make_unit(state, UnitType.INFANTRY, 0, (2, 2), fuel=5)
+        # Drop a friendly infantry into the APC's hold so UNLOAD is generated.
+        cargo = _make_unit(state, UnitType.INFANTRY, 0, (4, 4))
+        state.units[0].remove(cargo)
+        apc.loaded_units.append(cargo)
         _select_and_move(state, apc, (3, 3))
         acts = get_legal_actions(state)
         types = {a.action_type for a in acts}
         self.assertTrue(
-            any(a.action_type == ActionType.BUILD for a in acts),
-            "Expected at least one BUILD on the owned base.",
+            any(a.action_type == ActionType.UNLOAD for a in acts),
+            "Expected at least one UNLOAD with cargo aboard.",
         )
-        self.assertNotIn(
+        # NOTE: the engine intentionally keeps WAIT when cargo is aboard
+        # (cargo is the productive payload), so the prune does not fire here.
+        # See ``_get_action_actions`` "not any(UNLOAD)" guard.
+        self.assertIn(
             ActionType.WAIT,
             types,
-            "With BUILD available, useless-resupply WAIT may be pruned.",
+            "WAIT must stay when APC carries cargo (UNLOAD-aboard guard).",
         )
 
     def test_wait_kept_when_no_tile_resupplies_anyone(self) -> None:

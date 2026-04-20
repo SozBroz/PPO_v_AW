@@ -129,7 +129,9 @@ def load_replay(path: Path) -> list[dict]:
     with zipfile.ZipFile(path) as zf:
         name = zf.namelist()[0]
         blob = zf.read(name)
-    text = gzip.decompress(blob).decode("utf-8", errors="replace")
+    # PHP serialize uses byte lengths for `s:` strings; UTF-8 decoding breaks indices
+    # when player/map names contain non-ASCII. Latin-1 preserves byte positions 1:1.
+    text = gzip.decompress(blob).decode("latin-1")
     lines = [ln for ln in text.split("\n") if ln.strip()]
     return [parse_php(ln) for ln in lines]
 

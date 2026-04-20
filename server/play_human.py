@@ -212,6 +212,8 @@ def _stage_hints(state: GameState) -> dict[str, Any]:
                 name = "CAPTURE"
             elif t == ActionType.WAIT:
                 name = "WAIT"
+            elif t == ActionType.DIVE_HIDE:
+                name = "DIVE_HIDE"
             elif t == ActionType.LOAD:
                 name = "LOAD"
             elif t == ActionType.JOIN:
@@ -389,6 +391,8 @@ def _parse_step_action(state: GameState, data: dict[str, Any]) -> Action:
         )
     if kind == "wait":
         return Action(ActionType.WAIT, unit_pos=pos("unit_pos"), move_pos=pos("move_pos"))
+    if kind in ("dive_hide", "dive", "hide"):
+        return Action(ActionType.DIVE_HIDE, unit_pos=pos("unit_pos"), move_pos=pos("move_pos"))
     if kind == "attack":
         return Action(
             ActionType.ATTACK,

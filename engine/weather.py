@@ -234,6 +234,10 @@ def effective_move_cost(state: "GameState", unit: "Unit", terrain_id: int) -> in
     - Rain/Snow     → AWBW wiki tables applied per terrain category and move type.
     - CO immunity   → Olaf's units ignore snow; Drake's units ignore rain.
     - Piperunner    → unaffected by any weather (pipe category always returns 1).
+    - Koal COP/SCOP → −1 / −2 movement points per **road** tile (bridges/roads;
+      not property tiles), AWBW wiki / in-game parity.
+    - Lash COP/SCOP → passable terrain costs **1** MP (AWBW wiki; no effect under
+      global **snow** weather).
     """
     from engine.unit import UNIT_STATS
     stats = UNIT_STATS[unit.unit_type]
@@ -246,18 +250,34 @@ def effective_move_cost(state: "GameState", unit: "Unit", terrain_id: int) -> in
 
     weather = state.weather
     if weather == "clear":
-        return base
+        cost = base
+    else:
+        # CO immunity: own unit is unaffected by terrain penalties of this weather
+        co_id = state.co_states[unit.player].co_id
+        if _has_weather_immunity(co_id, weather):
+            cost = base
+        else:
+            table = _RAIN if weather == "rain" else _SNOW
+            cat = _terrain_category(terrain_id)
+            weather_cost = table.get((cat, move_type))
+            if weather_cost is None:
+                # No entry in weather table: terrain is still impassable under weather
+                return INF_PASSABLE
+            cost = weather_cost
 
-    # CO immunity: own unit is unaffected by terrain penalties of this weather
-    co_id = state.co_states[unit.player].co_id
-    if _has_weather_immunity(co_id, weather):
-        return base
+    co_state = state.co_states[unit.player]
 
-    table = _RAIN if weather == "rain" else _SNOW
-    cat = _terrain_category(terrain_id)
-    weather_cost = table.get((cat, move_type))
-    if weather_cost is None:
-        # No entry in weather table: terrain is still impassable under weather
-        return INF_PASSABLE
+    # Koal (co_id 21) Forced March / Trail of Woe: cheaper road movement.
+    if co_state.co_id == 21 and (co_state.cop_active or co_state.scop_active):
+        if _terrain_category(terrain_id) == "road":
+            road_bonus = 2 if co_state.scop_active else 1
+            cost = max(0, cost - road_bonus)
 
-    return weather_cost
+    # Lash (co_id 16) Terrain Tactics / Prime Tactics: AWBW treats all passable
+    # tiles as cost 1 during powers (desync_audit engine_illegal_move on Lash
+    # mirrors e.g. map 159501). Snow weather disables this flattening (wiki).
+    if co_state.co_id == 16 and (co_state.cop_active or co_state.scop_active):
+        if weather != "snow":
+            cost = 1
+
+    return cost

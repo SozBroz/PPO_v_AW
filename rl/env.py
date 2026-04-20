@@ -28,6 +28,9 @@ from engine.game import GameState, make_initial_state, MAX_TURNS
 from engine.map_loader import MapData, load_map
 from engine.action import Action, ActionType, get_legal_actions
 from engine.unit import UnitType, UNIT_STATS
+from engine.terrain import get_terrain
+from engine.combat import damage_range
+from engine.belief import BeliefState
 
 from rl.encoder import encode_state, N_SPATIAL_CHANNELS, N_SCALARS, GRID_SIZE
 from rl.network import ACTION_SPACE_SIZE
@@ -57,6 +60,18 @@ TIME_COST_ENV = "AWBW_TIME_COST"
 INCOME_TERM_COEF_ENV = "AWBW_INCOME_TERM_COEF"
 # When ``1``, zero all BUILD action-mask entries except ``INFANTRY`` (narrow bootstrap).
 BUILD_MASK_INFANTRY_ONLY_ENV = "AWBW_BUILD_MASK_INFANTRY_ONLY"
+# When ``1``, at SELECT stage mask END_TURN whenever the active player still
+# has at least one infantry/mech with moved=False AND at least one capturable
+# property exists on the map. Prevents the "do nothing, end turn" pessimal
+# policy from being a reachable local minimum during early training. See plan
+# p0-capture-architecture-fix Tier 4.
+END_TURN_GATE_ENV = "AWBW_END_TURN_GATE"
+# Probability that the learner's chosen action is overridden by the same
+# capture-greedy heuristic that bootstraps the opponent. DAGGER-lite teacher
+# mixing — gives P0 the same scaffold P1 has had silently. Read once per
+# AWBWEnv instance (workers spawn with this fixed); restart with a lower
+# value to decay. See plan p0-capture-architecture-fix Tier 1.
+LEARNER_GREEDY_MIX_ENV = "AWBW_LEARNER_GREEDY_MIX"
 
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
@@ -117,6 +132,7 @@ _CAPTURE_IDX = _ATTACK_OFFSET * 2         # 1800
 _WAIT_IDX = _CAPTURE_IDX + 1              # 1801
 _LOAD_IDX = _CAPTURE_IDX + 2              # 1802
 _JOIN_IDX = _CAPTURE_IDX + 3              # 1803  (same-type merge; before UNLOAD block)
+_DIVE_HIDE_IDX = _CAPTURE_IDX + 4         # 1804  (Sub dive / Stealth hide)
 # UNLOAD: 4 cardinal drop directions × 2 cargo slots = 8 slots.
 # Index = _UNLOAD_OFFSET + slot_idx * 4 + dir (0=N, 1=S, 2=W, 3=E).
 _UNLOAD_OFFSET = _CAPTURE_IDX + 10        # 1810
@@ -153,6 +169,9 @@ def _action_to_flat(action: Action) -> int:
 
     if at == ActionType.WAIT:
         return _WAIT_IDX
+
+    if at == ActionType.DIVE_HIDE:
+        return _DIVE_HIDE_IDX
 
     if at == ActionType.LOAD:
         return _LOAD_IDX
@@ -220,7 +239,7 @@ def _action_label(action: Optional[Action]) -> Optional[dict]:
         "unit_pos":   list(action.unit_pos)   if action.unit_pos   else None,
         "move_pos":   list(action.move_pos)   if action.move_pos   else None,
         "target_pos": list(action.target_pos) if action.target_pos else None,
-        "unit_type":  action.unit_type.name   if action.unit_type  else None,
+        "unit_type":  action.unit_type.name   if action.unit_type is not None else None,
     }
 
 
@@ -241,6 +260,48 @@ def _strip_non_infantry_builds(mask: np.ndarray, state: GameState) -> None:
             idx = _action_to_flat(action)
             if 0 <= idx < ACTION_SPACE_SIZE:
                 mask[idx] = False
+
+
+def _has_capturable_property(state: GameState) -> bool:
+    """True iff a non-comm-tower / non-lab property is neutral or enemy-owned."""
+    me = state.active_player
+    for prop in state.properties:
+        if prop.is_comm_tower or prop.is_lab:
+            continue
+        if prop.owner is None or prop.owner != me:
+            return True
+    return False
+
+
+def _has_unmoved_capturer(state: GameState) -> bool:
+    """True iff active player has an alive infantry/mech with moved=False."""
+    me = state.active_player
+    for u in state.units.get(me, []):
+        if not u.is_alive or u.moved:
+            continue
+        if u.unit_type in (UnitType.INFANTRY, UnitType.MECH):
+            return True
+    return False
+
+
+def _maybe_gate_end_turn(mask: np.ndarray, state: GameState) -> None:
+    """In-place: clear END_TURN at SELECT stage when a capture chain is still possible.
+
+    Prevents the trivial "select nothing, end turn" pessimal policy from being
+    a reachable local minimum during early training. Only fires at SELECT
+    stage; mid-chain SELECT_UNIT/MOVE/ACTION stages are untouched. END_TURN is
+    always allowed if no capturer is ready or no capturable property exists,
+    so the gate cannot deadlock the agent.
+    """
+    from engine.action import ActionStage
+
+    if state.action_stage != ActionStage.SELECT:
+        return
+    if not _has_unmoved_capturer(state):
+        return
+    if not _has_capturable_property(state):
+        return
+    mask[0] = False  # END_TURN flat index is 0 (see _action_to_flat).
 
 
 class AWBWEnv(gym.Env):
@@ -354,6 +415,18 @@ class AWBWEnv(gym.Env):
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
         self._p1_truncated_mid_turn: bool = False
+
+        # Tier 1: read the teacher-mix probability ONCE at construction so
+        # SubprocVecEnv workers (each a separate process) inherit the value
+        # set in train.py before spawn. Restart the run with a different
+        # value to "decay" the mix — there is no online mutation hook.
+        try:
+            self._learner_greedy_mix = float(
+                os.environ.get(LEARNER_GREEDY_MIX_ENV, "0") or 0.0
+            )
+        except ValueError:
+            self._learner_greedy_mix = 0.0
+        self._learner_greedy_mix = max(0.0, min(1.0, self._learner_greedy_mix))
 
     # ── Map helpers ───────────────────────────────────────────────────────────
 
@@ -498,12 +571,27 @@ class AWBWEnv(gym.Env):
         self._invalid_action_count: int = 0
         self._max_p1_microsteps: int = 0
         self._p1_truncated_mid_turn = False
+        # Tier 1 (plan p0-capture-architecture-fix): per-episode count of
+        # learner actions that were overridden by the capture-greedy teacher.
+        # Surfaced in game_log.jsonl so we can verify the teacher is firing.
+        self._learner_teacher_overrides: int = 0
         # Snapshot opponent reload count at episode start so we can
         # report per-episode reloads in the log record.
         self._opponent_reloads_at_start: int = int(
             getattr(self.opponent_policy, "reload_count", 0) or 0
         )
         self._first_p0_capture_step: int | None = None
+
+        # HP belief overlays — one per seat. Seeded with the initial board so
+        # predeployed units start at their visible bucket (not exact HP) for the
+        # opposing observer. Engine keeps the exact 0-100 integer; these mirror
+        # what a human AWBW player actually sees. See docs/hp_belief.md.
+        self._beliefs: dict[int, BeliefState] = {
+            0: BeliefState(observer=0),
+            1: BeliefState(observer=1),
+        }
+        for b in self._beliefs.values():
+            b.seed_from_state(self.state)
 
         # If P1 opens, run the opponent before the learner's first step — same contract as
         # server/play_human.new_session: observations must always be on P0's clock.
@@ -528,6 +616,21 @@ class AWBWEnv(gym.Env):
 
         self._p0_env_steps += 1
 
+        # Tier 1 (plan p0-capture-architecture-fix): with probability
+        # `learner_greedy_mix`, override the policy-sampled action with the
+        # capture-greedy teacher used by the cold opponent. DAGGER-lite —
+        # gives P0 the same scaffold P1 has had silently. The original
+        # action_idx is not recorded back to the rollout buffer; PPO will
+        # think the policy chose the teacher action. Bias is bounded by the
+        # mask (only legal actions are sampled) and is the well-known cost
+        # of behavior-policy mixing; decay the mix to 0 in a follow-up run
+        # for the final on-policy phase.
+        if self._learner_greedy_mix > 0.0 and random.random() < self._learner_greedy_mix:
+            from rl.self_play import pick_capture_greedy_flat
+            mask = _get_action_mask(self.state)
+            action_idx = pick_capture_greedy_flat(self.state, mask)
+            self._learner_teacher_overrides += 1
+
         # ── Decode & apply player-0 action ────────────────────────────────────
         action = _flat_to_action(action_idx, self.state)
         if action is None:
@@ -535,7 +638,7 @@ class AWBWEnv(gym.Env):
             obs = self._get_obs()
             return obs, -0.1, False, False, {"invalid_action": True}
 
-        self.state, reward, done = self.state.step(action)
+        self.state, reward, done = self._engine_step_with_belief(action)
         self._capture_frame(action=action)
 
         if action.action_type == ActionType.CAPTURE and self._first_p0_capture_step is None:
@@ -544,10 +647,19 @@ class AWBWEnv(gym.Env):
         # Dense shaping: property advantage + unit value differential.
         # Coefficients are small relative to terminal ±1.0 but large enough to
         # provide a meaningful learning signal across the long horizon.
+        # Asymmetric penalty (plan p0-capture-architecture-fix): the prior
+        # symmetric (p0 - p1) * 0.005 manufactured a "punished for existing"
+        # gradient when the opponent bootstrapped with capture-greedy and the
+        # learner had no teacher. Penalty is now 5x softer than reward to
+        # break the dead-curriculum trap without removing the diff signal.
         if not done:
             p0_props = self.state.count_properties(0)
             p1_props = self.state.count_properties(1)
-            reward += (p0_props - p1_props) * 0.005
+            diff = p0_props - p1_props
+            if diff >= 0:
+                reward += diff * 0.005
+            else:
+                reward += diff * 0.001
 
             p0_val = sum(
                 UNIT_STATS[u.unit_type].cost * u.hp / 100
@@ -623,6 +735,9 @@ class AWBWEnv(gym.Env):
         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
         if flag in ("1", "true", "yes", "on"):
             _strip_non_infantry_builds(mask, self.state)
+        gate = os.environ.get(END_TURN_GATE_ENV, "").strip().lower()
+        if gate in ("1", "true", "yes", "on"):
+            _maybe_gate_end_turn(mask, self.state)
         return mask
 
     def render(self) -> str | None:
@@ -632,9 +747,154 @@ class AWBWEnv(gym.Env):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _get_obs(self) -> dict:
-        spatial, scalars = encode_state(self.state)
+    def _get_obs(self, observer: int = 0) -> dict:
+        """Render observation from ``observer``'s perspective, honouring the
+        HP belief overlay so enemy units leak only bucket + formula-narrowed
+        interval information — never exact HP.
+        """
+        belief = self._beliefs.get(observer) if hasattr(self, "_beliefs") else None
+        spatial, scalars = encode_state(
+            self.state, observer=observer, belief=belief,
+        )
         return {"spatial": spatial, "scalars": scalars}
+
+    # -- Belief bookkeeping ----------------------------------------------------
+    def _snapshot_units(self) -> dict[int, dict]:
+        """Per-unit snapshot keyed by ``unit_id`` before an engine step.
+
+        Captures the minimal fields needed to diff the post-step state and
+        emit belief updates: hp, pos, player. Unit objects themselves are
+        mutated in place by the engine, so we copy the primitives.
+        """
+        snap: dict[int, dict] = {}
+        for p in (0, 1):
+            for u in self.state.units[p]:
+                if not u.is_alive:
+                    continue
+                snap[u.unit_id] = {
+                    "hp":     u.hp,
+                    "pos":    u.pos,
+                    "player": u.player,
+                }
+        return snap
+
+    def _engine_step_with_belief(
+        self, action: Action
+    ) -> tuple[GameState, float, bool]:
+        """Wrap ``state.step(action)`` and update both beliefs from the diff.
+
+        Combat path (ATTACK): compute ``damage_range`` on pre-step state so
+        the interval reflects what an observer could deduce from the bar
+        change + the formula. Apply forward-damage range to defender; if
+        attacker also took HP (counter), apply counter range using the
+        post-forward defender as the counter-attacker.
+
+        Non-combat paths (repair / day-start heal / CO-power HP shifts):
+        diff HP per surviving unit; positive delta → ``on_heal``, negative
+        delta → ``on_damage`` with ``(delta, delta)`` as the formula range.
+        The observer can see the exact delta from bucket change + prior
+        belief, so this is the tightest honest update.
+
+        Always finishes with ``sync_own_units`` so own-unit beliefs are
+        authoritative on the engine's exact HP.
+        """
+        beliefs = list(self._beliefs.values())
+
+        # Pre-step snapshot + optional attack range.
+        pre = self._snapshot_units()
+        fwd_range: Optional[tuple[int, int]] = None
+        attacker_id: Optional[int] = None
+        defender_id: Optional[int] = None
+
+        if action.action_type == ActionType.ATTACK and action.target_pos is not None:
+            att = self.state.get_unit_at(*action.unit_pos) if action.unit_pos else None
+            dfd = self.state.get_unit_at(*action.target_pos)
+            if att is not None and dfd is not None:
+                attacker_id = att.unit_id
+                defender_id = dfd.unit_id
+                move_r, move_c = (action.move_pos if action.move_pos else action.unit_pos)
+                tr, tc = action.target_pos
+                att_terrain = get_terrain(self.state.map_data.terrain[move_r][move_c])
+                def_terrain = get_terrain(self.state.map_data.terrain[tr][tc])
+                fwd_range = damage_range(
+                    att, dfd,
+                    att_terrain, def_terrain,
+                    self.state.co_states[att.player],
+                    self.state.co_states[dfd.player],
+                )
+
+        # Execute
+        self.state, reward, done = self.state.step(action)
+
+        post_by_id: dict[int, Any] = {}
+        for p in (0, 1):
+            for u in self.state.units[p]:
+                if u.is_alive:
+                    post_by_id[u.unit_id] = u
+
+        # Kills (unit dropped from alive set).
+        for uid in pre:
+            if uid not in post_by_id:
+                for b in beliefs:
+                    b.on_unit_killed(uid)
+
+        # New units (built / deployed / CO-power spawned).
+        for uid, u in post_by_id.items():
+            if uid not in pre:
+                for b in beliefs:
+                    b.on_unit_built(u)
+
+        # Attack-specific: forward damage range → defender; counter range → attacker.
+        if fwd_range is not None and defender_id is not None and attacker_id is not None:
+            dfd_post = post_by_id.get(defender_id)
+            att_post = post_by_id.get(attacker_id)
+            if dfd_post is not None:
+                for b in beliefs:
+                    b.on_damage(dfd_post, fwd_range[0], fwd_range[1])
+            pre_att_hp = pre[attacker_id]["hp"]
+            if (
+                att_post is not None
+                and dfd_post is not None
+                and att_post.hp < pre_att_hp
+            ):
+                # Counter-attack: post-forward defender rolls against attacker.
+                att_terrain_ctr = get_terrain(
+                    self.state.map_data.terrain[att_post.pos[0]][att_post.pos[1]]
+                )
+                def_terrain_ctr = get_terrain(
+                    self.state.map_data.terrain[dfd_post.pos[0]][dfd_post.pos[1]]
+                )
+                ctr_range = damage_range(
+                    dfd_post, att_post,
+                    def_terrain_ctr, att_terrain_ctr,
+                    self.state.co_states[dfd_post.player],
+                    self.state.co_states[att_post.player],
+                )
+                if ctr_range is not None:
+                    for b in beliefs:
+                        b.on_damage(att_post, ctr_range[0], ctr_range[1])
+
+        # Non-attack HP changes (repair, BB heal, day-start heal, CO power).
+        # Skip attacker/defender here to avoid double-applying the combat path.
+        for uid, pre_u in pre.items():
+            post_u = post_by_id.get(uid)
+            if post_u is None:
+                continue
+            if uid == attacker_id or uid == defender_id:
+                continue
+            delta = post_u.hp - pre_u["hp"]
+            if delta > 0:
+                for b in beliefs:
+                    b.on_heal(post_u, delta, delta)
+            elif delta < 0:
+                for b in beliefs:
+                    b.on_damage(post_u, -delta, -delta)
+
+        # Own units: authoritative exact HP.
+        for b in beliefs:
+            b.sync_own_units(self.state)
+
+        return self.state, reward, done
 
     def _run_random_opponent(self, accumulated_reward: float) -> float:
         """Run player 1's turn using uniform-random legal actions."""
@@ -648,7 +908,7 @@ class AWBWEnv(gym.Env):
             if not legal:
                 break
             action = random.choice(legal)
-            self.state, r_opp, done_opp = self.state.step(action)
+            self.state, r_opp, done_opp = self._engine_step_with_belief(action)
             if done_opp:
                 # Engine reward is from the acting player (P1); training is P0-only.
                 accumulated_reward -= r_opp
@@ -666,7 +926,10 @@ class AWBWEnv(gym.Env):
             if cap is not None and microsteps >= cap:
                 self._p1_truncated_mid_turn = True
                 break
-            obs = self._get_obs()
+            # Opponent sees the board from P1's seat, with P1's belief overlay —
+            # not P0's. Before the HP belief work this leaked exact P0 HP into
+            # the opponent model on the blue seat.
+            obs = self._get_obs(observer=1)
             mask = _get_action_mask(self.state)
             try:
                 opp_idx = int(self.opponent_policy(obs, mask))
@@ -681,7 +944,7 @@ class AWBWEnv(gym.Env):
                     break
                 action = random.choice(legal)
 
-            self.state, r_opp, done_opp = self.state.step(action)
+            self.state, r_opp, done_opp = self._engine_step_with_belief(action)
             if done_opp:
                 # Engine reward is from the acting player (P1); training is P0-only.
                 accumulated_reward -= r_opp
@@ -810,6 +1073,16 @@ class AWBWEnv(gym.Env):
             "max_p1_microsteps": max_p1_microsteps,
             "approx_engine_actions_per_p0_step": approx_engine_actions_per_p0_step,
             "opponent_checkpoint_reload_count": opponent_checkpoint_reload_count,
+
+            # Tier 1/4 (plan p0-capture-architecture-fix): visibility into
+            # the teacher-mix / END_TURN-gate interventions so we can verify
+            # they are firing and slice metrics by mix value.
+            "learner_greedy_mix": float(getattr(self, "_learner_greedy_mix", 0.0)),
+            "learner_teacher_overrides": int(getattr(self, "_learner_teacher_overrides", 0)),
+            "end_turn_gate_active": (
+                os.environ.get(END_TURN_GATE_ENV, "").strip().lower()
+                in ("1", "true", "yes", "on")
+            ),
 
             # Timestamps
             "timestamp": timestamp,

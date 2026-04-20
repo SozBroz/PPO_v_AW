@@ -6,31 +6,36 @@
       "row": 17,
       "col": 1,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 17,
       "col": 4,
       "player": 1,
-      "unit_type": "LANDER"
+      "unit_type": "LANDER",
+      "hp": 100
     },
     {
       "row": 0,
       "col": 10,
       "player": 0,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 20,
       "col": 18,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 3,
       "col": 24,
       "player": 0,
-      "unit_type": "LANDER"
+      "unit_type": "LANDER",
+      "hp": 100
     }
   ]
 }

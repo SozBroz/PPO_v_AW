@@ -117,7 +117,7 @@ class TestClearWeatherIdentity(unittest.TestCase):
             UnitType.MECH,
             UnitType.TANK,
             UnitType.RECON,
-            UnitType.ARTILLERY,   # MOVE_TIRE_B
+            UnitType.ARTILLERY,   # MOVE_TREAD (AWBW indirects use treads)
             UnitType.FIGHTER,
             UnitType.BATTLESHIP,
             UnitType.LANDER,
@@ -159,9 +159,9 @@ class TestRainMovement(unittest.TestCase):
     def test_tread_wood_is_3(self):
         self.assertEqual(self._cost(UnitType.TANK, TID_WOOD), 3)
 
-    def test_tire_b_wood_is_4(self):
-        # Artillery uses MOVE_TIRE_B; APC uses MOVE_TREAD
-        self.assertEqual(self._cost(UnitType.ARTILLERY, TID_WOOD), 4)
+    def test_artillery_wood_matches_tread_rain(self):
+        # Artillery uses MOVE_TREAD (same rain cost as tanks).
+        self.assertEqual(self._cost(UnitType.ARTILLERY, TID_WOOD), 3)
 
     def test_infantry_plain_unchanged(self):
         self.assertEqual(self._cost(UnitType.INFANTRY, TID_PLAIN), 1)
@@ -307,10 +307,12 @@ class TestPowerHooks(unittest.TestCase):
 
     def _charge_to_scop(self, state: GameState) -> None:
         """Charge P0's power bar past SCOP threshold by direct assignment."""
+        state.active_player = 0
         co = state.co_states[0]
         co.power_bar = co._scop_threshold + 1
 
     def _charge_to_cop(self, state: GameState) -> None:
+        state.active_player = 0
         co = state.co_states[0]
         if co.cop_stars:
             co.power_bar = co._cop_threshold + 1

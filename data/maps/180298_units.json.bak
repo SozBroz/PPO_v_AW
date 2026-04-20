@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "_source": "fetched from awbw game 1632117 turn-0 snapshot",
+  "units": [
+    {
+      "row": 5,
+      "col": 3,
+      "player": 1,
+      "unit_type": "BLACK_BOAT",
+      "hp": 10
+    },
+    {
+      "row": 6,
+      "col": 6,
+      "player": 1,
+      "unit_type": "ARTILLERY"
+    },
+    {
+      "row": 2,
+      "col": 7,
+      "player": 0,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 8,
+      "col": 10,
+      "player": 0,
+      "unit_type": "BLACK_BOAT",
+      "hp": 10
+    },
+    {
+      "row": 10,
+      "col": 10,
+      "player": 1,
+      "unit_type": "BLACK_BOAT",
+      "hp": 10
+    },
+    {
+      "row": 16,
+      "col": 13,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 12,
+      "col": 14,
+      "player": 0,
+      "unit_type": "ARTILLERY"
+    },
+    {
+      "row": 0,
+      "col": 16,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 13,
+      "col": 17,
+      "player": 0,
+      "unit_type": "BLACK_BOAT",
+      "hp": 10
+    },
+    {
+      "row": 14,
+      "col": 17,
+      "player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

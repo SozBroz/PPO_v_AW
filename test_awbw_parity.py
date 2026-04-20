@@ -1,4 +1,5 @@
 """AWBW parity: predeployed units from sidecar JSON; army wipe only after combat."""
+import json
 import unittest
 from pathlib import Path
 
@@ -10,19 +11,24 @@ from engine.unit import Unit, UnitType, UNIT_STATS
 ROOT = Path(__file__).parent
 POOL = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
+MAP_133665_UNITS = MAPS_DIR / "133665_units.json"
 
 
 class TestPredeployedMap133665(unittest.TestCase):
-    def test_load_map_has_two_predeployed_specs(self) -> None:
+    """Map 133665 predeploy list lives in ``133665_units.json`` (AWBW turn-0 snapshot)."""
+
+    def test_load_map_predeployed_specs_match_sidecar(self) -> None:
+        expected = len(json.loads(MAP_133665_UNITS.read_text(encoding="utf-8"))["units"])
         md = load_map(133665, POOL, MAPS_DIR)
-        self.assertEqual(len(md.predeployed_specs), 2)
+        self.assertEqual(len(md.predeployed_specs), expected)
         players = {s.player for s in md.predeployed_specs}
         self.assertEqual(players, {0, 1})
 
     def test_make_initial_state_spawns_units(self) -> None:
         md = load_map(133665, POOL, MAPS_DIR)
         st = make_initial_state(md, 1, 7, starting_funds=0, tier_name="T2")
-        self.assertEqual(len(st.units[0]) + len(st.units[1]), 2)
+        n = len(st.units[0]) + len(st.units[1])
+        self.assertEqual(n, len(md.predeployed_specs))
         self.assertGreater(len(st.units[0]), 0)
         self.assertGreater(len(st.units[1]), 0)
 

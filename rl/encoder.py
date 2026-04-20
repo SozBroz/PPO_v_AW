@@ -3,12 +3,12 @@ Encodes a GameState into a numpy observation tensor.
 
 Output shape: (H, W, N_CHANNELS) where H=W=30 (padded), N_CHANNELS is:
   - 28 unit channels (14 unit types × 2 players)
-  - 1 HP channel
+  - 2 HP channels (hp_lo_ch, hp_hi_ch) — observer-aware belief interval
   - 15 terrain channels (one-hot, main terrain categories)
   - 15 property channels (5 property types × 3 states: neutral/p0/p1)
   - 2 capture-progress channels (P0 / P1 unit reducing ``capture_points`` on tile)
   - 1 neutral contestable income-property mask (owner None, not lab/comm)
-  Total: 28 + 1 + 15 + 15 + 3 = 62 spatial channels
+  Total: 28 + 2 + 15 + 15 + 3 = 63 spatial channels
 
 Plus scalar features (appended after CNN flatten):
   - funds[0], funds[1] (normalized by 50000)
@@ -25,23 +25,43 @@ Plus scalar features (appended after CNN flatten):
   - p0_income_share (income properties owned by P0 / total income tiles on map)
   Total scalars: 17
 
-**Checkpoint compatibility:** any weights trained with 59×30×30 spatial + 16
-scalars are **incompatible** with this encoder — retrain from scratch after
-this bump (do not load old ``latest.zip`` into MaskablePPO without matching dims).
+HP belief (see ``docs/hp_belief.md``)
+-------------------------------------
+Humans see enemy HP as a single bar (display bucket 1..10 = ceil(hp/10)) and
+narrow the plausible interval via the damage formula after each combat. The
+engine owns the exact 0..100 integer; the encoder never reads it directly
+for enemy units when a belief overlay is provided.
+
+``encode_state(state, *, observer=0, belief=None)``:
+
+- ``belief`` is an optional ``engine.belief.BeliefState`` keyed to the
+  observer. When supplied, enemy-unit HP is read from the belief interval
+  ``(hp_min, hp_max) / 100``. Observer's own units are read from the
+  engine (lo == hi == unit.hp / 100).
+- When ``belief`` is ``None`` (tools, debug, legacy callers), both HP
+  channels collapse to ``unit.hp / 100`` — identical values in both
+  channels, equivalent to the pre-belief single-HP layout.
+
+**Checkpoint compatibility:** any weights trained with 62×30×30 spatial
+(single HP channel) are **incompatible** with this encoder — retrain from
+scratch after this bump. See ``docs/hp_belief.md`` for the retirement note.
 """
 import numpy as np
 from engine.game import GameState, MAX_TURNS
 from engine.unit import UnitType
 from engine.terrain import get_terrain
+from engine.belief import BeliefState
 
 GRID_SIZE = 30
 N_UNIT_CHANNELS = 28       # 14 unit types × 2 players
+N_HP_CHANNELS = 2          # hp_lo, hp_hi (belief interval)
 N_TERRAIN_CHANNELS = 15
 N_PROPERTY_CHANNELS = 15   # 5 property types × 3 ownership states
 N_CAPTURE_EXTRA_CHANNELS = 3  # p0 progress, p1 progress, neutral-income mask
 N_SPATIAL_CHANNELS = (
-    N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS + N_CAPTURE_EXTRA_CHANNELS
-)  # 62
+    N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS
+    + N_PROPERTY_CHANNELS + N_CAPTURE_EXTRA_CHANNELS
+)  # 63
 N_SCALARS = 17
 
 # Terrain one-hot categories
@@ -109,9 +129,24 @@ def _get_terrain_category(terrain_id: int) -> int:
     return TERRAIN_CATEGORIES["plain"]  # default fallback
 
 
-def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
+def encode_state(
+    state: GameState,
+    *,
+    observer: int = 0,
+    belief: "BeliefState | None" = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Encode a GameState into spatial and scalar tensors.
+
+    Args:
+        state:    GameState to encode.
+        observer: Seat whose perspective this observation serves (0 or 1).
+                  Own units are encoded with exact HP (``hp_lo == hp_hi``);
+                  enemy units read from ``belief`` when supplied.
+        belief:   Optional ``BeliefState`` keyed to ``observer``. When None,
+                  both HP channels collapse to ``unit.hp / 100`` for all
+                  units (legacy / debug path; leaks exact enemy HP — do not
+                  use for bot runtime).
 
     Returns:
         spatial: (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS) float32
@@ -122,8 +157,11 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
 
     spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
 
+    hp_lo_ch = N_UNIT_CHANNELS
+    hp_hi_ch = N_UNIT_CHANNELS + 1
+
     # ── Terrain channels ─────────────────────────────────────────────────────
-    terrain_ch_offset = N_UNIT_CHANNELS + 1  # skip unit channels + HP channel
+    terrain_ch_offset = N_UNIT_CHANNELS + N_HP_CHANNELS
     for r in range(H):
         for c in range(W):
             tid = state.map_data.terrain[r][c]
@@ -131,7 +169,7 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
             spatial[r, c, terrain_ch_offset + cat] = 1.0
 
     # ── Property ownership channels ──────────────────────────────────────────
-    prop_ch_offset = N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS
+    prop_ch_offset = N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS
     for prop in state.properties:
         r, c = prop.row, prop.col
         if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
@@ -159,7 +197,7 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
         spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
 
     # ── Capture progress + neutral income mask (after property ownership) ─────
-    cap_ch0 = N_UNIT_CHANNELS + 1 + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS
+    cap_ch0 = N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS
     cap_ch1 = cap_ch0 + 1
     neutral_inc_ch = cap_ch1 + 1
     for prop in state.properties:
@@ -177,8 +215,7 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
                 elif occ.player == 1:
                     spatial[r, c, cap_ch1] = max(spatial[r, c, cap_ch1], prog)
 
-    # ── Unit presence + HP channels ───────────────────────────────────────────
-    hp_ch = N_UNIT_CHANNELS  # single HP channel shared across all units
+    # ── Unit presence + HP belief channels ───────────────────────────────────
     for player in (0, 1):
         player_ch_offset = _N_UNIT_TYPES * player  # 0 for p0, 14 for p1
         for unit in state.units[player]:
@@ -187,8 +224,28 @@ def encode_state(state: GameState) -> tuple[np.ndarray, np.ndarray]:
                 continue
             ch = UNIT_TO_CHANNEL[unit.unit_type] + player_ch_offset
             spatial[r, c, ch] = 1.0
-            # HP: latest unit written wins — acceptable for non-stacked units
-            spatial[r, c, hp_ch] = unit.hp / 100.0
+
+            # HP belief interval (own units collapse to exact).
+            if unit.player == observer or belief is None:
+                hp_norm = unit.hp / 100.0
+                hp_lo = hp_hi = hp_norm
+            else:
+                b = belief.get(unit.unit_id)
+                if b is None:
+                    # Enemy unit with no belief entry — fall back to the full
+                    # visible bucket (happens for units spawned by CO powers
+                    # that bypass the built event; defensive).
+                    bucket = (unit.hp + 9) // 10
+                    hp_lo = max(0, bucket * 10 - 9) / 100.0
+                    hp_hi = max(0, bucket * 10) / 100.0
+                else:
+                    hp_lo = b.hp_min / 100.0
+                    hp_hi = b.hp_max / 100.0
+            # Latest unit written wins on stacked tiles — acceptable for
+            # non-transport boards; transports stack own+loaded which is a
+            # known rendering ambiguity, unchanged from the pre-belief layout.
+            spatial[r, c, hp_lo_ch] = hp_lo
+            spatial[r, c, hp_hi_ch] = hp_hi
 
     # ── Scalar features ───────────────────────────────────────────────────────
     co0 = state.co_states[0]

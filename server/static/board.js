@@ -120,7 +120,13 @@ function drawUnitMovedOverlay(ctx, x0, y0, moved, pal, T) {
 }
 
 function drawUnitHpBar(ctx, x0, y0, hpVal, T) {
-  const hp = Math.min(1, Math.max(0, (hpVal != null ? hpVal : 100) / 100));
+  // HP bar matches AWBW: bucket granularity only (display_hp * 10 = 10..100).
+  // Snap defensively even if an unbucketed value sneaks through the JSON
+  // payload so the viewer can never out-leak what a human sees in-game.
+  // See server/write_watch_state.py::units_list and docs/hp_belief.md.
+  const raw = (hpVal != null ? hpVal : 100);
+  const bucket = Math.max(0, Math.min(10, Math.ceil(raw / 10)));
+  const hp = bucket / 10;
   const bw = T - 4;
   ctx.fillStyle = '#0a0a12';
   ctx.fillRect(x0 + 2, y0 + T - 4, bw, 3);

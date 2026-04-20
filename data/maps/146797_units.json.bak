@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "_source": "GL turn-0; CSV normalized to OS/BM art. Pool p0_country_id=1. Center infs and corners use force_engine_player where AWBW seat ≠ terrain country under tile.",
+  "units": [
+    {
+      "row": 13,
+      "col": 0,
+      "player": 0,
+      "force_engine_player": 1,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 7,
+      "col": 6,
+      "player": 1,
+      "force_engine_player": 0,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 6,
+      "col": 7,
+      "player": 1,
+      "force_engine_player": 0,
+      "unit_type": "INFANTRY"
+    },
+    {
+      "row": 16,
+      "col": 19,
+      "player": 0,
+      "force_engine_player": 1,
+      "unit_type": "INFANTRY"
+    }
+  ]
+}

@@ -3,6 +3,7 @@
     "map_id": 133665,
     "name": "Walls Are Closing In",
     "type": "std",
+    "p0_country_id": 1,
     "unit_bans": [
       "Black Bomb",
       "Stealth"
@@ -125,6 +126,7 @@
   {
     "map_id": 166877,
     "name": "Throne Of Skulls",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb"
@@ -247,6 +249,7 @@
   {
     "map_id": 134930,
     "name": "Swiss Banking",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb",
@@ -493,6 +496,7 @@
   {
     "map_id": 146797,
     "name": "Inland Viking",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb",
@@ -616,6 +620,7 @@
   {
     "map_id": 180298,
     "name": "Eternity, Served Cold",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb",
@@ -739,6 +744,7 @@
   {
     "map_id": 171596,
     "name": "Designed Desires",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb",
@@ -862,6 +868,7 @@
   {
     "map_id": 170934,
     "name": "BL Go Brrr",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb",
@@ -985,6 +992,7 @@
   {
     "map_id": 69201,
     "name": "Beads on a String",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb",
@@ -1108,6 +1116,7 @@
   {
     "map_id": 159501,
     "name": "A Dance With Magnums",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb"
@@ -1230,6 +1239,7 @@
   {
     "map_id": 140000,
     "name": "140000 Ways to Die",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb"
@@ -1470,7 +1480,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 128505,
@@ -1593,7 +1604,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 169069,
@@ -1716,7 +1728,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 165694,
@@ -1839,7 +1852,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 160882,
@@ -1962,7 +1976,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 173471,
@@ -2085,7 +2100,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 172246,
@@ -2208,7 +2224,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 143661,
@@ -2330,7 +2347,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 110767,
@@ -2452,7 +2470,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 142984,
@@ -2575,7 +2594,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 144739,
@@ -2697,7 +2717,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 69659,
@@ -2819,7 +2840,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 166637,
@@ -2941,7 +2963,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 176423,
@@ -3063,7 +3086,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 170819,
@@ -3185,7 +3209,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 175434,
@@ -3308,11 +3333,13 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 126428,
     "name": "Ft. Fantasy",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb"
@@ -3435,6 +3462,7 @@
   {
     "map_id": 173170,
     "name": "Phobies",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb"
@@ -3675,7 +3703,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 76602,
@@ -3798,7 +3827,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 116014,
@@ -3921,7 +3951,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 164887,
@@ -4044,7 +4075,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 58429,
@@ -4167,7 +4199,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 172795,
@@ -4290,7 +4323,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 175286,
@@ -4412,7 +4446,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 175384,
@@ -4534,11 +4569,13 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 77060,
     "name": "A Hope Forlorn",
+    "p0_country_id": 1,
     "type": "std",
     "unit_bans": [
       "Black Bomb"
@@ -4778,7 +4815,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 121802,
@@ -4900,7 +4938,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 164756,
@@ -5022,7 +5061,8 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   },
   {
     "map_id": 161411,
@@ -5145,6 +5185,7 @@
         "co_ids": [],
         "co_names": []
       }
-    ]
+    ],
+    "p0_country_id": 1
   }
 ]

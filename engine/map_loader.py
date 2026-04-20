@@ -36,6 +36,7 @@ def apply_p0_country_id_seating(
     scan_country_to_player: dict[int, int],
     p0_country_id: int,
     predeployed: list[PredeployedUnitSpec],
+    terrain: list[list[int]],
     *,
     map_id: int,
     map_name: str,
@@ -59,9 +60,6 @@ def apply_p0_country_id_seating(
         )
     other_c = next(c for c in scan_country_to_player if c != p0_country_id)
     new_ctp = {p0_country_id: 0, other_c: 1}
-    old_to_new: dict[int, int] = {
-        scan_country_to_player[c]: new_ctp[c] for c in scan_country_to_player
-    }
 
     for prop in properties:
         cid = get_country(prop.terrain_id)
@@ -78,16 +76,26 @@ def apply_p0_country_id_seating(
         if prop.is_lab:
             lab_positions[prop.owner].append((prop.row, prop.col))
 
-    new_specs: list[PredeployedUnitSpec] = [
-        PredeployedUnitSpec(
-            row=s.row,
-            col=s.col,
-            player=old_to_new[s.player],
-            unit_type=s.unit_type,
-            hp=s.hp,
+    # Sidecar ``player`` indices are AWBW seats (P0 / P1), not row-major scan
+    # order. Remap each predeploy using the **terrain country** under the unit
+    # so seating matches HQ / factory geography (see map 133665).
+    new_specs: list[PredeployedUnitSpec] = []
+    for s in predeployed:
+        cid = get_country(terrain[s.row][s.col])
+        if cid is not None and cid in new_ctp:
+            new_player = new_ctp[cid]
+        else:
+            new_player = s.player
+        new_specs.append(
+            PredeployedUnitSpec(
+                row=s.row,
+                col=s.col,
+                player=new_player,
+                unit_type=s.unit_type,
+                hp=s.hp,
+                force_engine_player=s.force_engine_player,
+            )
         )
-        for s in predeployed
-    ]
     return new_ctp, new_specs, hq_positions, lab_positions
 
 
@@ -286,9 +294,21 @@ def load_map(
             scan_ctp,
             int(raw_p0),
             predeployed,
+            terrain,
             map_id=map_id,
             map_name=str(meta.get("name", "")),
         )
+
+    predeployed = [
+        PredeployedUnitSpec(
+            row=s.row,
+            col=s.col,
+            player=int(s.force_engine_player) if s.force_engine_player is not None else s.player,
+            unit_type=s.unit_type,
+            hp=s.hp,
+        )
+        for s in predeployed
+    ]
 
     # ---- Determine win-condition objective (after optional seating remap) ----
     has_hqs  = any(hq_positions[p]  for p in hq_positions)

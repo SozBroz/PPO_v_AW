@@ -18,7 +18,7 @@ with zipfile.ZipFile(path) as z:
         try:
             with gzip.open(io.BytesIO(raw)) as gz:
                 text = gz.read().decode("utf-8")
-        except:
+        except Exception:
             text = raw.decode("utf-8", errors="replace")
 
         lines = text.split("\n")

@@ -6,31 +6,36 @@
       "row": 17,
       "col": 0,
       "player": 0,
-      "unit_type": "RECON"
+      "unit_type": "RECON",
+      "hp": 100
     },
     {
       "row": 4,
       "col": 2,
       "player": 0,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 15,
       "col": 4,
       "player": 1,
-      "unit_type": "INFANTRY"
+      "unit_type": "INFANTRY",
+      "hp": 100
     },
     {
       "row": 13,
       "col": 19,
       "player": 1,
-      "unit_type": "BLACK_BOAT"
+      "unit_type": "BLACK_BOAT",
+      "hp": 100
     },
     {
       "row": 0,
       "col": 21,
       "player": 1,
-      "unit_type": "RECON"
+      "unit_type": "RECON",
+      "hp": 100
     }
   ]
 }

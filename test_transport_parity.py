@@ -27,7 +27,7 @@ from test_lander_and_fuel import (
 # ---------------------------------------------------------------------------
 
 class TestAPCLoadingRules(unittest.TestCase):
-    """APC mirrors Lander rules with capacity 1 and ground move type."""
+    """APC: capacity 1, ground transport; AWBW allows only Infantry and Mech as cargo."""
 
     def setUp(self) -> None:
         self.state = _fresh_state()
@@ -38,6 +38,13 @@ class TestAPCLoadingRules(unittest.TestCase):
 
     def test_load_is_only_terminator_on_friendly_apc(self) -> None:
         _select_and_move(self.state, self.inf, (3, 2))
+        types = {a.action_type for a in get_legal_actions(self.state)}
+        self.assertEqual(types, {ActionType.LOAD})
+
+    def test_mech_can_load_into_apc(self) -> None:
+        self.state.units[0].remove(self.inf)
+        mech = _make_unit(self.state, UnitType.MECH, 0, (4, 2))
+        _select_and_move(self.state, mech, (3, 2))
         types = {a.action_type for a in get_legal_actions(self.state)}
         self.assertEqual(types, {ActionType.LOAD})
 

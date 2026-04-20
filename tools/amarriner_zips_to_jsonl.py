@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tools.amarriner_catalog_cos import catalog_row_has_both_cos
+
 CATALOG_DEFAULT = ROOT / "data" / "amarriner_gl_std_catalog.json"
 REPLAYS_DEFAULT = ROOT / "replays" / "amarriner_gl"
 
@@ -51,12 +53,15 @@ def _filter_games(
         if not isinstance(g, dict):
             continue
         gid = int(g["games_id"])
-        if map_id is not None and int(g.get("map_id", -1)) != map_id:
+        if not catalog_row_has_both_cos(g):
+            continue
+        mid = g.get("map_id")
+        if map_id is not None and (mid is None or int(mid) != map_id):
             continue
         if tier is not None and str(g.get("tier", "")) != tier:
             continue
-        p0 = int(g.get("co_p0_id", -1))
-        p1 = int(g.get("co_p1_id", -1))
+        p0 = int(g["co_p0_id"])
+        p1 = int(g["co_p1_id"])
         if mirror_andy and (p0 != 1 or p1 != 1):
             continue
         if co_p0_id is not None and p0 != co_p0_id:
@@ -147,8 +152,7 @@ def main() -> int:
                 gid = int(g["games_id"])
                 zpath = args.replays_dir / f"{gid}.zip"
                 map_id = int(g["map_id"])
-                co0 = int(g["co_p0_id"])
-                co1 = int(g["co_p1_id"])
+                co0, co1 = int(g["co_p0_id"]), int(g["co_p1_id"])
                 tier = str(g["tier"])
                 try:
                     rows = collect_demo_rows_from_oracle_zip(

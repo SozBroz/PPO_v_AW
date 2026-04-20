@@ -15,10 +15,25 @@ Usage:
   python train.py --features                  # compute map features from CSVs
 """
 import argparse
+import os
 import signal
 from pathlib import Path
 
 ROOT = Path(__file__).parent.resolve()
+
+
+def _load_dotenv(path: Path) -> None:
+    """Optional repo-root .env: KEY=VALUE lines; does not override existing env vars."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        key, val = key.strip(), val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
 
 
 def _install_sigint_first_only() -> None:
@@ -35,6 +50,7 @@ def _install_sigint_first_only() -> None:
 
 
 def main() -> None:
+    _load_dotenv(ROOT / ".env")
     parser = argparse.ArgumentParser(description="AWBW DRL Bot")
     parser.add_argument(
         "--iters", type=int, default=None,
@@ -160,6 +176,35 @@ def main() -> None:
         "--shared-training", action="store_true",
         help="Reserved for MASTERPLAN §10 async weight sync (not implemented)",
     )
+    parser.add_argument(
+        "--cold-opponent", type=str, default="random",
+        choices=("random", "greedy_capture", "end_turn"),
+        help=(
+            "Cold-start opponent (no checkpoints loaded yet). "
+            "'random' (default): uniform random legal action — gives the learner "
+            "a chance to discover capture before facing a teacher. "
+            "'greedy_capture': pre-fix legacy default; aggressive bootstrap. "
+            "'end_turn': punching bag — picks END_TURN whenever legal. "
+            "Used for the smoke gate in plan p0-capture-architecture-fix."
+        ),
+    )
+    parser.add_argument(
+        "--learner-greedy-mix", type=float, default=0.0,
+        help=(
+            "Probability that the learner action is overridden by the same "
+            "capture-greedy heuristic that bootstraps the opponent (DAGGER-lite). "
+            "Set in (0, 0.5] for early training, then restart at 0 to decay. "
+            "Sets AWBW_LEARNER_GREEDY_MIX env var; SubprocVecEnv workers inherit."
+        ),
+    )
+    parser.add_argument(
+        "--end-turn-gate", action="store_true",
+        help=(
+            "At SELECT stage, mask END_TURN whenever the active player has an "
+            "unmoved infantry/mech AND a capturable property exists. Sets "
+            "AWBW_END_TURN_GATE=1; SubprocVecEnv workers inherit."
+        ),
+    )
     args = parser.parse_args()
 
     # ── Resolve device ────────────────────────────────────────────────────────
@@ -209,12 +254,18 @@ def main() -> None:
             f"broad_prob={args.curriculum_broad_prob} tag={args.curriculum_tag!r}"
         )
 
-    import os as _os
+    if args.learner_greedy_mix and args.learner_greedy_mix > 0.0:
+        os.environ["AWBW_LEARNER_GREEDY_MIX"] = str(float(args.learner_greedy_mix))
+    if args.end_turn_gate:
+        os.environ["AWBW_END_TURN_GATE"] = "1"
+
     _env_flags = [
-        ("AWBW_TIME_COST", _os.environ.get("AWBW_TIME_COST")),
-        ("AWBW_INCOME_TERM_COEF", _os.environ.get("AWBW_INCOME_TERM_COEF")),
-        ("AWBW_BUILD_MASK_INFANTRY_ONLY", _os.environ.get("AWBW_BUILD_MASK_INFANTRY_ONLY")),
-        ("AWBW_LOG_REPLAY_FRAMES", _os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
+        ("AWBW_TIME_COST", os.environ.get("AWBW_TIME_COST")),
+        ("AWBW_INCOME_TERM_COEF", os.environ.get("AWBW_INCOME_TERM_COEF")),
+        ("AWBW_BUILD_MASK_INFANTRY_ONLY", os.environ.get("AWBW_BUILD_MASK_INFANTRY_ONLY")),
+        ("AWBW_LOG_REPLAY_FRAMES", os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
+        ("AWBW_LEARNER_GREEDY_MIX", os.environ.get("AWBW_LEARNER_GREEDY_MIX")),
+        ("AWBW_END_TURN_GATE", os.environ.get("AWBW_END_TURN_GATE")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
     if _active:
@@ -273,6 +324,7 @@ def main() -> None:
         pool_from_fleet=args.pool_from_fleet,
         load_promoted=args.load_promoted,
         bc_init=args.bc_init,
+        cold_opponent=args.cold_opponent,
     )
     _install_sigint_first_only()
     trainer.train()

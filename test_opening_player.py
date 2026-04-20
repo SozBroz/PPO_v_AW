@@ -18,6 +18,12 @@ from engine.map_loader import load_map
 from engine.predeployed import PredeployedUnitSpec
 from engine.unit import UnitType
 
+from tools.oracle_zip_replay import (
+    replay_first_mover_engine,
+    replay_first_mover_from_snapshot_turn,
+    resolve_replay_first_mover,
+)
+
 ROOT     = Path(__file__).parent
 POOL     = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
@@ -57,6 +63,51 @@ class TestStdPoolOpeningPlayer(unittest.TestCase):
                     f"map {map_id}: P0 units={n0} P1 units={n1} "
                     f"-> expected opener={expected}, got {st.active_player}",
                 )
+
+
+class TestReplayFirstMoverResolution(unittest.TestCase):
+    """``resolve_replay_first_mover`` — envelope stream vs PHP snapshot ``turn``."""
+
+    def test_engine_skips_empty_action_envelopes(self) -> None:
+        m = {100: 0, 200: 1}
+        envs = [
+            (100, 1, []),
+            (200, 1, [{"action": "End"}]),
+        ]
+        self.assertEqual(replay_first_mover_engine(envs, m), 1)
+
+    def test_snapshot_turn_fallback(self) -> None:
+        m = {55: 1, 66: 0}
+        snap = {"turn": 66}
+        self.assertEqual(replay_first_mover_from_snapshot_turn(snap, m), 0)
+        self.assertIsNone(replay_first_mover_from_snapshot_turn({}, m))
+        self.assertIsNone(replay_first_mover_from_snapshot_turn({"turn": 999}, m))
+
+    def test_resolve_prefers_nonempty_envelope_over_snapshot(self) -> None:
+        m = {10: 1, 20: 0}
+        envs = [(10, 1, [{"action": "End"}])]
+        snap = {"turn": 20}
+        self.assertEqual(resolve_replay_first_mover(envs, snap, m), 1)
+
+    def test_resolve_falls_back_to_snapshot_when_all_actions_empty(self) -> None:
+        m = {10: 1, 20: 0}
+        envs = [(10, 1, []), (20, 1, [])]
+        snap = {"turn": 20}
+        self.assertEqual(resolve_replay_first_mover(envs, snap, m), 0)
+
+
+class TestReplayFirstMoverOverride(unittest.TestCase):
+    """Oracle / site zips can force opener when it disagrees with predeploy heuristic."""
+
+    def test_replay_first_mover_overrides_asymmetric_rule(self) -> None:
+        md = load_map(171596, POOL, MAPS_DIR)
+        md.predeployed_specs = [
+            PredeployedUnitSpec(row=11, col=16, player=0, unit_type=UnitType.INFANTRY),
+        ]
+        st = make_initial_state(
+            md, 1, 7, starting_funds=0, tier_name="T2", replay_first_mover=0,
+        )
+        self.assertEqual(st.active_player, 0)
 
 
 class TestAsymmetricOnlyP0Units(unittest.TestCase):
