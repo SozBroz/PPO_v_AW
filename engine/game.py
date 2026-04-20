@@ -516,6 +516,20 @@ class GameState:
             for u in self.units[opponent]:
                 u.hp = max(1, u.hp - 20)
 
+        # Jess (co_id 14) COP "Turbo Charge" / SCOP "Overdrive": refill ammo
+        # and fuel for ALL of her units (not just vehicles — AWBW wiki Jess
+        # entry: "Refills the fuel and ammunition of all units"). Vehicle atk
+        # / mov bonuses are handled in combat / action move-range. Without the
+        # refuel, naval / air units that drained low pre-power can no longer
+        # execute the Move that AWBW emits the same envelope (game 1632380:
+        # P1 Drake's BB at fuel=3 → AWBW shows fuel=60 after SCOP → engine
+        # raised "Illegal move: Black Boat ... fuel=0 is not reachable").
+        elif co.co_id == 14:
+            for u in self.units[player]:
+                stats = UNIT_STATS[u.unit_type]
+                u.fuel = stats.max_fuel
+                u.ammo = stats.max_ammo
+
         # Sasha COP: drain power bar of enemy CO
         elif co.co_id == 19 and cop:
             self.co_states[opponent].power_bar = max(
