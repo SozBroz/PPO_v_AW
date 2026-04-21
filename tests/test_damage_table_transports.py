@@ -18,7 +18,10 @@ from test_lander_and_fuel import _fresh_state, _make_unit
 
 class TestDamageTableNavalTransports(unittest.TestCase):
     def test_tank_black_boat_base_damage(self) -> None:
-        self.assertEqual(get_base_damage(UnitType.TANK, UnitType.BLACK_BOAT), 55)
+        # 2026-04 (Phase 11J-DAMAGE-CANON): PHP canon (https://awbw.amarriner.com/damage.php)
+        # row Tank, col BlackBoat = 10. Earlier value 55 was a hypothesis; site
+        # never disagreed with the audit either way (zero regressions on flip).
+        self.assertEqual(get_base_damage(UnitType.TANK, UnitType.BLACK_BOAT), 10)
 
     def test_tank_can_select_adjacent_black_boat(self) -> None:
         st = _fresh_state()

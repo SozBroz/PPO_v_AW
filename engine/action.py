@@ -42,6 +42,18 @@ class ActionStage(IntEnum):
     ACTION = 2
 
 
+# RL legality contract:
+# - This enum is the COMPLETE list of actions the RL bot may emit.
+# - "Delete Unit" (AWBW player-issued unit scrap) is INTENTIONALLY ABSENT.
+#   AWBW replays use it to free production tiles, but giving the RL bot the
+#   ability to scrap its own units enables degenerate self-trading strategies
+#   (scrap blocker -> spawn stronger replacement -> repeat).
+# - The Delete action is reproduced ONLY by the replay oracle
+#   (tools/oracle_zip_replay.py::_oracle_kill_friendly_unit), which is never
+#   imported by the engine and never reachable from get_legal_actions().
+# - DO NOT add a DELETE member here without explicit Imperator approval.
+# - Phase 11J-DELETE-GUARD-PIN regression tests in
+#   tests/test_no_delete_action_legality.py enforce this contract at runtime.
 class ActionType(IntEnum):
     # Stage 0
     SELECT_UNIT  = 0
@@ -68,6 +80,35 @@ class ActionType(IntEnum):
     DIVE_HIDE = 18
     # Immediate forfeit (oracle / AWBW replay ``Resign``). Not exposed in RL legal actions.
     RESIGN = 19
+
+
+# ---------------------------------------------------------------------------
+# RL action-space allowlist (Phase 11J-RL-DELETE-GUARD-SHIP)
+# ---------------------------------------------------------------------------
+# CANONICAL set of ActionTypes the RL agent is permitted to emit. Any
+# ``get_legal_actions()`` output MUST be a subset of this set; the dispatcher
+# below enforces it at runtime. Pinned here to lock out oracle-only constructs
+# (e.g. AWBW "Delete Unit", reproduced by tools/oracle_zip_replay.py via
+# ``_oracle_kill_friendly_unit``, which is NOT a legal RL action).
+_RL_LEGAL_ACTION_TYPES: frozenset = frozenset({
+    ActionType.SELECT_UNIT,
+    ActionType.END_TURN,
+    ActionType.ACTIVATE_COP,
+    ActionType.ACTIVATE_SCOP,
+    ActionType.ATTACK,
+    ActionType.CAPTURE,
+    ActionType.WAIT,
+    ActionType.LOAD,
+    ActionType.UNLOAD,
+    ActionType.BUILD,
+    ActionType.REPAIR,
+    ActionType.JOIN,
+    ActionType.DIVE_HIDE,
+    # NOTE: ActionType.RESIGN is intentionally excluded — replays can encode
+    # an explicit forfeit but the RL agent must never voluntarily resign.
+    # NOTE: there is no ActionType.DELETE — AWBW "Delete Unit" is oracle-path
+    # only (see tools/oracle_zip_replay.py::_oracle_kill_friendly_unit).
+})
 
 
 # ---------------------------------------------------------------------------
@@ -416,12 +457,22 @@ def get_producible_units(terrain_info, unit_bans: list[str]) -> list[UnitType]:
 def get_legal_actions(state: GameState) -> list[Action]:
     player = state.active_player
     if state.action_stage == ActionStage.SELECT:
-        return _get_select_actions(state, player)
-    if state.action_stage == ActionStage.MOVE:
-        return _get_move_actions(state, player)
-    if state.action_stage == ActionStage.ACTION:
-        return _get_action_actions(state, player)
-    return []
+        actions = _get_select_actions(state, player)
+    elif state.action_stage == ActionStage.MOVE:
+        actions = _get_move_actions(state, player)
+    elif state.action_stage == ActionStage.ACTION:
+        actions = _get_action_actions(state, player)
+    else:
+        actions = []
+    # Phase 11J-RL-DELETE-GUARD-SHIP: defense-in-depth — fail loud if any
+    # action type slipped past the per-builder filters into the RL action space.
+    for _a in actions:
+        if _a.action_type not in _RL_LEGAL_ACTION_TYPES:
+            raise AssertionError(
+                f"get_legal_actions emitted non-RL-legal action {_a.action_type.name}; "
+                f"_RL_LEGAL_ACTION_TYPES is the canonical allowlist (see engine/action.py)."
+            )
+    return actions
 
 
 def _get_select_actions(state: GameState, player: int) -> list[Action]:
@@ -437,6 +488,23 @@ def _get_select_actions(state: GameState, player: int) -> list[Action]:
 
     has_unmoved = False
     for unit in state.units[player]:
+        # Phase 11J-VONBOLT-SCOP-SHIP — Von Bolt "Ex Machina" stun gate.
+        # AWBW canon (https://awbw.fandom.com/wiki/Von_Bolt + the AWBW CO
+        # Chart https://awbw.amarriner.com/co.php Von Bolt row): Ex Machina
+        # *"prevents all affected enemy units from acting next turn."*
+        # ``Unit.is_stunned`` is set in ``GameState._apply_power_effects``
+        # (co_id 30 SCOP branch) and cleared in ``GameState._end_turn`` on
+        # the units of the player whose turn just ended — the stunned army
+        # serves the stun across exactly one of its own turns. While the
+        # flag is set we suppress SELECT_UNIT for that unit so the legal
+        # mask never offers it to RL / agents / tests, AND the unit does
+        # NOT count as "unmoved" — stunned units must not block END_TURN
+        # (the stun would otherwise wedge the player on a turn where the
+        # only legal option is to do nothing). The STEP-GATE in
+        # ``GameState.step`` then rejects any direct attempt to act on a
+        # stunned unit because that action will not appear in the mask.
+        if unit.is_stunned:
+            continue
         if not unit.moved:
             actions.append(Action(ActionType.SELECT_UNIT, unit_pos=unit.pos))
             stats = UNIT_STATS[unit.unit_type]
@@ -524,10 +592,34 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
     # *only* legal terminator is LOAD. Allowing WAIT here would co-occupy the
     # tile, leaving two drawable units on one square in snapshots.
     occupant = state.get_unit_at(*move_pos)
+    # Phase 11J-FUNDS-EXTERMINATION-JOIN-SNAP-FIX: when the oracle replay
+    # path-tail snap (tools/oracle_zip_replay.py::
+    # _oracle_path_tail_occupant_allows_forced_snap) co-places the mover
+    # onto a JOIN partner before terminator selection, ``get_unit_at`` may
+    # return either unit. Resolve the partner explicitly by scanning for a
+    # *different* friendly unit on the same tile so JOIN remains in the
+    # legal-action mask. Without this, ``_get_action_actions`` falls through
+    # to ATTACK / CAPTURE / WAIT and ``GameState._apply_join`` is never
+    # called — the AWBW excess-HP fund refund (canon: AWBW Wiki *War
+    # Funds*, ``(unit_cost / 10) * (HPA + HPB - 10)``) is silently lost
+    # (closes GL 1628849; +400 g recovered → Build no-op cleared).
+    if occupant is unit:
+        for lst in state.units.values():
+            for u in lst:
+                if (
+                    u is not unit
+                    and u.is_alive
+                    and u.pos == move_pos
+                    and u.player == player
+                ):
+                    occupant = u
+                    break
+            if occupant is not unit:
+                break
     boarding = (
         occupant is not None
+        and occupant is not unit
         and occupant.player == player
-        and occupant.pos != unit.pos
     )
     if boarding:
         cap = UNIT_STATS[occupant.unit_type].carry_capacity
@@ -728,3 +820,35 @@ def _build_cost(ut: UnitType, state: GameState, player: int, pos: tuple[int, int
     elif co.co_id == 17:         # Hachi: 90% cost on every build (CO Chart "Units cost 10% less")
         cost = int(cost * 0.9)
     return cost
+
+
+# ---------------------------------------------------------------------------
+# Phase 11J-DELETE-GUARD-PIN — refuse to load if anyone adds a Delete-shaped
+# action to the engine's RL action space. Cheap import-time assertion.
+#
+# AWBW players may scrap their own units (the "Delete unit" UI control) to
+# free a production tile. The replay oracle (tools/oracle_zip_replay.py
+# ::_oracle_kill_friendly_unit) reproduces that envelope so AWBW zip replays
+# can be reconstructed faithfully, but the RL bot must NEVER be able to emit
+# this action: a degenerate scrap-and-rebuild loop (scrap a low-value blocker
+# -> spawn a stronger replacement -> repeat) would let the policy print
+# arbitrary value out of the production system. This guard pins the contract
+# at module-load time so a future refactor cannot quietly add a DELETE
+# member without the test suite (tests/test_no_delete_action_legality.py)
+# AND every Python process that imports engine.action breaking immediately.
+# ---------------------------------------------------------------------------
+_FORBIDDEN_RL_ACTION_NAMES = {
+    "DELETE",
+    "DELETE_UNIT",
+    "SCRAP",
+    "SCRAP_UNIT",
+    "DESTROY_OWN_UNIT",
+    "KILL_OWN_UNIT",
+}
+_existing = {m.name for m in ActionType}
+_collision = _FORBIDDEN_RL_ACTION_NAMES & _existing
+assert not _collision, (
+    f"ActionType contains forbidden RL action(s): {_collision}. "
+    f"See Phase 11J-DELETE-GUARD-PIN. Delete must remain oracle-only."
+)
+del _existing, _collision

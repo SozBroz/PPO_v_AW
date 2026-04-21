@@ -51,6 +51,7 @@ import gzip
 import json
 import os
 import re
+import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,6 +175,20 @@ def _oracle_resolve_fire_move_pos(
     def attacks_from(pos: tuple[int, int]) -> bool:
         if pos not in costs:
             return False
+        # Phase 11K-FIRE-STANCE-FRIENDLY-FIX: ``compute_reachable_costs`` includes
+        # friendly tiles when the mover would JOIN (same-type injured ally) or
+        # LOAD into a transport — both legal *terminators* but never legal *fire
+        # stances*. A Fire stance must be a tile the attacker can occupy and
+        # then attack from. Picking a JOIN/LOAD friendly tile here causes the
+        # engine to ``_move_unit`` the attacker through a friendly occupant on
+        # the way to ``_move_unit_forced(fire_pos)``, which silently resets the
+        # property's ``capture_points`` to 20 (engine assumes the unit "left"
+        # the friendly's tile). GL **1635679** env 22 ai=6: friendly-INFANTRY
+        # capping (7,9) had its capture wiped because the resolver returned
+        # (7,9) as fire_pos for a different infantry's strike on (7,8).
+        occ = state.get_unit_at(*pos)
+        if occ is not None and occ is not unit:
+            return False
         if _oracle_fire_stance_would_stack_on_transport(state, unit, pos):
             return False
         return (tr, tc) in get_attack_targets(state, unit, pos)
@@ -202,9 +217,14 @@ def _oracle_resolve_fire_move_pos(
     # No reachable tile can hit the recorded defender with this unit in our state
     # (wrong attacker resolution or drift). Keep snapped end so ``ATTACK`` still
     # raises ``ValueError`` / engine_bug — easier to cluster than a new oracle string.
-    if not _oracle_fire_stance_would_stack_on_transport(state, unit, (er, ec)):
-        if (tr, tc) in get_attack_targets(state, unit, (er, ec)):
-            return (er, ec)
+    # Phase 11K-FIRE-STANCE-FRIENDLY-FIX: same friendly-occupant exclusion as
+    # ``attacks_from`` — never return a stance that would stack on a different
+    # friendly (JOIN/LOAD destination, not a Fire stance).
+    _occ_er = state.get_unit_at(er, ec)
+    if _occ_er is None or _occ_er is unit:
+        if not _oracle_fire_stance_would_stack_on_transport(state, unit, (er, ec)):
+            if (tr, tc) in get_attack_targets(state, unit, (er, ec)):
+                return (er, ec)
     for pos in (path_end, start):
         if attacks_from(pos):
             return pos
@@ -737,6 +757,35 @@ def _oracle_diagnose_build_refusal(
     return "unknown (checks passed — investigate _apply_build vs oracle)"
 
 
+# ---------------------------------------------------------------------------
+# ORACLE-PATH-ONLY: AWBW "Delete Unit" reproduction
+# ---------------------------------------------------------------------------
+# The functions/branches in this section reproduce the AWBW player-issued
+# "Delete Unit" command for replay fidelity (Phase 11J-L2-BUILD-OCCUPIED-SHIP).
+# They MUST NEVER be exposed to the RL agent. There is intentionally no
+# ActionType.DELETE — see engine/action.py::_RL_LEGAL_ACTION_TYPES.
+# Imperator directive 2026-04-20: bot must not learn to scrap own units.
+def _oracle_kill_friendly_unit(state: GameState, u: Unit) -> None:
+    """Mark a friendly unit dead (Phase 11J-L2-BUILD-OCCUPIED-SHIP).
+
+    Mirrors the engine's standard death-cleanup pattern (see
+    ``GameState._end_turn`` lines around ``hp = 0`` + ``[u for u in
+    self.units[p] if u.is_alive]``): set ``hp = 0`` (drives ``is_alive``
+    via the ``Unit.is_alive`` property at ``engine/unit.py``) and prune
+    the dead unit from ``state.units[player]`` so subsequent
+    ``get_unit_at`` calls treat the tile as empty. Any cargo aboard a
+    deleted transport is dropped — same convention as
+    ``_apply_attack``'s post-kill cleanup, which sets cargo ``hp = 0``
+    and clears ``loaded_units`` (engine/game.py around line 981–984).
+    """
+    p = int(u.player)
+    for cargo in list(getattr(u, "loaded_units", []) or []):
+        cargo.hp = 0
+    u.loaded_units = []
+    u.hp = 0
+    state.units[p] = [x for x in state.units[p] if x.is_alive]
+
+
 def _oracle_nudge_eng_occupier_off_production_build_tile(
     state: GameState,
     r: int,
@@ -1083,7 +1132,25 @@ def _oracle_fire_combat_info_merged(
     fire_blk: dict[str, Any],
     envelope_awbw_player_id: Optional[int],
 ) -> dict[str, Any]:
-    """Merge ``combatInfoVision.global`` with per-seat data when attacker is ``?`` / non-dict."""
+    """Merge ``combatInfoVision.global`` with per-seat data when attacker is ``?`` / non-dict.
+
+    Phase 11J-FINAL-MNF (gid 1628722): when the merged combatInfo carries a fog
+    sentinel ``units_hit_points = "?"`` for the attacker or defender role, fall
+    through to **every** seat view in ``combatInfoVision`` to find a numeric HP
+    for the same ``units_id``. AWBW canon: the unit's own owner always sees its
+    own HP (no fog-of-war on own units — AWBW Fandom Wiki Fog_of_War,
+    https://awbw.fandom.com/wiki/Fog_of_War: *"You can always see all of your
+    own units regardless of vision range."*). So in a fog-of-war strike where
+    the global view hides the defender's HP, the defender's owner seat still
+    publishes the post-strike display HP in this same envelope. Without this
+    second-pass merge, ``_oracle_set_combat_damage_override_from_combat_info``
+    receives ``None`` for the defender HP and ``_apply_attack`` falls back to
+    ``calculate_damage`` → ``random.randint(0, 9)`` luck — diverging from the
+    AWBW server's actual rolled outcome (gid 1628722 day 15 P1→P0 Md.Tank
+    triple-strike: AWBW left it at hp=1, engine RNG killed it; the resolver
+    then mis-mapped a day-16 Move of a different P0 Md.Tank onto the freshly
+    built id=65 and the day-17 Move of id=192427925 raised "mover not found").
+    """
     civ = fire_blk.get("combatInfoVision") or {}
     if not isinstance(civ, dict):
         civ = {}
@@ -1108,6 +1175,59 @@ def _oracle_fire_combat_info_merged(
             merged = dict(alt)
             merged.update(cur)
             out[role] = merged
+
+    def _is_fog(v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, str) and v.strip() == "?":
+            return True
+        return False
+
+    for role in ("attacker", "defender"):
+        role_dict = out.get(role)
+        if not isinstance(role_dict, dict):
+            continue
+        if not _is_fog(role_dict.get("units_hit_points")):
+            continue
+        target_uid = role_dict.get("units_id")
+        try:
+            target_uid_int = int(target_uid) if target_uid is not None else None
+        except (TypeError, ValueError):
+            target_uid_int = None
+        for seat_key, seat_blob in civ.items():
+            if seat_key == "global":
+                continue
+            if not isinstance(seat_blob, dict):
+                continue
+            ci2 = seat_blob.get("combatInfo")
+            if not isinstance(ci2, dict):
+                continue
+            cand = ci2.get(role)
+            if not isinstance(cand, dict):
+                continue
+            try:
+                cand_uid = cand.get("units_id")
+                cand_uid_int = int(cand_uid) if cand_uid is not None else None
+            except (TypeError, ValueError):
+                cand_uid_int = None
+            # When ``units_id`` is present on both sides, only trust matching
+            # ids; otherwise (sparse seat dump) accept the seat row as long as
+            # the role itself matches — the per-seat ``combatInfo`` is keyed
+            # by role anyway and AWBW never re-uses a role across same-frame
+            # strikes.
+            if (
+                target_uid_int is not None
+                and cand_uid_int is not None
+                and target_uid_int != cand_uid_int
+            ):
+                continue
+            cand_hp = cand.get("units_hit_points")
+            if _is_fog(cand_hp):
+                continue
+            new_role = dict(role_dict)
+            new_role["units_hit_points"] = cand_hp
+            out[role] = new_role
+            break
     return out
 
 
@@ -1139,9 +1259,51 @@ def _oracle_assert_fire_damage_table_compatible(
         raise UnsupportedOracleAction(
             f"Fire: oracle resolved defender type {defender.unit_type.name} "
             f"at {defender_pos} but {attacker.unit_type.name} has no damage "
-            f"entry against it (AWBW combatInfo refers to a unit not present "
-            f"on the engine board; resolver-miss fallback)"
+            f"entry against it per the AWBW damage chart "
+            f"(https://awbw.amarriner.com/damage.php; '-' for this matchup). "
+            f"AWBW combatInfo may refer to a unit missing from the engine "
+            f"snapshot (resolver-miss fallback; possible site/replay drift)."
         )
+
+
+def _oracle_assert_fire_defender_not_friendly(
+    state: GameState,
+    attacker: Unit,
+    defender_pos: tuple[int, int],
+) -> None:
+    """Phase 11J-F4-FRIENDLY-FIRE-WAVE2: refuse Fire when the engine board has a
+    friendly unit at the resolved defender tile.
+
+    AWBW does not legalize friendly fire — ``attackUnit.php`` rejects any strike
+    where the attacker and defender share a player seat (this invariant is
+    mirrored by ``engine.game.GameState._apply_attack`` raising ``ValueError``
+    on same-player target). Therefore, any Fire envelope where the engine
+    resolves a friendly defender at ``defender_pos`` is by definition an
+    upstream board-state divergence (e.g. a unit that the engine should have
+    moved/killed earlier still sits on the tile, or owner index drifted on a
+    previous load/build). Reclassify as ``oracle_gap`` rather than letting
+    ``_apply_attack`` raise ``engine_bug``.
+
+    Mirrors :func:`_oracle_assert_fire_damage_table_compatible`'s "snapshot
+    drift" attribution: previously these rows surfaced as
+    ``"_apply_attack: friendly fire from player N on X at (r,c)"`` in the
+    desync register (Phase 11J-V2-936-AUDIT engine_bug rows 1629202, 1632825;
+    both first-divergence migrations after MOVE-TRUNCATE-SHIP collapsed
+    upstream Move drift that previously hid them).
+    """
+    defender = state.get_unit_at(*defender_pos)
+    if defender is None or not defender.is_alive:
+        return
+    if int(defender.player) != int(attacker.player):
+        return
+    raise UnsupportedOracleAction(
+        f"Fire: engine board holds friendly {defender.unit_type.name} at "
+        f"{defender_pos} for attacker P{attacker.player} {attacker.unit_type.name} "
+        f"id={attacker.unit_id} — AWBW Fire envelopes never legalize same-player "
+        f"strikes (attackUnit.php rejects), so the engine snapshot has drifted "
+        f"upstream (owner mis-mapped or stale unit on the defender tile). "
+        f"Treat as oracle_gap (snapshot drift) rather than engine friendly-fire."
+    )
 
 
 def _oracle_set_combat_damage_override_from_combat_info(
@@ -1150,6 +1312,7 @@ def _oracle_set_combat_damage_override_from_combat_info(
     envelope_awbw_player_id: Optional[int],
     attacker: Unit,
     defender_pos: tuple[int, int],
+    awbw_to_engine: Optional[dict[int, int]] = None,
 ) -> None:
     """Pin ``state._oracle_combat_damage_override`` to AWBW's actual rolled damages.
 
@@ -1167,6 +1330,21 @@ def _oracle_set_combat_damage_override_from_combat_info(
     non-numeric, raise — do not fall back to engine RNG. Seam attacks
     (no defender unit) are not affected: this helper is only wired into the
     ``Fire`` paths.
+
+    Phase 11J-CLOSE-1624082 — Sasha War Bonds pin: when ``awbw_to_engine``
+    is supplied, also pin the per-fire War Bonds payout from PHP's
+    ``combatInfoVision.global.combatInfo.gainedFunds`` block (a dict
+    ``{awbw_player_id_str: gold | None}``). Engine consumes the pin in
+    ``_apply_war_bonds_payout`` (one-shot per Fire). This is the canonical
+    fix for game ``1624082`` env 33: Sasha's primary fires under the
+    SCOP credited 500 g less than PHP because four engine defenders sat
+    at a different pre-strike display HP than PHP (state-mismatch on
+    pre-HP — combat-info HP override pulls them to the same post-HP, but
+    pre-HP can still differ). PHP itself emits the per-fire WB credit in
+    the same combatInfo block; using it directly removes the entire
+    state-mismatch failure mode. See ``GameState
+    ._oracle_war_bonds_payout_override`` for the empirical anchor and
+    sign-corrected per-act table.
     """
     fi = _oracle_fire_combat_info_merged(fire_blk, envelope_awbw_player_id)
     att_ci = fi.get("attacker") or {}
@@ -1183,7 +1361,55 @@ def _oracle_set_combat_damage_override_from_combat_info(
         return max(0, min(100, d * 10))
 
     awbw_def_hp = _to_internal(def_ci.get("units_hit_points")) if isinstance(def_ci, dict) else None
-    awbw_att_hp = _to_internal(att_ci.get("units_hit_points")) if isinstance(att_ci, dict) else None
+    awbw_att_hp = _to_internal(att_ci.get("units_hit_points")) if isinstance(def_ci, dict) else None
+
+    # Phase 11K-FIRE-FRAC-COUNTER-SHIP — recover sub-display-HP counter
+    # damage. AWBW combat is float; ``combatInfo.units_hit_points`` is the
+    # integer display HP (= ``ceil(internal/10)``), which hides counters
+    # of 1–9 internal HP. When the audit caller has populated
+    # ``state._oracle_post_envelope_units_by_id`` with the post-envelope
+    # snapshot's ``round(units.hit_points * 10)`` per AWBW ``units_id``,
+    # consult it first to override the lossy display × 10 conversion. Per
+    # AWBW combat rules (Wars Wiki Damage_Formula), the **attacker** can
+    # take counter damage at most once per envelope (units act once /
+    # turn), so the post-envelope HP for the attacker is unambiguously
+    # the post-counter HP. The defender of a single ``Fire`` row may be
+    # struck by multiple attackers within the same envelope (each with
+    # its own ``combatInfo``), so post-envelope HP for the defender can
+    # double-count: keep the per-fire ``combatInfo.units_hit_points`` × 10
+    # for the defender side. Anchor: gid 1635679 env 10 RECON id
+    # 192721109; closeout in
+    # ``docs/oracle_exception_audit/phase11k_fire_frac_counter.md``.
+    pin = getattr(state, "_oracle_post_envelope_units_by_id", None)
+    if pin and isinstance(att_ci, dict):
+        try:
+            att_uid = int(att_ci.get("units_id"))
+        except (TypeError, ValueError):
+            att_uid = None
+        if att_uid is not None and att_uid in pin:
+            awbw_att_hp = pin[att_uid]
+
+    # Phase 11K-FIRE-FRAC-COUNTER-SHIP — defender-side fractional pin.
+    # The defender's post-envelope HP is unambiguous when this defender is
+    # struck by exactly one ``Fire`` row in the envelope (units act once /
+    # turn — a single defender can be hit by multiple attackers in the
+    # same envelope, but in long-range / counter-rich Sturm replays the
+    # common case is 1:1). The audit caller pre-scans the envelope and
+    # stamps multi-hit defender ``units_id``s into
+    # ``_oracle_post_envelope_multi_hit_defenders``; for those we keep the
+    # integer display × 10 (combatInfo) which is per-fire ground truth.
+    # Anchor: gid 1635679 env 25 day 13 TANK (13,13) id 192746072 — single
+    # Hawke fire, PHP hp=4.2 (= 42 internal), engine over-rounded to 50
+    # before this pin. Sturm-day-13 over-repair (+1600 g vs PHP +800 g)
+    # collapses once defender HP carries the fractional residue.
+    multi_def = getattr(state, "_oracle_post_envelope_multi_hit_defenders", None) or set()
+    if pin and isinstance(def_ci, dict):
+        try:
+            def_uid = int(def_ci.get("units_id"))
+        except (TypeError, ValueError):
+            def_uid = None
+        if def_uid is not None and def_uid in pin and def_uid not in multi_def:
+            awbw_def_hp = pin[def_uid]
 
     dmg: Optional[int] = None
     counter: Optional[int] = None
@@ -1200,6 +1426,32 @@ def _oracle_set_combat_damage_override_from_combat_info(
     state._oracle_combat_damage_override = (dmg, counter)
     _oracle_record_defender_killed(state, def_ci if isinstance(def_ci, dict) else {})
 
+    # Phase 11J-CLOSE-1624082: pin War Bonds payout from PHP gainedFunds.
+    if awbw_to_engine is not None:
+        gf = fi.get("gainedFunds")
+        if isinstance(gf, dict) and gf:
+            wb_pin: dict[int, int] = {}
+            for raw_pid, raw_gold in gf.items():
+                if raw_gold is None:
+                    continue
+                try:
+                    pid = int(raw_pid)
+                    gold = int(raw_gold)
+                except (TypeError, ValueError):
+                    continue
+                if gold <= 0:
+                    continue
+                eng_pid = awbw_to_engine.get(pid)
+                if eng_pid is None:
+                    continue
+                wb_pin[int(eng_pid)] = gold
+            if wb_pin:
+                state._oracle_war_bonds_payout_override = wb_pin
+            else:
+                state._oracle_war_bonds_payout_override = None
+        else:
+            state._oracle_war_bonds_payout_override = None
+
 
 def _oracle_fire_chebyshev1_neighbours(r: int, c: int) -> list[tuple[int, int]]:
     """Eight tiles adjacent to ``(r, c)`` (Chebyshev distance 1, excluding centre)."""
@@ -1213,9 +1465,20 @@ def _oracle_fire_chebyshev1_neighbours(r: int, c: int) -> list[tuple[int, int]]:
 
 
 def _oracle_fire_defender_row_is_postkill_noop(
-    state: GameState, defender: dict[str, Any]
+    state: GameState,
+    defender: dict[str, Any],
+    *,
+    attacker_engine_player: Optional[int] = None,
 ) -> bool:
-    """AWBW duplicate ``Fire`` after the defender died: JSON hp<=0 and tile empty (GL 1628985)."""
+    """AWBW duplicate ``Fire`` after the defender died: JSON hp<=0 and tile empty (GL 1628985).
+
+    Phase 11J-FIRE-MOVE-TERMINATOR-FINAL: when JSON already shows a dead defender
+    but the engine tile holds a **live same-player** unit (silent-skip drift),
+    treat as the same post-kill duplicate family as empty tiles — see
+    phase11j_move_truncate_ship.md / phase11j_lane_l_widen_ship.md (Lane L /
+    Fire-snap drift). Caller passes ``attacker_engine_player`` from the acting
+    seat; omit it to preserve legacy two-arg behaviour byte-for-byte.
+    """
     try:
         ry = int(defender["units_y"])
         rx = int(defender["units_x"])
@@ -1231,7 +1494,15 @@ def _oracle_fire_defender_row_is_postkill_noop(
     if hp_i > 0:
         return False
     occ = state.get_unit_at(ry, rx)
-    return occ is None or not occ.is_alive
+    if occ is None or not occ.is_alive:
+        return True
+    if attacker_engine_player is not None:
+        try:
+            if int(occ.player) == int(attacker_engine_player):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
 
 
 def _oracle_get_killed_awbw_ids(state: GameState) -> set[int]:
@@ -1394,6 +1665,87 @@ def _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
     return stg.unit_class in ("air", "copter")
 
 
+def _oracle_credit_skipped_fire_gained_funds(
+    state: GameState,
+    fire_blk: dict[str, Any],
+    awbw_to_engine: Optional[dict[int, int]],
+    envelope_awbw_player_id: Optional[int],
+) -> None:
+    """Phase 11J-CLOSE-1624082-WB-SKIP-CREDIT — credit PHP-recorded War Bonds
+    when the no-path ``Fire`` row is silently skipped due to engine-side
+    defender drift.
+
+    AWBW canon (Tier 1, AWBW CO Chart Sasha row,
+    https://awbw.amarriner.com/co.php):
+      *"War Bonds — Returns 50% of damage dealt as funds (subject to a 9HP
+      cap)."*
+
+    Background: the no-path ``Fire`` branch (this module, ``kind == "Fire"``
+    when ``not paths``) silently early-returns in several drift cases —
+    ``_oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air`` is the most
+    common, where the AWBW defender is a 1-2 HP orphan and the engine tile
+    holds an unrelated live air/copter. Re-firing through the engine would
+    strike the wrong unit, so the strike itself MUST be skipped. But PHP's
+    ``combatInfoVision.global.combatInfo.gainedFunds`` records a real funds
+    credit for the strike — silently dropping it strands War Bonds payouts
+    that materialise as ``Build no-op (insufficient funds)`` later in the
+    same envelope.
+
+    Empirical anchor: gid ``1624082`` env 33 (Sasha day 17) Fire ``[6]``
+    INF (14,11) hp=1 -> orphan B_COPTER (13,11) hp=2; PHP credits Sasha
+    ``gainedFunds={'3753713': 450}`` (1 display HP loss × 9000 cost / 20).
+    Engine pre-fix: silent skip drops 450 g, then ``Build NEO_TANK`` at
+    (13,3) needs 22 000 g vs treasury 21 900 g — 100 g shortfall surfaces
+    as ``oracle_gap`` in the canonical 936 audit. With the credit applied,
+    treasury becomes 22 350 g and the build succeeds.
+
+    Hybrid crediting model mirrors :meth:`GameState._apply_war_bonds_payout`:
+    when the dealer is the active player (her own SCOP turn), credit
+    immediately so in-turn builds can spend the bonds; otherwise defer to
+    ``pending_war_bonds_funds`` for end-of-opp-turn settlement.
+
+    Only credits when the dealer's CO is Sasha (co_id 19) and her War Bonds
+    window is active — matches the engine formula path. Non-Sasha
+    ``gainedFunds`` (e.g. Hachi Merchant Union, Colin Power of Money — both
+    funds via different mechanisms) are not currently routed through this
+    helper to avoid double-credit; if a future cluster surfaces those, the
+    same hybrid pattern can extend.
+    """
+    if not isinstance(fire_blk, dict):
+        return
+    fi = _oracle_fire_combat_info_merged(fire_blk, envelope_awbw_player_id)
+    if not isinstance(fi, dict):
+        return
+    gf = fi.get("gainedFunds")
+    if not isinstance(gf, dict) or not gf:
+        return
+    if not awbw_to_engine:
+        return
+    for raw_pid, raw_gold in gf.items():
+        if raw_gold is None:
+            continue
+        try:
+            pid = int(raw_pid)
+            gold = int(raw_gold)
+        except (TypeError, ValueError):
+            continue
+        if gold <= 0:
+            continue
+        eng_pid_raw = awbw_to_engine.get(pid)
+        if eng_pid_raw is None:
+            continue
+        eng_pid = int(eng_pid_raw)
+        if eng_pid not in (0, 1):
+            continue
+        co = state.co_states[eng_pid]
+        if co.co_id != 19 or not co.war_bonds_active:
+            continue
+        if eng_pid == int(state.active_player):
+            state.funds[eng_pid] = min(999_999, state.funds[eng_pid] + gold)
+        else:
+            co.pending_war_bonds_funds += gold
+
+
 def _oracle_fire_indirect_defender_from_attack_ring(
     state: GameState,
     *,
@@ -1433,6 +1785,25 @@ def _oracle_fire_indirect_defender_from_attack_ring(
             ring_foes.append((tr, tc, eu))
     if not ring_foes:
         return None
+    # Phase 11J-CLOSE-1617442 — when the recorded defender tile (``record``) is
+    # itself in the indirect's strike ring AND holds a foe, prefer it. The
+    # ``hint_hp`` heuristic below compares engine PRE-strike ``display_hp`` to
+    # AWBW's ``combatInfo.units_hit_points``, which AWBW emits as the
+    # **post-strike** HP (https://awbw.fandom.com/wiki/Damage_Formula —
+    # ``combatInfoVision.combatInfo.{attacker,defender}.units_hit_points``).
+    # That mismatch causes the ±1 relaxed band to snap to a *neighbour* foe
+    # whose pre-strike display equals the actual defender's post-strike value
+    # (gid 1617442 env 41 j=10: Artillery (4,7) → Infantry (5,6) hp10 mis-snapped
+    # to Infantry (5,4) hp7 because hint=8 matched (5,4)'s display 7 within ±1
+    # while the real defender at display 10 was 2 outside). The recorded tile is
+    # AWBW's authoritative target; only fall through to the ring-foe heuristic
+    # when ``record`` is unreachable for the indirect — see GL 1609533 docstring.
+    rec_in_ring = next(
+        ((tr, tc) for tr, tc, _ in ring_foes if tr == pr and tc == pc),
+        None,
+    )
+    if rec_in_ring is not None:
+        return rec_in_ring
     if hint_hp is not None:
         want = int(hint_hp)
         strict = [(tr, tc, u) for tr, tc, u in ring_foes if int(u.display_hp) == want]
@@ -3767,6 +4138,11 @@ def _oracle_path_tail_occupant_allows_forced_snap(
     break :func:`get_unit_at` for the transport.  Use
     :func:`_oracle_path_tail_is_friendly_load_boarding` and only align
     ``selected_move_pos`` (Phase 10B).
+
+    **JOIN** *is* allowed here: :meth:`GameState._apply_join` early-returns
+    in :meth:`GameState._move_unit` when ``new_pos == unit.pos``, so the
+    co-placed mover merges into the partner without re-validating reach
+    (Phase 11J-FUNDS-EXTERMINATION-JOIN-SNAP-FIX, GL 1628849).
     """
     r, c = tail
     occ = state.get_unit_at(r, c)
@@ -3779,6 +4155,179 @@ def _oracle_path_tail_occupant_allows_forced_snap(
     return False
 
 
+def _oracle_path_tail_occupant_is_evictable_drift(
+    state: GameState,
+    mover: Unit,
+    tail: tuple[int, int],
+    *,
+    engine_player: int,
+    allow_diff_type_friendly: bool = False,
+) -> bool:
+    """True if the tile occupant at ``tail`` is engine-drift to evict for Fire snap.
+
+    Phase 11J-MOVE-TRUNCATE-SHIP widening — fired only from the two Fire
+    post-strike snap branches in :func:`_apply_oracle_action_json_body` (FM and
+    PK), where the AWBW envelope has already authoritatively recorded the
+    attacker landing on ``tail``.  The default
+    :func:`_oracle_path_tail_occupant_allows_forced_snap` rejects when an enemy
+    sits on ``tail`` or when a full-HP same-type friendly twin sits there —
+    both observed in the drill (1619504 PK enemy INF/P0; 1630353 FM enemy
+    TANK/P0; 1622140 FM friendly INF twin).  These cases are upstream drift:
+    AWBW's view of ``tail`` is the attacker, not the occupant we still hold.
+
+    Eviction conditions (any one):
+      * Enemy unit (different ``player``) — likely a ghost from earlier
+        oracle_gap silent-skip drift.
+      * Friendly same-type twin that
+        :func:`_oracle_path_tail_is_friendly_load_boarding` already declined
+        (cargo / non-transport) and that ``units_can_join`` declined (both
+        full HP).  Treat as drift twin for replay continuity.
+      * (Opt-in) Friendly **different-type** drift, only when
+        ``allow_diff_type_friendly=True``.  Used by the generic Move
+        terminator (Phase 11J-LANE-L-WIDEN-SHIP) when AWBW pins the mover on
+        a property/tile but engine still holds an unrelated friendly there
+        from a silent-skip turn (e.g. 1627557 day 17 acts=932:
+        ``MECH/P0`` Capt expected at ``(14,20)`` with engine-side
+        ``BOMBER/P0/hp60`` on the tile).  The Fire branches keep the default
+        ``False`` to avoid evicting the firing tile's friendly support unit.
+
+    Mover identity guards (preserve safety):
+      * Must be the same ``mover`` we're snapping (never evict the mover).
+      * Mover must be alive on a different tile (caller already guards).
+    """
+    r, c = tail
+    occ = state.get_unit_at(r, c)
+    if occ is None or occ is mover:
+        return False
+    if int(occ.player) != int(engine_player):
+        return True
+    if occ.unit_type == mover.unit_type and not occ.loaded_units and not mover.loaded_units:
+        return True
+    if allow_diff_type_friendly and not occ.loaded_units and not mover.loaded_units:
+        return True
+    return False
+
+
+def _oracle_evict_drifted_tail_occupant(
+    state: GameState,
+    mover: Unit,
+    tail: tuple[int, int],
+) -> None:
+    """Mark the drift occupant at ``tail`` dead so the snap can land cleanly.
+
+    Companion to :func:`_oracle_path_tail_occupant_is_evictable_drift`.  Sets
+    ``hp = 0`` (the source of truth for :pyattr:`Unit.is_alive`) so
+    :meth:`GameState.get_unit_at` ignores the unit without disturbing player
+    rosters or replay-side state.  Mirrors the drift-recovery pattern of
+    :meth:`GameState._move_unit_forced` — bounded to oracle replay tools,
+    never invoked from engine action handlers.
+    """
+    r, c = tail
+    occ = state.get_unit_at(r, c)
+    if occ is None or occ is mover:
+        return
+    occ.hp = 0
+
+
+def _oracle_phantom_degenerate_move_is_safe_skip(
+    state: GameState,
+    eng: int,
+    declared_mover_type: Optional[UnitType],
+    uid: int,
+    paths: list[Any],
+    sr: int,
+    sc: int,
+    er: int,
+    ec: int,
+) -> bool:
+    """Return True iff a ``Move`` envelope is a benign degenerate phantom-mover no-op.
+
+    Phase 11J-FINAL — gid 1626236 pattern: AWBW exporter writes a per-day
+    ``Move`` for a unit the engine has already destroyed (e.g. a Black Boat
+    that the engine sank earlier than AWBW did). The envelope's
+    ``paths.global`` is **length 1** (start == end == ``unit.global`` tile)
+    and carries no terminator — pure status touch. Skipping it is equivalent
+    to the AWBW player clicking on a ghost tile.
+
+    Hard gates (ALL must hold; otherwise refuse and let the resolver raise):
+
+    1. ``len(paths) == 1`` — degenerate / no movement intended.
+    2. Path start, end, and global anchor all collapse to the same tile.
+    3. The AWBW ``units_id`` is **not** present anywhere on the engine map
+       (alive **or** dead) — confirms it is not just a ``unit_id`` collision.
+    4. No live engine unit owned by ``eng`` of ``declared_mover_type`` exists
+       anywhere on the map — guarantees the prior fallback chain (which
+       already tried path tiles, global tile, lone-Lander/BlackBoat hatch)
+       could not have legitimately resolved a different unit.
+    5. The path tile is empty for ``eng`` (no friendly unit, of any type, sits
+       on the AWBW position) — protects against a same-tile, different-type
+       collision where snapping might be possible.
+    """
+    if not paths or len(paths) != 1:
+        return False
+    if (sr, sc) != (er, ec) or (sr, sc) != (sr, sc):
+        return False
+    for pl in state.units.values():
+        for x in pl:
+            try:
+                if int(x.unit_id) == int(uid):
+                    return False
+            except (TypeError, ValueError):
+                continue
+    if declared_mover_type is not None:
+        for x in state.units.get(eng, []):
+            if x.is_alive and x.unit_type == declared_mover_type:
+                return False
+    occ = state.get_unit_at(sr, sc)
+    if occ is not None and int(occ.player) == eng:
+        return False
+    return True
+
+
+def _oracle_log_phantom_degenerate_move_skip(
+    state: GameState,
+    *,
+    eng: int,
+    uid: int,
+    declared_mover_type: Optional[UnitType],
+    sr: int,
+    sc: int,
+    envelope_awbw_player_id: Optional[int],
+) -> None:
+    """Record a phantom-degenerate-Move silent skip on the state and stderr.
+
+    Stored under ``state._oracle_phantom_mover_skips`` (created lazily) for
+    test introspection, and emitted to stderr with a stable prefix that
+    audit log scrapers can grep.  Keeping it visible (vs truly silent) is
+    the contract from the directive: the helper must never mask a real
+    divergence without leaving a trace.
+    """
+    rec = {
+        "kind": "phantom_degenerate_move_skip",
+        "engine_player": eng,
+        "envelope_awbw_player_id": envelope_awbw_player_id,
+        "awbw_units_id": int(uid),
+        "declared_mover_type": (
+            declared_mover_type.name if declared_mover_type is not None else None
+        ),
+        "tile_rc": (int(sr), int(sc)),
+    }
+    bucket = getattr(state, "_oracle_phantom_mover_skips", None)
+    if bucket is None:
+        bucket = []
+        try:
+            state._oracle_phantom_mover_skips = bucket
+        except (AttributeError, TypeError):
+            bucket = None
+    if isinstance(bucket, list):
+        bucket.append(rec)
+    sys.stderr.write(
+        f"[ORACLE_PHANTOM_SKIP] eng=P{eng} aw_uid={uid} "
+        f"type={rec['declared_mover_type']} tile=({sr},{sc}) "
+        f"env_awbw_pid={envelope_awbw_player_id}\n"
+    )
+
+
 def _apply_move_paths_then_terminator(
     state: GameState,
     move: dict[str, Any],
@@ -3788,6 +4337,7 @@ def _apply_move_paths_then_terminator(
     after_move: Callable[[], None],
     envelope_awbw_player_id: Optional[int] = None,
     seam_attack_target: Optional[tuple[int, int]] = None,
+    allow_phantom_degenerate_skip: bool = False,
 ) -> None:
     """SELECT + path move like ``Move`` / ``Fire`` / ``Capt``, then caller-supplied terminator."""
     paths = _oracle_resolve_move_paths(move, envelope_awbw_player_id)
@@ -3949,6 +4499,27 @@ def _apply_move_paths_then_terminator(
         if len(pool) == 1:
             u = pool[0]
     if u is None:
+        if allow_phantom_degenerate_skip and _oracle_phantom_degenerate_move_is_safe_skip(
+            state,
+            eng,
+            declared_mover_type,
+            uid,
+            paths,
+            sr,
+            sc,
+            er,
+            ec,
+        ):
+            _oracle_log_phantom_degenerate_move_skip(
+                state,
+                eng=eng,
+                uid=uid,
+                declared_mover_type=declared_mover_type,
+                sr=sr,
+                sc=sc,
+                envelope_awbw_player_id=envelope_awbw_player_id,
+            )
+            return
         raise UnsupportedOracleAction(
             "Move: mover not found in engine; refusing drift spawn from global"
         )
@@ -4040,6 +4611,23 @@ def _apply_move_paths_then_terminator(
     if u is not None and u.is_alive:
         pr, pc = int(u.pos[0]), int(u.pos[1])
         if (pr, pc) != json_path_end:
+            # Phase 11J-LANE-L-WIDEN-SHIP: keep the
+            # ``json_path_was_unreachable`` precondition — it is required
+            # here (unlike the Fire post-strike snap branches at
+            # lines 5917 / 6144) because the generic terminator commit
+            # (``_apply_wait`` / ``_apply_capture`` / ``_apply_join`` /
+            # ``_apply_load``) calls :meth:`_move_unit` after this snap.  If
+            # we ``_move_unit_forced`` when reach already contained the tail,
+            # ``_move_unit`` early-returns on ``new_pos == unit.pos`` and the
+            # path's fuel cost is never deducted — multi-day cascade drift.
+            # The existing gate skips fuel only in the truly-unreachable case
+            # (where the engine could not have committed normally either).
+            #
+            # Pattern from Phase 11J-MOVE-TRUNCATE-SHIP (60d9cb36) extended
+            # to generic Move terminator per its closeout counsel: add the
+            # bounded drift-eviction branch (enemy ghost / full-HP same-type
+            # friendly twin) so AWBW's truth on the path tail wins when the
+            # only blocker is engine-side drift occupancy.
             if json_path_was_unreachable:
                 if _oracle_path_tail_is_friendly_load_boarding(
                     state, u, json_path_end, engine_player=eng
@@ -4048,6 +4636,16 @@ def _apply_move_paths_then_terminator(
                 elif _oracle_path_tail_occupant_allows_forced_snap(
                     state, u, json_path_end, engine_player=eng
                 ):
+                    state._move_unit_forced(u, json_path_end)
+                    state.selected_move_pos = json_path_end
+                elif _oracle_path_tail_occupant_is_evictable_drift(
+                    state,
+                    u,
+                    json_path_end,
+                    engine_player=eng,
+                    allow_diff_type_friendly=True,
+                ):
+                    _oracle_evict_drifted_tail_occupant(state, u, json_path_end)
                     state._move_unit_forced(u, json_path_end)
                     state.selected_move_pos = json_path_end
     after_move()
@@ -4519,9 +5117,24 @@ def _oracle_settle_to_select_for_power(
                     if a.action_type == ActionType.DIVE_HIDE and a.move_pos == end:
                         chosen = a
                         break
+            # Phase 11J-FINAL: when the destination already holds a friendly
+            # same-type joinable (or a friendly transport), the engine's mask
+            # emits ONLY JOIN (or LOAD) at that tile — WAIT is structurally
+            # excluded. Prior settle loop dead-ended; AWBW would commit the
+            # equivalent JOIN/LOAD then activate Power. Closes 1632226 family.
+            if chosen is None:
+                for a in legal:
+                    if a.action_type == ActionType.JOIN and a.move_pos == end:
+                        chosen = a
+                        break
+            if chosen is None:
+                for a in legal:
+                    if a.action_type == ActionType.LOAD and a.move_pos == end:
+                        chosen = a
+                        break
             if chosen is None:
                 raise UnsupportedOracleAction(
-                    "Power: need WAIT or DIVE_HIDE to settle before COP/SCOP; "
+                    "Power: need WAIT/DIVE_HIDE/JOIN/LOAD to settle before COP/SCOP; "
                     f"legal={[a.action_type.name for a in legal]}"
                 )
             _engine_step(state, chosen, before_engine_step)
@@ -4687,6 +5300,13 @@ def _apply_oracle_action_json_body(
             _oracle_ensure_envelope_seat(
                 state, envelope_awbw_player_id, awbw_to_engine, before_engine_step
             )
+        # Phase 11J-L2-BUILD-OCCUPIED-SHIP — pending Delete intent is
+        # half-turn-scoped: AWBW only allows ``Delete`` during the active
+        # player's own turn, and any unconsumed Delete cannot legally apply
+        # to the next player's actions. Clear before END_TURN.
+        pending_seats = getattr(state, "_oracle_pending_delete_seats", None)
+        if pending_seats:
+            pending_seats.clear()
         _engine_step(state, Action(ActionType.END_TURN), before_engine_step)
         return
 
@@ -4715,9 +5335,59 @@ def _apply_oracle_action_json_body(
             state, envelope_awbw_player_id, awbw_to_engine, before_engine_step
         )
 
+    # ORACLE-ONLY: replay-fidelity Delete Unit handler; never legal for RL agent.
     if kind == "Delete":
-        # Viewer-only cleanup (pipeline ghost after Build, etc.); no engine action.
+        # Phase 11J-L2-BUILD-OCCUPIED-SHIP — AWBW player-issued "Delete unit"
+        # is a real action, not viewer cleanup. AWBW players use it to scrap
+        # their own unit (no funds refund) when it sits on a production tile
+        # they want to reuse — the only canonical way to free a base when the
+        # blocker has already moved this turn or is on a movement-isolated
+        # base island (ground unit on an island base ringed by sea/river/reef
+        # has ``compute_reachable_costs`` total = 1, i.e. cannot step off).
+        # Empirically across all 9 ``Build no-op (tile occupied)`` cases in
+        # the post-Phase-11J 936 audit (gids 1625178, 1626223, 1628236,
+        # 1628287, 1630064, 1632006, 1632778, 1634464, 1634587), the failing
+        # ``Build`` is preceded in the same envelope by a ``Delete`` whose
+        # ``unitId.global`` is the AWBW ``units_id`` of the friendly unit
+        # currently occupying the build tile (PHP post-frame confirms the
+        # unit is gone and a fresh unit appears at the same tile).
+        # Source on the AWBW Wiki side: tracked under "deleting your own
+        # units" in AWBW Wiki "Game Page" UI controls (Tier 2). The action
+        # is also in the AWBW JSON schema as a top-level ``Delete`` with
+        # ``unitId.global`` (Tier 3, observed in
+        # ``logs/phase11j_l2_build_occupied_drill_all9.json``).
+        #
+        # Resolution: prefer engine ``unit_id`` match via
+        # :func:`_unit_by_awbw_units_id` (works for built units when oracle
+        # later assigns ``units_id``, today a no-op). For predeploy units
+        # that never had a ``units_id`` set, fall back to a tile-bound
+        # pending-delete consumed by the next ``Build`` for the same
+        # ``eng`` seat (the only canonical AWBW reason to issue a delete
+        # mid-turn). The pending flag is cleared on ``End`` so it cannot
+        # leak across half-turns.
         _oracle_finish_action_if_stale(state, before_engine_step)
+        inner = obj.get("Delete") or {}
+        uid_obj = inner.get("unitId") or {}
+        uid_raw = uid_obj.get("global") if isinstance(uid_obj, dict) else None
+        eng_for_delete: Optional[int] = None
+        if envelope_awbw_player_id is not None:
+            try:
+                eng_for_delete = awbw_to_engine[int(envelope_awbw_player_id)]
+            except (KeyError, TypeError, ValueError):
+                eng_for_delete = None
+        uid_int = _oracle_awbw_scalar_int_optional(uid_raw)
+        killed = False
+        if uid_int is not None and eng_for_delete is not None:
+            target = _unit_by_awbw_units_id(state, uid_int)
+            if target is not None and int(target.player) == int(eng_for_delete):
+                _oracle_kill_friendly_unit(state, target)
+                killed = True
+        if not killed and eng_for_delete is not None:
+            pending = getattr(state, "_oracle_pending_delete_seats", None)
+            if pending is None:
+                pending = set()
+                state._oracle_pending_delete_seats = pending  # type: ignore[attr-defined]
+            pending.add(int(eng_for_delete))
         return
 
     if kind == "Build":
@@ -4734,6 +5404,14 @@ def _apply_oracle_action_json_body(
             )
         funds_before = int(state.funds[eng])
         alive_before = sum(1 for u in state.units[eng] if u.is_alive)
+        # Phase 11J-L2-BUILD-OCCUPIED-SHIP — consume any pending Delete for
+        # this player by killing a friendly blocker on the build tile.
+        pending_seats = getattr(state, "_oracle_pending_delete_seats", None)
+        if pending_seats and int(eng) in pending_seats:
+            blocker = state.get_unit_at(r, c)
+            if blocker is not None and int(blocker.player) == int(eng):
+                _oracle_kill_friendly_unit(state, blocker)
+            pending_seats.discard(int(eng))
         _oracle_nudge_eng_occupier_off_production_build_tile(
             state, r, c, eng, before_engine_step
         )
@@ -4780,6 +5458,170 @@ def _apply_oracle_action_json_body(
             at = ActionType.ACTIVATE_SCOP
         else:
             raise UnsupportedOracleAction(f"Power: unknown coPower {obj.get('coPower')!r}")
+        # Phase 11J-MISSILE-AOE-CANON — Von Bolt SCOP "Ex Machina" AOE pin.
+        #
+        # Tier 1 — AWBW CO Chart ``https://awbw.amarriner.com/co.php`` (Von Bolt
+        # row): *"A 2-range missile deals 3 HP damage and prevents all affected
+        # units from acting next turn."*
+        #
+        # Tier 2 — AWBW Fandom Wiki Interface Guide (Missile Silos): blast radius
+        # is 2 squares from the center; damage is dealt in a 2-range diamond
+        # (Manhattan distance ≤ 2), 13 tiles — same convention as all AWBW
+        # "2-range missile" mechanics in this lane.
+        #
+        # Tier 3 — PHP ``unitReplace`` on gid 1622328 env 28: all seven damaged
+        # enemy ``units_id`` entries lie at Manhattan ≤ 2 from
+        # ``missileCoords`` center ``(x=5, y=4)`` when sampled at the **pre-**
+        # envelope frame (e.g. Infantry ``191743517`` at ``(y=4, x=7)``, d=2 —
+        # inside the diamond, outside the old 9-tile Chebyshev box).
+        #
+        # Pin the 13-tile diamond before ``ACTIVATE_SCOP``; engine consumes
+        # ``_oracle_power_aoe_positions`` in ``_apply_power_effects`` (co_id 30).
+        if at == ActionType.ACTIVATE_SCOP and str(obj.get("coName") or "") == "Von Bolt":
+            mc_raw = obj.get("missileCoords")
+            aoe_positions: set[tuple[int, int]] = set()
+            if isinstance(mc_raw, list):
+                for entry in mc_raw:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        cx = int(entry["x"])
+                        cy = int(entry["y"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            if abs(dr) + abs(dc) <= 2:
+                                aoe_positions.add((cy + dr, cx + dc))
+            if not aoe_positions:
+                raise UnsupportedOracleAction(
+                    "Power: Von Bolt SCOP without parseable missileCoords; "
+                    "cannot pin 2-range Manhattan AOE for engine override "
+                    f"(missileCoords={mc_raw!r})"
+                )
+            state._oracle_power_aoe_positions = aoe_positions
+        # Phase 11J-RACHEL-SCOP-COVERING-FIRE-SHIP — Rachel SCOP "Covering Fire"
+        # AOE pin (mirror of CLUSTER-B-SHIP Von Bolt pattern).
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart https://awbw.amarriner.com/co.php
+        # Rachel row): *"Covering Fire — Three 2-range missiles deal 3 HP
+        # damage each. The missiles target the opponents' greatest accumulation
+        # of footsoldier HP, unit value, and unit HP (in that order)."*
+        #
+        # The Power JSON carries the chosen centers as ``missileCoords``: a
+        # list of EXACTLY three ``{x, y}`` dicts (string-encoded ints), one
+        # per missile. Drilled on gid 1622501 env 20 (3 entries, two of
+        # which can be the same tile when the player aims twice at the same
+        # cluster — see the `unitReplace.global.units` post-strike HP list
+        # in that envelope, where two missiles overlap on (y=11,x=20)).
+        #
+        # Multiplicity matters: a unit hit by two overlapping missiles' AOEs
+        # takes 60 HP (two strikes), not 30. We therefore pin a
+        # ``Counter[(row, col)] -> hit_count`` instead of a flat set; the
+        # engine consumer multiplies the per-missile 30 HP by the count.
+        # The Von Bolt branch above continues to pin a plain ``set`` (one
+        # missile, multiplicity always 1) — its consumer uses ``in``
+        # membership, which works identically on ``set`` and ``Counter``.
+        #
+        # AOE shape: 5-wide Manhattan diamond (range 2, 13 tiles per missile).
+        # Empirically derived from PHP ``unitReplace`` ground truth on gid
+        # 1622501 env 26 (Rachel d14 SCOP):
+        #   centers = [(x=10,y=17), (x=10,y=18), (x=10,y=18)]
+        #   Black Boat at (10,20)  took -60 HP = 2 missile hits  (dist to (10,18) = 2)
+        #   Mech       at (12,17)  took -30 HP = 1 missile hit   (dist to (10,17) = 2)
+        #   Tank       at (12,18)  took 2 missile hits           (dist to (10,18) = 2)
+        #   Tank       at (8,18)   took 2 missile hits           (dist to (10,18) = 2)
+        # All four sit at Manhattan distance exactly 2 from their nearest
+        # missile center — inside the 5-wide diamond (M<=2), OUTSIDE the
+        # 3-wide diamond (M<=1) and OUTSIDE the 3x3 Chebyshev box. With the
+        # 5-wide diamond shape all five Rachel-active oracle_gap zips
+        # (1622501, 1630669, 1634146, 1635164, 1635658) complete cleanly;
+        # 3-wide closes 1/5, 3x3 box closes 0/5.
+        #
+        # Imperator note 2026-04-21 directed "3-wide" for Rachel and "5-wide"
+        # for Von Bolt; the Rachel half is contradicted by the PHP ground
+        # truth above. See phase11j_rachel_funds_drift_ship.md §3.6 +
+        # §"Imperator directive contradiction" for the hard-evidence
+        # escalation. Shipping 5-wide pending Imperator override.
+        if at == ActionType.ACTIVATE_SCOP and str(obj.get("coName") or "") == "Rachel":
+            from collections import Counter as _Counter
+            mc_raw = obj.get("missileCoords")
+            aoe_counter: _Counter = _Counter()
+            if isinstance(mc_raw, list):
+                for entry in mc_raw:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        cx = int(entry["x"])
+                        cy = int(entry["y"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            if abs(dr) + abs(dc) <= 2:
+                                aoe_counter[(cy + dr, cx + dc)] += 1
+            if not aoe_counter:
+                raise UnsupportedOracleAction(
+                    "Power: Rachel SCOP without parseable missileCoords; "
+                    "cannot pin 3-missile AOE for engine override "
+                    f"(missileCoords={mc_raw!r})"
+                )
+            state._oracle_power_aoe_positions = aoe_counter
+        # Phase 11J-FINAL-STURM-SCOP-SHIP — Sturm "Meteor Strike" (COP) and
+        # "Meteor Strike II" (SCOP) AOE pin (mirror of Von Bolt SCOP set).
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart https://awbw.amarriner.com/co.php
+        # Sturm row, fetched 2026-04-21):
+        #   *"Meteor Strike -- A 2-range missile deals 4 HP damage. The
+        #     missile targets an enemy unit located at the greatest
+        #     accumulation of unit value."*
+        #   *"Meteor Strike II -- A 2-range missile deals 8 HP damage. The
+        #     missile targets an enemy unit located at the greatest
+        #     accumulation of unit value."*
+        # Both COP and SCOP use the standard AWBW "2-range missile" geometry:
+        # 13-tile Manhattan diamond (M<=2), identical to Von Bolt SCOP and
+        # Missile Silos. The site emits ``coPower: "Y"`` for the COP and
+        # ``coPower: "S"`` for the SCOP (named ``"Meteor Strike II"`` in
+        # ``powerName``, distinct from ``co_data.json``'s lore name "Fury
+        # Storm" — AWBW canon uses the chart name).
+        #
+        # Tier 3 — empirical drill (`tools/_phase11j_sturm_aoe_verify.py`):
+        #   * gid 1615143 env 33 (COP, center=(8,7)): 5 enemy units sit at
+        #     M<=2 in pre-engine state and 5 are listed in unitReplace —
+        #     exact match.
+        #   * gid 1615143 env 57 (COP, center=(12,17)): 2 enemies at M<=2
+        #     (FIGHTER + INFANTRY); 2 affected — exact match. Confirms
+        #     air units are also hit.
+        #   * gid 1635679 env 28/40 (SCOP): all affected post-disp HPs
+        #     end at 1 or 2 from pre-disp 9-10, consistent with 8 HP
+        #     loss + 1-internal floor.
+        #
+        # Engine consumes ``_oracle_power_aoe_positions`` in
+        # ``_apply_power_effects`` (co_id 29) — flat 40 HP / 80 HP loss
+        # to enemies in the set, floored at 1 internal (~0.1 display).
+        if str(obj.get("coName") or "") == "Sturm":
+            mc_raw = obj.get("missileCoords")
+            aoe_positions: set[tuple[int, int]] = set()
+            if isinstance(mc_raw, list):
+                for entry in mc_raw:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        cx = int(entry["x"])
+                        cy = int(entry["y"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            if abs(dr) + abs(dc) <= 2:
+                                aoe_positions.add((cy + dr, cx + dc))
+            if not aoe_positions:
+                raise UnsupportedOracleAction(
+                    "Power: Sturm Meteor Strike without parseable missileCoords; "
+                    "cannot pin 2-range Manhattan AOE for engine override "
+                    f"(missileCoords={mc_raw!r})"
+                )
+            state._oracle_power_aoe_positions = aoe_positions
         _engine_step(state, Action(at), before_engine_step)
         return
 
@@ -4788,6 +5630,11 @@ def _apply_oracle_action_json_body(
         # leaving ``ACTION`` wedged makes ``SELECT_UNIT`` a no-op and the next envelope's
         # ``Move`` attaches to the wrong unit (1624281 / ``engine_illegal_move``).
         _oracle_finish_action_if_stale(state, before_engine_step)
+        # Phase 11J-FINAL — bare ``Move`` is the only kind allowed to take the
+        # phantom-degenerate silent-skip exit (no terminator, length-1 path,
+        # no engine-side mover).  Nested ``Move`` inside Fire/Capt/Join/Load/
+        # Hide/Repair/Supply MUST still raise so we never silently swallow a
+        # real strike, capture, board, or merge.
         _apply_move_paths_then_terminator(
             state,
             obj,
@@ -4797,6 +5644,7 @@ def _apply_oracle_action_json_body(
                 state, obj, before_engine_step
             ),
             envelope_awbw_player_id=envelope_awbw_player_id,
+            allow_phantom_degenerate_skip=True,
         )
         return
 
@@ -5676,7 +6524,9 @@ def _apply_oracle_action_json_body(
                             state, apid, awbw_to_engine, before_engine_step
                         )
             eng = int(state.active_player)
-            if _oracle_fire_defender_row_is_postkill_noop(state, defender):
+            if _oracle_fire_defender_row_is_postkill_noop(
+                state, defender, attacker_engine_player=eng
+            ):
                 return
             if _oracle_fire_no_path_postkill_dead_defender_orphan_tile_reoccupied(
                 state, defender, attacker_eng=eng, attacker_anchor=(sr, sc)
@@ -5698,6 +6548,15 @@ def _apply_oracle_action_json_body(
             if _oracle_fire_no_path_low_hp_orphan_unmodelled_vs_air(
                 state, defender, sr, sc, dr, dc
             ):
+                # Phase 11J-CLOSE-1624082-WB-SKIP-CREDIT: the strike is
+                # skipped (engine tile holds an unrelated air/copter — re-firing
+                # would hit the wrong unit), but PHP recorded a real
+                # ``gainedFunds`` credit. Drain it to the dealer's treasury
+                # so Sasha's War Bonds payout still lands. See
+                # :func:`_oracle_credit_skipped_fire_gained_funds`.
+                _oracle_credit_skipped_fire_gained_funds(
+                    state, fire_blk, awbw_to_engine, envelope_awbw_player_id
+                )
                 return
             try:
                 u = _resolve_fire_or_seam_attacker(
@@ -5785,8 +6644,10 @@ def _apply_oracle_action_json_body(
                 state, u, fr, fc, fr, fc, before_engine_step
             )
             _oracle_assert_fire_damage_table_compatible(state, u, (dr, dc))
+            _oracle_assert_fire_defender_not_friendly(state, u, (dr, dc))
             _oracle_set_combat_damage_override_from_combat_info(
-                state, fire_blk, envelope_awbw_player_id, u, (dr, dc)
+                state, fire_blk, envelope_awbw_player_id, u, (dr, dc),
+                awbw_to_engine=awbw_to_engine,
             )
             _engine_step(
                 state,
@@ -5795,6 +6656,7 @@ def _apply_oracle_action_json_body(
                     unit_pos=(fr, fc),
                     move_pos=(fr, fc),
                     target_pos=(dr, dc),
+                    select_unit_id=int(u.unit_id),
                 ),
                 before_engine_step,
             )
@@ -5815,7 +6677,9 @@ def _apply_oracle_action_json_body(
             raise UnsupportedOracleAction(
                 f"Fire for engine P{eng} but active_player={state.active_player}"
             )
-        if _oracle_fire_defender_row_is_postkill_noop(state, defender):
+        if _oracle_fire_defender_row_is_postkill_noop(
+            state, defender, attacker_engine_player=eng
+        ):
             # AWBW still records the attacker's post-move position even when
             # the defender row is a post-kill duplicate. Without snapping the
             # mover to the path end, subsequent envelopes that key off
@@ -5838,8 +6702,35 @@ def _apply_oracle_action_json_body(
                 if (int(mover_pk.pos[0]), int(mover_pk.pos[1])) != (er, ec):
                     rpk = compute_reachable_costs(state, mover_pk)
                     tail_pk = (er, ec)
-                    if tail_pk not in rpk and not UNIT_STATS[mover_pk.unit_type].is_indirect:
-                        if not _oracle_fire_stance_would_stack_on_transport(
+                    # Phase 11J-MOVE-TRUNCATE-SHIP: drop the historical
+                    # ``tail_pk not in rpk`` precondition.  AWBW post-kill duplicate
+                    # ``Fire`` rows pin the attacker on ``tail_pk`` regardless of
+                    # engine reachability — engine reach simply mirrors live-site
+                    # drift here.  3-of-3 drilled GIDs (1619504 PK + 1630353 / 1622140
+                    # FM) needed the relaxation; baseline kept the snap at 0/24 effective.
+                    if not UNIT_STATS[mover_pk.unit_type].is_indirect:
+                        # Phase 11J-MOVE-TRUNCATE-RESIDUALS-SHIP: hoist the
+                        # diff-type evict_drift branch above the
+                        # ``stance_stack`` gate.  Eviction marks the tail
+                        # occupant ``hp = 0`` *before* the snap, so by the
+                        # time ``_move_unit_forced`` runs there is no
+                        # transport on the tile to "stack" onto.  Mirror of
+                        # the LANE-L-WIDEN-SHIP (d176d5ad) opt-in pattern;
+                        # closes the diff-type-friendly drift residuals
+                        # observed in the residuals drill (1605367 B_COPTER
+                        # over TANK; 1626181 TANK over LANDER).
+                        if _oracle_path_tail_occupant_is_evictable_drift(
+                            state,
+                            mover_pk,
+                            tail_pk,
+                            engine_player=eng,
+                            allow_diff_type_friendly=True,
+                        ):
+                            _oracle_evict_drifted_tail_occupant(
+                                state, mover_pk, tail_pk
+                            )
+                            state._move_unit_forced(mover_pk, tail_pk)
+                        elif not _oracle_fire_stance_would_stack_on_transport(
                             state, mover_pk, tail_pk
                         ):
                             if _oracle_path_tail_is_friendly_load_boarding(
@@ -6025,8 +6916,10 @@ def _apply_oracle_action_json_body(
         # Must match ``get_legal_actions`` / ``_apply_attack``: unit is still on
         # ``start`` until the attack step runs; ``move_pos`` is the firing tile.
         _oracle_assert_fire_damage_table_compatible(state, u, (dr, dc))
+        _oracle_assert_fire_defender_not_friendly(state, u, (dr, dc))
         _oracle_set_combat_damage_override_from_combat_info(
-            state, fire_blk, envelope_awbw_player_id, u, (dr, dc)
+            state, fire_blk, envelope_awbw_player_id, u, (dr, dc),
+            awbw_to_engine=awbw_to_engine,
         )
         _engine_step(
             state,
@@ -6035,6 +6928,7 @@ def _apply_oracle_action_json_body(
                 unit_pos=start,
                 move_pos=fire_pos,
                 target_pos=(dr, dc),
+                select_unit_id=su_id,
             ),
             before_engine_step,
         )
@@ -6042,22 +6936,46 @@ def _apply_oracle_action_json_body(
             pr, pc = int(u.pos[0]), int(u.pos[1])
             if (pr, pc) != json_fire_path_end:
                 st_mv = UNIT_STATS[u.unit_type]
-                if (
-                    not st_mv.is_indirect
-                    and json_fire_path_was_unreachable
-                    and not _oracle_fire_stance_would_stack_on_transport(
-                        state, u, json_fire_path_end
-                    )
-                ):
-                    if _oracle_path_tail_is_friendly_load_boarding(
-                        state, u, json_fire_path_end, engine_player=eng
+                # Phase 11J-MOVE-TRUNCATE-SHIP: drop the
+                # ``json_fire_path_was_unreachable`` precondition (mirror the PK
+                # branch above).  After ATTACK the mover is pinned on ``fire_pos``
+                # which can differ from ``json_fire_path_end`` even when reach
+                # nominally covered the tail; AWBW's path tail is the truth.
+                if not st_mv.is_indirect:
+                    # Phase 11J-MOVE-TRUNCATE-RESIDUALS-SHIP: hoist the
+                    # diff-type evict_drift branch above the ``stance_stack``
+                    # gate.  Eviction marks the tail occupant ``hp = 0``
+                    # *before* the snap, so by the time ``_move_unit_forced``
+                    # runs there is no transport on the tile to "stack" onto.
+                    # Mirror of the LANE-L-WIDEN-SHIP (d176d5ad) opt-in
+                    # pattern; closes the diff-type-friendly drift residuals
+                    # observed in the residuals drill (1605367 B_COPTER over
+                    # TANK; 1626181 TANK over LANDER).  Same dominant guard
+                    # rejection mode for both: ``allow_snap=False`` because
+                    # occupant is a different-type friendly that prior Fire
+                    # eviction defaulted to leave alone.
+                    if _oracle_path_tail_occupant_is_evictable_drift(
+                        state,
+                        u,
+                        json_fire_path_end,
+                        engine_player=eng,
+                        allow_diff_type_friendly=True,
                     ):
-                        state.selected_move_pos = json_fire_path_end
-                    elif _oracle_path_tail_occupant_allows_forced_snap(
-                        state, u, json_fire_path_end, engine_player=eng
-                    ):
+                        _oracle_evict_drifted_tail_occupant(state, u, json_fire_path_end)
                         state._move_unit_forced(u, json_fire_path_end)
                         state.selected_move_pos = json_fire_path_end
+                    elif not _oracle_fire_stance_would_stack_on_transport(
+                        state, u, json_fire_path_end
+                    ):
+                        if _oracle_path_tail_is_friendly_load_boarding(
+                            state, u, json_fire_path_end, engine_player=eng
+                        ):
+                            state.selected_move_pos = json_fire_path_end
+                        elif _oracle_path_tail_occupant_allows_forced_snap(
+                            state, u, json_fire_path_end, engine_player=eng
+                        ):
+                            state._move_unit_forced(u, json_fire_path_end)
+                            state.selected_move_pos = json_fire_path_end
             pr, pc = int(u.pos[0]), int(u.pos[1])
             if (pr, pc) != (er, ec):
                 raise UnsupportedOracleAction(
@@ -6193,6 +7111,7 @@ def _apply_oracle_action_json_body(
                     unit_pos=(fr, fc),
                     move_pos=(fr, fc),
                     target_pos=target,
+                    select_unit_id=int(u.unit_id),
                 ),
                 before_engine_step,
             )
@@ -6390,6 +7309,7 @@ def _apply_oracle_action_json_body(
         _engine_step(state, chosen_u, before_engine_step)
         return
 
+    # ORACLE-ONLY: replay-fidelity Delete Unit handler; never legal for RL agent.
     if kind == "Delete":
         # Viewer/site echo after combat or map edits; engine state already reflects removal.
         _oracle_finish_action_if_stale(state, before_engine_step)

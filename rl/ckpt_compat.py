@@ -11,7 +11,9 @@ from __future__ import annotations
 import gc
 import io
 import os
+import shutil
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -206,26 +208,170 @@ def _register_numpy2_unpickle_shim() -> None:
     sys.modules["numpy._core.umath"] = _umath
 
 
-def load_maskable_ppo_compat(path: str | Path, **kwargs):
+# In-process reuse for eval scripts (symmetric / bo3) so each game does not
+# re-open the same zip; key includes device.
+_MODEL_LOAD_CACHE: dict[str, object] = {}
+
+
+def clear_maskable_ppo_load_cache() -> None:
+    """Drop cached models (e.g. between test cases)."""
+    _MODEL_LOAD_CACHE.clear()
+
+
+def _ppo_load_cache_key(path: Path, kwargs: dict) -> str:
+    dev = kwargs.get("device", "cpu")
+    return f"{path.resolve()}|{dev}"
+
+
+def _is_eval_frozen_snapshot(path: Path) -> bool:
+    """True if ``path`` was created by :func:`snapshot_eval_checkpoints` (no extra copy in load)."""
+    try:
+        p = path.resolve()
+        repo_root = Path(__file__).resolve().parent.parent
+        return (
+            p.parent == repo_root / ".tmp"
+            and p.name.startswith("eval_snap_")
+            and p.suffix.lower() == ".zip"
+        )
+    except OSError:
+        return False
+
+
+def snapshot_eval_checkpoints(pairs: list[tuple[str, Path]]) -> tuple[str, tuple[Path, ...]]:
+    """
+    Copy each ``(label, src)`` to ``<repo>/.tmp/eval_snap_<run_id>_<label>.zip``.
+
+    Call once at the start of symmetric / bo3 eval so **all** games read the same
+    bytes even if the original paths (e.g. ``Z:\\checkpoints\\latest.zip``) are
+    overwritten mid-run.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    tmp_dir = repo_root / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    run_id = time.strftime("%Y%m%dT%H%M%S") + f"_{os.getpid()}"
+
+    out: list[Path] = []
+    for label, src in pairs:
+        src = Path(src).resolve()
+        if not src.is_file():
+            raise FileNotFoundError(f"checkpoint missing for eval snapshot: {src}")
+        safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)[:64]
+        dst = tmp_dir / f"eval_snap_{run_id}_{safe_label}.zip"
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                shutil.copy2(src, dst)
+                with zipfile.ZipFile(dst, "r") as zf:
+                    zf.namelist()
+                out.append(dst.resolve())
+                break
+            except (OSError, zipfile.BadZipFile, EOFError) as e:
+                last_err = e
+                try:
+                    dst.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+        else:
+            raise RuntimeError(f"eval snapshot failed for {label!r}: {src}") from last_err
+
+    return run_id, tuple(out)
+
+
+def delete_eval_snapshots(paths: tuple[Path, ...]) -> None:
+    """Remove snapshot zips created by :func:`snapshot_eval_checkpoints` (best effort)."""
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _stable_zip_copy(src: Path) -> tuple[Path, bool]:
+    """
+    Copy checkpoint to ``<repo>/.tmp/`` so SB3/torch read a stable local file.
+
+    Avoids ``EOFError`` / truncated reads when the source is on a network share
+    or concurrently overwritten. Set ``AWBW_CKPT_LOCAL_COPY=0`` to read ``src``
+    directly (faster on local SSD; less safe on SMB).
+
+    Skips copying when ``src`` is already an eval snapshot from
+    :func:`snapshot_eval_checkpoints`.
+    """
+    src = src.resolve()
+    if _is_eval_frozen_snapshot(src):
+        return src, False
+
+    raw = os.environ.get("AWBW_CKPT_LOCAL_COPY", "1").strip().lower()
+    if raw in ("0", "false", "no"):
+        return src, False
+
+    repo_root = Path(__file__).resolve().parent.parent
+    tmp_dir = repo_root / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    last_err: Exception | None = None
+    for attempt in range(3):
+        fd, tmp_name = tempfile.mkstemp(prefix="ckpt_load_", suffix=".zip", dir=str(tmp_dir))
+        os.close(fd)
+        dst = Path(tmp_name)
+        try:
+            shutil.copy2(src, dst)
+            with zipfile.ZipFile(dst, "r") as zf:
+                zf.namelist()
+            return dst, True
+        except (OSError, zipfile.BadZipFile, EOFError) as e:
+            last_err = e
+            try:
+                dst.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1))
+    raise RuntimeError(f"checkpoint copy failed after 3 attempts: {src}") from last_err
+
+
+def load_maskable_ppo_compat(path: str | Path, *, cache: bool = False, **kwargs):
     """
     ``MaskablePPO.load`` with automatic 62→63 spatial stem migration when needed.
 
     Writes a temp zip under ``<repo>/.tmp/`` when patching; removes it after
     load (best effort on Windows).
+
+    Copies the source zip to ``.tmp`` before load (unless ``AWBW_CKPT_LOCAL_COPY=0``)
+    so SMB / concurrent writers do not cause ``EOFError`` during torch unpickle.
+
+    Set ``cache=True`` to reuse the same in-memory model for repeated loads of
+    the same path (eval scripts only; training should leave ``cache=False``).
     """
     _register_numpy2_unpickle_shim()
     from sb3_contrib import MaskablePPO  # type: ignore[import]
 
-    p = Path(path)
-    use_path, is_temp = materialize_sb3_zip_with_spatial_compat(p)
+    p = Path(path).resolve()
+    ckey = _ppo_load_cache_key(p, kwargs)
+    if cache and ckey in _MODEL_LOAD_CACHE:
+        return _MODEL_LOAD_CACHE[ckey]
+
+    local_src, del_local = _stable_zip_copy(p)
     try:
-        model = MaskablePPO.load(str(use_path), **kwargs)
-        _sync_loaded_model_observation_space(model)
-        return model
+        use_path, is_temp = materialize_sb3_zip_with_spatial_compat(local_src)
+        try:
+            model = MaskablePPO.load(str(use_path), **kwargs)
+            _sync_loaded_model_observation_space(model)
+            if cache:
+                _MODEL_LOAD_CACHE[ckey] = model
+            return model
+        finally:
+            if is_temp:
+                gc.collect()
+                try:
+                    use_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
     finally:
-        if is_temp:
-            gc.collect()
+        if del_local:
             try:
-                use_path.unlink(missing_ok=True)
+                local_src.unlink(missing_ok=True)
             except OSError:
                 pass

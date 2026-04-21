@@ -382,6 +382,30 @@ class Unit:
     # death. AWBW replay viewers index `DrawableUnit` by this id, so reusing
     # it causes the wrong sprite/color to be updated (see export_awbw_replay).
     unit_id: int = 0
+    # Phase 11J-VONBOLT-SCOP-SHIP — Von Bolt "Ex Machina" stun flag.
+    #
+    # AWBW canon (https://awbw.fandom.com/wiki/Von_Bolt and the AWBW CO Chart
+    # https://awbw.amarriner.com/co.php Von Bolt row): Ex Machina "deals 3 HP
+    # damage and prevents all affected enemy units from acting next turn."
+    # Set to True for enemy units inside the Ex Machina AOE when the SCOP
+    # fires (see ``GameState._apply_power_effects`` co_id 30 SCOP branch).
+    # Cleared in ``GameState._end_turn`` on the units of the player whose
+    # turn just ended — the stunned army serves the stun across exactly one
+    # of its own turns, then resumes.
+    #
+    # Consumed in three places to keep engine ⊂ AWBW legality:
+    #   1. ``engine/action.py::_get_select_actions`` skips SELECT_UNIT for
+    #      stunned units so the RL legal-action mask never offers them.
+    #   2. ``engine/game.py::step`` STEP-GATE rejects any direct attempt to
+    #      route through a stunned unit because that action will not appear
+    #      in the legal mask.
+    #   3. ``engine/game.py::_apply_attack`` zeroes the counter-attack when
+    #      the defender is stunned (PHP correctly skips counter-fire on
+    #      stunned defenders; the pre-fix engine let stunned defenders
+    #      counter, taking damage and shifting attacker HP below PHP — the
+    #      cluster-B drift mechanism flagged in
+    #      ``docs/oracle_exception_audit/phase11j_vonbolt_scop_ship.md``).
+    is_stunned: bool = False
 
     @property
     def display_hp(self) -> int:

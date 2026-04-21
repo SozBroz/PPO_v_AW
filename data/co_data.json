@@ -239,7 +239,7 @@
       "def_modifiers": {},
       "cop": {
         "name": "Black Wave",
-        "description": "All enemy units take 1 HP damage; all own units recover 2 HP",
+        "description": "All enemy units take 1 HP damage; all own units recover 1 HP",
         "atk_modifiers": {},
         "def_modifiers": {}
       },

@@ -85,6 +85,79 @@ def get_base_damage(attacker_type: UnitType, defender_type: UnitType) -> Optiona
 
 
 # ---------------------------------------------------------------------------
+# Kindle (co_id=23) attack rider — Phase 11J-L1-BUILD-FUNDS-SHIP
+# ---------------------------------------------------------------------------
+# AWBW canon (Tier 1 — AWBW CO Chart https://awbw.amarriner.com/co.php Kindle row):
+#   *"Units (even air units) gain +40% attack while on urban terrain. HQs,
+#    bases, airports, ports, cities, labs, and comtowers count as urban
+#    terrain. Urban Blight -- All enemy units lose -3 HP on urban terrain.
+#    Urban bonus is increased to +80%. High Society -- Urban bonus is
+#    increased to +130%, and attack for all units is increased by +3% for
+#    each of your owned urban terrain."*
+#
+# Power tiers REPLACE each other on urban terrain (not stack):
+#   D2D   → +40 AV
+#   COP   → +80 AV   (Urban Blight — the +10 SCOPB is still added separately
+#                     by COState.cop_atk_modifier as with every CO.)
+#   SCOP  → +130 AV  (High Society)
+# Plus, under SCOP only, +3 AV per owned urban property (HQs, bases,
+# airports, ports, cities, labs, comm towers — all entries in
+# ``GameState.properties``), which applies off-urban too. ``urban_props``
+# is refreshed each turn by ``GameState._refresh_comm_towers``.
+def _kindle_atk_rider(attacker_co: COState, attacker_terrain: TerrainInfo) -> int:
+    if attacker_co.co_id != 23:
+        return 0
+    av = 0
+    if attacker_terrain.is_property:
+        if attacker_co.scop_active:
+            av += 130
+        elif attacker_co.cop_active:
+            av += 80
+        else:
+            av += 40
+    if attacker_co.scop_active:
+        av += 3 * attacker_co.urban_props
+    return av
+
+
+# ---------------------------------------------------------------------------
+# Colin (co_id=15) attack rider — Phase 11J-COLIN-IMPL-SHIP
+# ---------------------------------------------------------------------------
+# AWBW canon (Tier 1, both AWBW canonicals agree — see
+# docs/oracle_exception_audit/phase11y_colin_scrape.md §0.1, §0.3, §0.4):
+#   * D2D — *"Units cost −20 % less to build and lose −10 % attack."*
+#   * COP "Gold Rush" — *"Funds are multiplied by 1.5x."* (NO attack rider;
+#     funds payout handled in ``GameState._apply_power_effects``.)
+#   * SCOP "Power of Money" — *"Unit attack percentage increases by
+#     (3 * Funds / 1000)%."*
+#   * Sources: https://awbw.amarriner.com/co.php (Colin row) and
+#     https://awbw.fandom.com/wiki/Colin
+#
+# Stacking model (per scrape §0.4): D2D −10 %% PERSISTS during COP and SCOP and
+# stacks with the universal +10 %% SCOPB rider that ``COState.cop_atk_modifier``
+# already adds. Net AV deltas vs base 100 (this rider's contribution only,
+# SCOPB applied separately by ``COState.cop_atk_modifier``):
+#   D2D    →  −10 AV
+#   COP    →  −10 AV   (Gold Rush has no attack effect; SCOPB still adds +10
+#                       universally for net 100 AV during COP — matches
+#                       scrape §0.4 "≈99 %%" wording, which is multiplicative
+#                       prose for the additive engine.)
+#   SCOP   →  −10 + int(3 * funds_snapshot / 1000) AV
+#
+# Funds source for SCOP: snapshotted into ``COState.colin_pom_funds_snapshot``
+# at SCOP activation by ``GameState._apply_power_effects`` (so post-SCOP
+# spending does not erode the bonus mid-turn). Float division → ``int(...)``
+# floor matches AWBW PHP integer arithmetic for non-negative funds.
+def _colin_atk_rider(attacker_co: COState) -> int:
+    if attacker_co.co_id != 15:
+        return 0
+    av = -10  # D2D −10 %% attack, persists through COP and SCOP per scrape §0.4.
+    if attacker_co.scop_active:
+        av += int(3 * attacker_co.colin_pom_funds_snapshot / 1000)
+    return av
+
+
+# ---------------------------------------------------------------------------
 # Seam damage
 # ---------------------------------------------------------------------------
 # AWBW pipe-seam base damage per attacker, no luck, defender behaves like a
@@ -141,6 +214,8 @@ def calculate_seam_damage(
     if attacker_co.co_id == 16:
         if attacker_co.scop_active or attacker_co.cop_active:
             av += attacker_terrain.defense * 10
+    av += _kindle_atk_rider(attacker_co, attacker_terrain)
+    av += _colin_atk_rider(attacker_co)
 
     hpa_bars = attacker.display_hp
     # Defender side: Neotank at 0 defense stars, full HP, no luck applied.
@@ -210,6 +285,8 @@ def calculate_damage(
     attacker_co: COState,
     defender_co: COState,
     luck_roll: Optional[int] = None,
+    *,
+    counter_amp: float = 1.0,
 ) -> Optional[int]:
     """
     Calculate damage dealt by attacker to defender.
@@ -218,6 +295,12 @@ def calculate_damage(
     attacker cannot attack the defender (missing table entry).
 
     luck_roll: explicit 0–9 value for deterministic tests; random if None.
+    counter_amp: multiplier applied to the raw damage before AWBW rounding.
+        Used by ``calculate_counterattack`` to inject Sonja's D2D counter ×1.5
+        (https://awbw.amarriner.com/co.php Sonja row, "counterattacks do
+        1.5x more damage"). Equivalent to scaling AV inside the formula —
+        applied to ``raw`` so AWBW's ceil-to-0.05/floor rounding stays the
+        sole source of HP-tick truncation.
     """
     base = get_base_damage(attacker.unit_type, defender.unit_type)
     if base is None:
@@ -244,6 +327,12 @@ def calculate_damage(
         if attacker_co.scop_active or attacker_co.cop_active:
             av += attacker_terrain.defense * 10
 
+    # Kindle (co_id=23): urban-terrain attack rider (D2D / COP / SCOP).
+    av += _kindle_atk_rider(attacker_co, attacker_terrain)
+
+    # Colin (co_id=15): D2D −10 %% + SCOP "Power of Money" attack rider.
+    av += _colin_atk_rider(attacker_co)
+
     # --- Luck ---
     if luck_roll is None:
         luck_roll = random.randint(0, 9)
@@ -258,6 +347,19 @@ def calculate_damage(
     hpa_bars = attacker.display_hp
     hpd_bars = defender.display_hp
 
+    # Sonja (co_id=18) "Hidden HP" is intentionally NOT applied to the damage
+    # formula. The Fandom Damage_Formula page is explicit: "damage taken by
+    # the defending unit will be calculated in the form of its true health".
+    # AWBW PHP server has full information and computes damage with true HP;
+    # Hidden HP is a UI-only deception that affects what the *opponent* sees
+    # in the on-screen indicator (and so what they can infer in Fog of War).
+    # An earlier Phase 11J-SONJA-D2D-IMPL attempt added a `hpd_bars - 1`
+    # rider here; it shifted the engine's Sonja-defender damage in the right
+    # direction for ~3 mid-range gids but introduced offsetting overshoot on
+    # other Sonja-bearing games (per-unit cumulative drift up to 23 HP) and
+    # was reverted. See docs/oracle_exception_audit/phase11j_sonja_d2d_impl.md
+    # § "Reverted: Hidden HP damage rider".
+
     # --- Defense Value ---
     dv = defender_co.total_def(def_unit_class)
 
@@ -269,6 +371,8 @@ def calculate_damage(
 
     # --- Formula ---
     raw = (base * av / 100 + l_val - lb_val) * (hpa_bars / 10) * (200 - (dv + dtr * hpd_bars)) / 100
+    # Sonja D2D counter ×1.5 amplification (caller-supplied; see docstring).
+    raw *= counter_amp
 
     # Round up to nearest 0.05, then floor
     rounded = math.ceil(raw / 0.05) * 0.05
@@ -371,16 +475,24 @@ def calculate_counterattack(
         return None
 
     if defender_co.co_id == 18 and defender_co.scop_active:
-        # Sonja SCOP "counter break": restore the forward damage so the
-        # counter rolls against pre-attack HP (capped at 100).
+        # Sonja SCOP "Counter Break": defender attacks first, so the counter
+        # rolls against pre-attack HP (capped at 100). AWBW canon:
+        # https://awbw.amarriner.com/co.php — "A unit being attacked will
+        # attack first (even if it would be destroyed by the attack)."
         counter_unit = copy.copy(defender)
         counter_unit.hp = min(100, defender.hp + attack_damage)
     else:
         counter_unit = defender
+
+    # Sonja D2D "counterattacks do 1.5x more damage" (amarriner Sonja row).
+    # No canon language disables this under COP/SCOP — the ×1.5 stacks on
+    # top of SCOP's "attack first" pre-attack-HP path above.
+    counter_amp = 1.5 if defender_co.co_id == 18 else 1.0
 
     return calculate_damage(
         counter_unit, attacker,
         defender_terrain, attacker_terrain,
         defender_co, attacker_co,
         luck_roll=luck_roll,
+        counter_amp=counter_amp,
     )

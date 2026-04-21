@@ -23,16 +23,19 @@ MAPS = Path(__file__).resolve().parents[1] / "data" / "maps"
 
 class TestOracleFireLaneA(unittest.TestCase):
     def test_neotank_bcopter_damage_table_gl1621898_gl1629921(self) -> None:
-        self.assertEqual(get_base_damage(UnitType.NEO_TANK, UnitType.B_COPTER), 35)
-        self.assertEqual(get_base_damage(UnitType.NEO_TANK, UnitType.T_COPTER), 35)
-        self.assertEqual(get_base_damage(UnitType.MED_TANK, UnitType.B_COPTER), 35)
-        # Foot-vs-rotor canon (AW2 / awbw.fandom.com/wiki/Damage_Chart): Infantry
-        # 7/3 vs B-/T-Copter, Mech MG 9/5. Filled by agent4 (was null, hid the
-        # strike entirely — see GL 1635708 P0 Inf -> P1 T-Copter).
+        # 2026-04 (Phase 11J-DAMAGE-CANON): all values aligned to AWBW PHP canon
+        # (https://awbw.amarriner.com/damage.php). The GL 1621898 / 1629921
+        # invariant under guard is non-null (targeting must be legal); the exact
+        # damage was earlier pinned to AW2-fandom hypothesis. Audit (936 games)
+        # held 928 ok / 8 oracle_gap / 0 engine_bug across the flip.
+        self.assertEqual(get_base_damage(UnitType.NEO_TANK, UnitType.B_COPTER), 22)
+        self.assertEqual(get_base_damage(UnitType.NEO_TANK, UnitType.T_COPTER), 55)
+        self.assertEqual(get_base_damage(UnitType.MED_TANK, UnitType.B_COPTER), 12)
+        # Foot vs rotor: PHP canon Infantry 7/30, Mech 9/35.
         self.assertEqual(get_base_damage(UnitType.INFANTRY, UnitType.B_COPTER), 7)
-        self.assertEqual(get_base_damage(UnitType.INFANTRY, UnitType.T_COPTER), 3)
+        self.assertEqual(get_base_damage(UnitType.INFANTRY, UnitType.T_COPTER), 30)
         self.assertEqual(get_base_damage(UnitType.MECH, UnitType.B_COPTER), 9)
-        self.assertEqual(get_base_damage(UnitType.MECH, UnitType.T_COPTER), 5)
+        self.assertEqual(get_base_damage(UnitType.MECH, UnitType.T_COPTER), 35)
         # Foot vs fixed-wing remains null (cannot target — AW2/AWBW: ground MGs
         # cannot lock fixed-wing aircraft).
         self.assertIsNone(get_base_damage(UnitType.INFANTRY, UnitType.FIGHTER))

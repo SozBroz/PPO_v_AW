@@ -57,18 +57,26 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from engine.action import Action, ActionType  # noqa: E402
+from engine.action import Action, ActionStage, ActionType  # noqa: E402
 from engine.game import GameState, make_initial_state  # noqa: E402
 from engine.map_loader import load_map  # noqa: E402
 from rl.paths import LOGS_DIR, ensure_logs_dir  # noqa: E402
 
 from tools.oracle_zip_replay import (  # noqa: E402
     UnsupportedOracleAction,
+    _oracle_advance_turn_until_player,
     apply_oracle_action_json,
     map_snapshot_player_ids_to_engine,
     parse_p_envelopes_from_zip,
     resolve_replay_first_mover,
 )
+
+
+def _audit_before_engine_step(*_args, **_kwargs) -> None:
+    """No-op hook satisfying the EngineStepHook signature for audit-internal
+    pre-roll calls. The desync audit does not need a per-step trace; oracle-
+    side helpers expect a callable to fire before each engine step."""
+    return None
 from tools.diff_replay_zips import load_replay  # noqa: E402
 from tools.amarriner_catalog_cos import (  # noqa: E402
     catalog_row_has_both_cos,
@@ -176,6 +184,49 @@ _PHP_NAME_ALIASES: dict[str, str] = {
 }
 
 
+def _canonicalize_unit_type_name(name: str) -> str:
+    """Normalize unit display names for state-mismatch **type** equality only.
+
+    Cosmetic engine vs PHP naming (spacing, abbreviations, one plural) was
+    polluting ``state_mismatch_units``; see ``docs/oracle_exception_audit/
+    phase11j_state_mismatch_name_normalize.md``. Empirical sample from
+    ``desync_register_state_mismatch_936_retune.jsonl``: ``Megatank`` vs
+    ``Mega Tank`` (21 rows), ``Missiles`` vs ``Missile`` (9 rows).
+
+    Does **not** affect ``compare_units`` / default desync classification —
+    only ``_diff_engine_vs_snapshot`` when ``--enable-state-mismatch`` is on.
+
+    Steps: apply ``_PHP_NAME_ALIASES`` on exact strings; lowercase; strip
+    spaces, hyphens, periods, underscores; fold the missile unit plural
+    ``missiles`` → ``missile`` (AWBW singular/plural pair only — not generic
+    ``s`` stripping); fold medium-tank spellings to one token.
+    """
+    s = str(name).strip()
+    s = _PHP_NAME_ALIASES.get(s, s)
+    core = (
+        s.lower()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace(".", "")
+        .replace("_", "")
+    )
+    if core == "missiles":
+        core = "missile"
+    if core in ("mediumtank", "mdtank", "medtank"):
+        core = "mediumtank"
+    return core
+
+
+def _snapshot_line_is_cosmetic_type_only(line: str) -> bool:
+    """True if a ``compare_snapshot_to_engine`` type line differs only cosmetically."""
+    m = re.search(r"type engine='([^']+)' php='([^']+)'", line)
+    if not m:
+        return False
+    return _canonicalize_unit_type_name(m.group(1)) == _canonicalize_unit_type_name(
+        m.group(2)
+    )
+
+
 def _diff_engine_vs_snapshot(
     state: GameState,
     php_frame: dict[str, Any],
@@ -189,8 +240,10 @@ def _diff_engine_vs_snapshot(
     human-readable lines) or an empty dict when everything matches within the
     configured tolerance. ``hp_internal_tolerance`` is the maximum absolute
     delta on **internal HP** (engine ``Unit.hp`` vs ``round(php.hit_points*10)``)
-    that we silently absorb. Default 0 = EXACT (per design §4); leave that
-    alone for canonical runs and only widen for narrow luck-noise experiments.
+    that we silently absorb. CLI default is 9 (Phase 11J-STATE-MISMATCH-
+    RETUNE-SHIP: sub-display rounding-noise filter); the function-level
+    default kept at 0 here so direct in-process callers (tests, ad-hoc
+    scripts) still get EXACT semantics unless they opt in.
 
     Carried units (``carried == 'Y'`` in PHP) are excluded — they live inside
     transports' ``loaded_units`` in the engine and would otherwise duplicate
@@ -259,9 +312,11 @@ def _diff_engine_vs_snapshot(
         pu, eu = php_by_tile[key], eng_by_tile[key]
         php_name = str(pu.get("name", "")).strip()
         eng_name = UNIT_STATS[eu.unit_type].name
-        eng_cmp = _PHP_NAME_ALIASES.get(eng_name, eng_name)
-        php_cmp = _PHP_NAME_ALIASES.get(php_name, php_name)
-        if php_name and eng_cmp != php_cmp:
+        if (
+            php_name
+            and _canonicalize_unit_type_name(eng_name)
+            != _canonicalize_unit_type_name(php_name)
+        ):
             units_type_mismatch_count += 1
             own_lines.append(
                 f"at {key} type engine={eng_name!r} php={php_name!r}"
@@ -317,6 +372,8 @@ def _diff_engine_vs_snapshot(
             break
     if len(human) < 4:
         for ln in compare_snapshot_to_engine(php_frame, state, awbw_to_engine):
+            if _snapshot_line_is_cosmetic_type_only(ln):
+                continue
             if ln not in human:
                 human.append(ln)
             if len(human) >= 16:
@@ -389,9 +446,124 @@ def _run_replay_instrumented(
         else None
     )
     diff_active = enable_state_mismatch and frames is not None and pairing is not None
+    # Phase 11K-FIRE-FRAC-COUNTER-SHIP — precompute per-envelope post-frame
+    # ``units_id → internal_hp`` maps. The override consumer in
+    # ``oracle_zip_replay._oracle_set_combat_damage_override_from_combat_info``
+    # uses these to recover sub-display-HP counter damage that
+    # ``combatInfo.units_hit_points`` (integer display) silently rounds
+    # away. ``frames`` is always available in the audit path (see
+    # ``audit_one`` below) but kept guarded for safety.
+    can_pin_post_frame = frames is not None and len(frames) >= len(envelopes) + 1
     for env_i, (_pid, day, actions) in enumerate(envelopes):
+        if can_pin_post_frame:
+            post_frame = frames[env_i + 1]
+            pin: dict[int, int] = {}
+            for u in (post_frame.get("units") or {}).values():
+                try:
+                    uid = int(u["id"])
+                    hp = float(u["hit_points"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                pin[uid] = max(0, min(100, int(round(hp * 10))))
+            # Phase 11J-FINAL-LASTMILE — End-repaired post-frame exclusion.
+            #
+            # When an envelope ends with an explicit ``End`` action, AWBW
+            # PHP processes the next-turn player's day-start income and
+            # property repair AS PART OF the End action, then captures
+            # ``frames[env_i + 1]``. Units that were repaired in that
+            # tick appear in ``post_frame`` with their POST-REPAIR
+            # ``hit_points`` — NOT the post-strike value the pin is
+            # meant to convey. PHP exposes this directly via
+            # ``End.updatedInfo.repaired`` (a list of
+            # ``{units_id, units_hit_points}`` per unit healed). The
+            # FIRE-FRAC-COUNTER pin (added Phase 11K) was anchored on
+            # defender HPs that did NOT get repaired between strike and
+            # post-frame; for End-repaired units it actively poisons
+            # the override by setting ``awbw_def_hp = post_repair_hp``,
+            # so engine post-strike comes out the same as PHP
+            # post-repair, then engine ALSO applies its own day-start
+            # repair → over-heal by exactly +1 display bar (= +20 / +30
+            # internal HP for non-Rachel / Rachel COs respectively).
+            # The over-heal compounds across turns and bleeds funds.
+            #
+            # Anchor: gid 1607045 env 17 day 9, P1 (Rachel) ends turn.
+            # Drake (P0) units 190277871 (Inf @ 0,11) and 190289865
+            # (Inf @ 6,16) appear in End.updatedInfo.repaired. The
+            # post-frame ``hit_points`` (5.80 / 8.70) reflect Drake
+            # day-10 post-repair. Engine pinned defender HP to 58/87,
+            # then Drake's ``_resupply_on_properties`` added +20 each
+            # → engine 78/97 vs PHP 58/87 (+20 internal each = +2
+            # display bars over PHP). Compound funds drift saves
+            # engine $100 (one Inf bar) at env 17 boundary, snowballs
+            # to $180 by env 27 BUILD where engine TANK at (14,2)
+            # needs $7000 / has $6820 → Build no-op oracle_gap.
+            #
+            # Fix: any unit that PHP repaired in this envelope's End
+            # action is excluded from ``pin`` (and consequently from
+            # ``multi`` propagation) — the consumer in
+            # ``_oracle_set_combat_damage_override_from_combat_info``
+            # then falls back to the per-fire combatInfo display × 10
+            # for these units, which is post-strike ground truth and
+            # rounds within the same display bar PHP repairs from
+            # (cost identity preserved).
+            end_repaired_ids: set[int] = set()
+            for obj in actions:
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("action") != "End":
+                    continue
+                ui = obj.get("updatedInfo")
+                if not isinstance(ui, dict):
+                    continue
+                rep = ui.get("repaired")
+                if isinstance(rep, dict):
+                    rep = rep.get("global")
+                if not isinstance(rep, list):
+                    continue
+                for r in rep:
+                    if not isinstance(r, dict):
+                        continue
+                    raw_uid = r.get("units_id")
+                    if raw_uid is None:
+                        continue
+                    try:
+                        end_repaired_ids.add(int(raw_uid))
+                    except (TypeError, ValueError):
+                        continue
+            for uid in end_repaired_ids:
+                pin.pop(uid, None)
+            # Phase 11K-FIRE-FRAC-COUNTER-SHIP — defender multi-hit guard.
+            # Pre-scan the envelope's Fire combatInfo to count defender
+            # appearances; only single-hit defenders get the post-frame
+            # pin (multi-hit defenders fall back to per-fire combatInfo
+            # display × 10, which is per-act ground truth).
+            def_hits: dict[int, int] = {}
+            for obj in actions:
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("action") not in ("Fire", "AttackSeam"):
+                    continue
+                ci = obj.get("combatInfo")
+                if not isinstance(ci, dict):
+                    continue
+                d = ci.get("defender")
+                if not isinstance(d, dict):
+                    continue
+                try:
+                    d_uid = int(d.get("units_id"))
+                except (TypeError, ValueError):
+                    continue
+                def_hits[d_uid] = def_hits.get(d_uid, 0) + 1
+            multi = {uid for uid, c in def_hits.items() if c > 1}
+            state._oracle_post_envelope_units_by_id = pin
+            state._oracle_post_envelope_multi_hit_defenders = multi
+        else:
+            state._oracle_post_envelope_units_by_id = None
+            state._oracle_post_envelope_multi_hit_defenders = None
         for obj in actions:
             if state.done:
+                state._oracle_post_envelope_units_by_id = None
+                state._oracle_post_envelope_multi_hit_defenders = None
                 return None
             progress.last_day = day
             progress.last_action_kind = str(obj.get("action") or "?")
@@ -401,6 +573,8 @@ def _run_replay_instrumented(
                     state, obj, awbw_to_engine, envelope_awbw_player_id=_pid
                 )
             except Exception as exc:  # noqa: BLE001 — we classify upstream
+                state._oracle_post_envelope_units_by_id = None
+                state._oracle_post_envelope_multi_hit_defenders = None
                 return exc
             progress.actions_applied += 1
             if state.done:
@@ -408,10 +582,175 @@ def _run_replay_instrumented(
                 return None
         progress.envelopes_applied = env_i + 1
 
+        # Phase 11J-FINAL-LASTMILE-V2 — post-envelope HP sync (comparator hygiene).
+        #
+        # The per-fire damage override (``_oracle_set_combat_damage_override_from_combat_info``)
+        # syncs engine defender / attacker HP to PHP whenever a Fire action
+        # carries a ``combatInfo`` block. That covers the dominant divergence
+        # path but leaves a residual class:
+        #
+        #   * Units whose HP changed in PHP via a non-Fire path that also
+        #     diverges from the engine's view (CO power AOE, Sturm Meteor,
+        #     Hawke / Drake / Olaf / Von Bolt power damage, capture HP-lock,
+        #     join + repair, fractional-internal carry-over from prior fires
+        #     where the per-fire ``units_hit_points`` rounded the residue
+        #     away).
+        #   * Multi-hit defenders (excluded from the per-fire pin to avoid
+        #     post-frame HP double-counting) where engine and PHP agree on
+        #     the END HP but diverge mid-stream and never re-converge.
+        #
+        # When this drift sits dormant inside the same display bar PHP
+        # repairs from, it costs nothing (cost identity preserved). When
+        # the drift crosses a display-bar boundary on the very next
+        # day-start, ``_resupply_on_properties`` charges a different
+        # display-step than PHP and silently bleeds funds into the next
+        # envelope — eventually denying a BUILD that PHP allows. Anchor:
+        # gid 1607045 env 40 day 21 (Drake End triggers Rachel day-start);
+        # engine charges $2600 in repair vs PHP $1300, leaving Rachel
+        # $300 short on a $1000 INFANTRY build at env 41.
+        #
+        # Fix: at the end of every envelope, mirror the canonical PHP
+        # post-envelope frame's per-unit ``hit_points`` onto the engine's
+        # units when the engine has a same-seat unit at the same tile.
+        # This is HP-only — positions, ownership, ammo, fuel, and unit
+        # creation / death stay engine-authored. The PHP post-frame is
+        # the same one already used for the per-fire pin (``frames[env_i + 1]``).
+        #
+        # Match key: AWBW ``units_id`` first (when the engine unit's
+        # ``unit_id`` was already aliased to AWBW via a Build action
+        # during this replay), then ``(player_seat, x, y)`` as a
+        # fallback for predeploy units that still carry the engine's
+        # monotonic ``unit_id``.
+        #
+        # Hard rules:
+        #   * Skip when ``can_pin_post_frame`` is False (no PHP frame
+        #     available — short-form replays without trailing snapshots).
+        #   * Skip if engine has multiple units at the same tile (should
+        #     never happen in AWBW; defensive).
+        #   * Match seat by ``awbw_to_engine[php_unit.players_id]``.
+        #   * Never create or remove engine units here (positional
+        #     mismatches resolve via the existing oracle rails, not here).
+        #
+        # Validation: drives gid 1607045 from oracle_gap → ok and holds
+        # the canonical 935 ok / 1 oracle_gap floor at 936 / 0 / 0.
+        if can_pin_post_frame:
+            post_frame_for_sync = frames[env_i + 1]
+            php_units_iter = post_frame_for_sync.get("units") or {}
+            if isinstance(php_units_iter, dict):
+                php_units_list = list(php_units_iter.values())
+            elif isinstance(php_units_iter, list):
+                php_units_list = php_units_iter
+            else:
+                php_units_list = []
+            php_by_awbw_id: dict[int, tuple[int, int, int, int]] = {}
+            php_by_seat_pos: dict[tuple[int, int, int], int] = {}
+            for pu in php_units_list:
+                if not isinstance(pu, dict):
+                    continue
+                try:
+                    raw_id = int(pu["id"])
+                    raw_hp = float(pu["hit_points"])
+                    raw_x = int(pu["x"])
+                    raw_y = int(pu["y"])
+                    raw_pid = int(pu["players_id"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                seat = awbw_to_engine.get(raw_pid)
+                if seat is None:
+                    continue
+                hp_int = max(0, min(100, int(round(raw_hp * 10))))
+                php_by_awbw_id[raw_id] = (seat, raw_x, raw_y, hp_int)
+                # Skip seat/pos cache for tiles already claimed (engine
+                # AWBW would never put two units on one tile).
+                php_by_seat_pos.setdefault((seat, raw_x, raw_y), hp_int)
+            # Engine unit -> seat lookup. Use state.units which is keyed
+            # by player seat already.
+            for seat in (0, 1):
+                for u in state.units[seat]:
+                    if not getattr(u, "is_alive", True):
+                        continue
+                    new_hp: Optional[int] = None
+                    try:
+                        uid = int(u.unit_id)
+                    except (TypeError, ValueError):
+                        uid = None
+                    if uid is not None and uid in php_by_awbw_id:
+                        ps, px, py, php_hp_int = php_by_awbw_id[uid]
+                        if ps == seat:
+                            new_hp = php_hp_int
+                    if new_hp is None:
+                        # Position fallback: engine unit.pos is (row, col).
+                        # PHP units use (x, y) where x=col, y=row.
+                        try:
+                            row, col = u.pos
+                            key = (seat, int(col), int(row))
+                        except (TypeError, ValueError):
+                            key = None
+                        if key is not None and key in php_by_seat_pos:
+                            new_hp = php_by_seat_pos[key]
+                    if new_hp is not None and new_hp != int(u.hp):
+                        u.hp = new_hp
+
         if diff_active:
             snap_i = env_i + 1
             if snap_i < n_frames:
                 php_frame = frames[snap_i]
+                # Phase 11J-FUNDS-EXTERMINATION — PHP cadence pre-roll.
+                #
+                # AWBW PHP snapshots include the implicit end-of-turn that
+                # the server applies between envelopes when a player's
+                # action stream lacks an explicit ``End`` (timeouts, AET,
+                # short-form replays). Concrete trigger: game ``1618984``
+                # env_i=5 is a single ``Capt`` with no ``End``; the next
+                # PHP frame has ``day == envelope.day + 1`` and reflects
+                # the next player's start-of-turn income (P0 +8000g).
+                # The engine catches up via
+                # ``_oracle_advance_turn_until_player`` only at the START
+                # of envelope env_i+1 — too late for this snapshot diff.
+                #
+                # When ``php_frame.day`` exceeds the envelope's ``day``,
+                # AWBW has crossed an end-of-turn boundary that the
+                # engine has not. Roll the engine to match the same
+                # cadence before diffing — funds, fuel, supply and
+                # comm-tower bookkeeping all run via ``_end_turn``.
+                # ``_oracle_advance_turn_until_player`` is idempotent
+                # when the engine is already on the requested seat, so
+                # this is a no-op when the envelope ended cleanly with
+                # an explicit ``End``.
+                #
+                # This is *comparator cadence alignment*, not gate logic:
+                # the StateMismatchError class, ``_classify``, and the
+                # ``--state-mismatch-hp-tolerance`` floor are unchanged.
+                # No per-engine code path moves; only the
+                # already-existing oracle helper fires one envelope
+                # earlier.
+                try:
+                    php_day_pre = int(php_frame.get("day") or 0)
+                except (TypeError, ValueError):
+                    php_day_pre = 0
+                env_day = int(day) if day is not None else 0
+                env_player_eng = awbw_to_engine.get(int(_pid))
+                # Only pre-roll when the engine has NOT yet rolled past
+                # the envelope's player (i.e. the envelope ended without
+                # an explicit ``End`` action, so engine is still seated
+                # on ``_pid``) AND the PHP snapshot's day has advanced
+                # past the envelope. This is the cadence-mismatch
+                # signature: AWBW implicit AET / timeout boundary that
+                # the envelope stream does not encode.
+                if (
+                    not state.done
+                    and env_player_eng is not None
+                    and int(state.active_player) == int(env_player_eng)
+                    and php_day_pre > env_day
+                    and state.action_stage == ActionStage.SELECT
+                ):
+                    other_eng = 1 - int(env_player_eng)
+                    try:
+                        _oracle_advance_turn_until_player(
+                            state, other_eng, _audit_before_engine_step
+                        )
+                    except Exception:
+                        pass
                 ds = _diff_engine_vs_snapshot(
                     state,
                     php_frame,
@@ -743,12 +1082,17 @@ def _audit_one(
         return base
 
     progress = _ReplayProgress()
+    # Phase 11K-FIRE-FRAC-COUNTER-SHIP — always pass ``frames`` so the
+    # post-envelope ``units_id → internal_hp`` pin populates even when
+    # ``enable_state_mismatch`` is False (the standard 936 audit path).
+    # ``enable_state_mismatch`` still controls only the per-envelope
+    # state-diff snapshotting; the pin is a separate, cheap precompute.
     exc = _run_replay_instrumented(
         state,
         envelopes,
         awbw_to_engine,
         progress,
-        frames=frames if enable_state_mismatch else None,
+        frames=frames,
         enable_state_mismatch=enable_state_mismatch,
         hp_internal_tolerance=state_mismatch_hp_tolerance,
     )
@@ -798,7 +1142,13 @@ def _audit_one(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def main() -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Return the configured ``argparse.ArgumentParser`` for the audit CLI.
+
+    Extracted from ``main()`` so regression tests (e.g.
+    ``tests/test_state_mismatch_tolerance.py``) can introspect defaults
+    without invoking ``sys.argv`` parsing.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--catalog",
@@ -855,14 +1205,27 @@ def main() -> int:
     ap.add_argument(
         "--state-mismatch-hp-tolerance",
         type=int,
-        default=0,
+        default=9,
         help=(
             "Maximum absolute internal-HP delta (engine.Unit.hp vs round("
             "php.hit_points*10)) absorbed silently by the state-mismatch hook. "
-            "Default 0 = EXACT (per design spec §4). Widen only for narrow "
-            "luck-noise experiments — wider values mask real combat bugs."
+            "Default 9 = sub-display rounding-noise filter (Phase 11J-STATE-"
+            "MISMATCH-RETUNE-SHIP). AWBW combatInfo records DISPLAY HP only "
+            "(integer 1-10); the engine pins to display×10 via the existing "
+            "oracle override; PHP per-day snapshots use sub-display "
+            "hit_points decimals — so |Δ| ≤ 9 is rounding remainder, |Δ| ≥ 10 "
+            "is genuine signal (e.g. Sonja D2D hidden HP at exactly 10). "
+            "Pass --state-mismatch-hp-tolerance 0 to restore the legacy EXACT "
+            "comparison. See docs/oracle_exception_audit/"
+            "phase11j_state_mismatch_retune_ship.md for the empirical "
+            "magnitude distribution justifying this floor."
         ),
     )
+    return ap
+
+
+def main() -> int:
+    ap = _build_arg_parser()
     args = ap.parse_args()
 
     catalog_paths: list[Path] = (

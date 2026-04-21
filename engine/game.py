@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Optional
+from collections import Counter
+from typing import Optional, Union
 
 from engine.unit import Unit, UnitType, UNIT_STATS, idle_start_of_day_fuel_drain
 from engine.terrain import get_terrain, property_terrain_id_after_owner_change
@@ -117,6 +118,7 @@ class GameState:
     win_reason:        Optional[str]           # why the game ended (set when done becomes True)
     game_log:          list[dict]              # append-only action history (resolved actions only)
     tier_name:         str
+    max_turns:         int = field(default=MAX_TURNS)  # calendar tiebreak after this day count (see _end_turn)
     full_trace:        list[dict] = field(default_factory=list)  # every action incl. SELECT/END_TURN
     
     # Economic tracking (Phase A logging requirements)
@@ -165,6 +167,118 @@ class GameState:
     # luck. Internal HP scale is 0–100; ``None`` slots fall back to the
     # rolled value (e.g. seam attacks have no defender unit).
     _oracle_combat_damage_override: Optional[tuple[Optional[int], Optional[int]]] = None
+
+    # Phase 11J-MISSILE-AOE-CANON — Von Bolt SCOP "Ex Machina" AOE override.
+    #
+    # Tier 1 — AWBW CO Chart ``https://awbw.amarriner.com/co.php`` (Von Bolt):
+    # *"A 2-range missile deals 3 HP damage and prevents all affected units
+    # from acting next turn."*
+    #
+    # Tier 2 — AWBW Fandom Wiki Interface Guide (Missile Silos): 2-range blast =
+    # Manhattan distance ≤ 2 from center, 13 tiles (5-wide diamond).
+    #
+    # Tier 3 — PHP gid 1622328 env 28 ``unitReplace``: seven damaged enemies all
+    # at Manhattan ≤ 2 from ``missileCoords`` at pre-strike positions; oracle
+    # pin in ``tools/oracle_zip_replay.py`` expands the center into that diamond.
+    # Pre-fix engine subtracted 30 HP from every enemy globally (see
+    # ``phase11j_funds_deep.md`` / ``phase11j_cluster_b_ship.md``).
+    #
+    # The Power action JSON itself carries ``missileCoords: [{x, y}]`` —
+    # the AOE center — so the oracle can pin the affected tile set without
+    # any external scrape. ``_oracle_power_aoe_positions`` is the set of
+    # engine ``(row, col)`` tiles that should take the 30 HP loss; when
+    # ``None`` the engine falls back to its prior global behavior so the RL
+    # / non-oracle path is unchanged. One-shot: cleared by
+    # ``_apply_power_effects`` after consumption.
+    #
+    # Phase 11J-RACHEL-SCOP-COVERING-FIRE-SHIP — type widened to also accept
+    # a ``Counter[(row, col)] -> hit_count`` so Rachel's 3-missile SCOP can
+    # encode per-tile multiplicity (overlapping missiles stack their 30 HP
+    # damage). Von Bolt's branch continues to pin a plain ``set`` (1
+    # missile, multiplicity always 1) and its ``u.pos in aoe`` consumer
+    # works identically on both ``set`` and ``Counter``.
+    _oracle_power_aoe_positions: Optional[
+        Union[set[tuple[int, int]], Counter]
+    ] = None
+
+    # Phase 11J-CLOSE-1624082 — oracle War Bonds payout pin.
+    #
+    # AWBW canon (Tier 1, AWBW CO Chart Sasha row,
+    # https://awbw.amarriner.com/co.php):
+    #   *"War Bonds — Returns 50% of damage dealt as funds (subject to a 9HP
+    #   cap)."*
+    #
+    # PHP emits the per-Fire War Bonds payout in the same combatInfo block
+    # that pins post-strike HP — ``combatInfoVision.global.combatInfo
+    # .gainedFunds`` is a dict keyed by AWBW player id, value = payout for
+    # that player from this strike (None when the player gained nothing).
+    # Sasha's primary-attack credit lives under the activator's id; her
+    # counter-attack credit lives under the defender's id when she is
+    # defending.
+    #
+    # Why this override exists: the engine computes War Bonds from
+    # ``display_hp`` deltas of the engine board's defender / attacker. When
+    # state-mismatch leaves an engine unit at a different pre-strike HP
+    # than PHP's matching unit (combat-info HP override pulls them to the
+    # *same* post-HP, but pre-HP can still differ), the engine's WB credit
+    # diverges from PHP by ``(display_pre_engine - display_pre_PHP) *
+    # cost(target) // 20`` per fire. Game ``1624082`` env 33 (Sasha
+    # day-17) is the empirical anchor: 4 of 14 Sasha primary fires diverge
+    # on pre-HP, total drift −500 g, surviving 150 g shortfall on a
+    # NEO_TANK build at (13,3) after Sasha's intermediate ANTI_AIR build
+    # consumes 8 000 g. Pinning the WB payout from PHP's ``gainedFunds``
+    # field makes the engine's treasury match PHP's even under HP
+    # state-mismatch, the same way ``_oracle_combat_damage_override``
+    # makes the engine's post-HP match PHP's even under random-roll
+    # divergence.
+    #
+    # Format: ``dict[engine_player_id, payout_gold]``. Each
+    # ``_apply_war_bonds_payout`` call pops its dealer entry; ``_apply_attack``
+    # clears the field after the primary + counter pair (one-shot per Fire,
+    # mirrors ``_oracle_combat_damage_override``). ``None`` means "no
+    # oracle pin" and the engine falls back to the formula-based payout
+    # — the RL / non-oracle path is unchanged.
+    _oracle_war_bonds_payout_override: Optional[dict[int, int]] = None
+
+    # Phase 11K-FIRE-FRAC-COUNTER-SHIP — fractional-HP counter-damage pin.
+    #
+    # AWBW canon (Wars Wiki Damage_Formula and AWBW Fandom Damage Formula):
+    # combat damage is computed as a FLOAT and the defender's internal HP
+    # is reduced by that float. Display HP is ``ceil(internal_hp / 10)`` so
+    # sub-display-HP damage (1–9 internal HP) leaves the display unchanged.
+    # The fire envelope's ``combatInfoVision.global.combatInfo
+    # .{attacker,defender}.units_hit_points`` records only the integer
+    # display HP, which silently rounds away every counter ≤ 9 internal
+    # HP. ``_oracle_set_combat_damage_override_from_combat_info``
+    # historically used display × 10 → integer internal, so the engine
+    # recorded counter = 0 every time the attacker's display didn't tick.
+    # Cumulative drift on long-range / counter-rich replays (gid 1635679
+    # env 10 RECON @ (3,4): engine kept hp=100 vs PHP hp=97, cascading
+    # into +1600 g over-repair at env 25 day 13 and a missed 22 000 g
+    # NEO_TANK build at env 32) is documented in
+    # ``docs/oracle_exception_audit/phase11k_fire_frac_counter.md``.
+    #
+    # Recovery: AWBW snapshots after the envelope (``frames[env_i + 1]``)
+    # carry the precise float ``hit_points``. When the audit / oracle
+    # caller plumbs that into the state via this pin
+    # (``dict[awbw_units_id, internal_hp_int]``, where
+    # ``internal_hp_int = round(float_hit_points * 10)``), the override
+    # consults the pin first for the attacker's post-counter HP, falling
+    # back to the integer display × 10 only when the unit is missing
+    # (post-fire dead, batched out, or pin not provided). The pin is
+    # envelope-scoped (set/cleared by ``apply_oracle_action_json``'s caller)
+    # and the RL / non-oracle path is unchanged — ``None`` means "no pin".
+    _oracle_post_envelope_units_by_id: Optional[dict[int, int]] = None
+
+    # Phase 11K-FIRE-FRAC-COUNTER-SHIP — defender side of the same pin.
+    # The post-frame for a defender is unambiguous ONLY when this defender
+    # is hit by exactly one ``Fire`` row in the envelope. When struck
+    # multiple times (e.g., two Hawke counter-pieces stack on one Sturm
+    # tile), the post-frame conflates all hits and per-fire ``combatInfo``
+    # remains the only ground truth. The audit caller pre-scans the
+    # envelope and stamps every multi-hit AWBW ``units_id`` here so the
+    # override can opt out cleanly.
+    _oracle_post_envelope_multi_hit_defenders: Optional[set[int]] = None
 
     def _allocate_unit_id(self) -> int:
         uid = self.next_unit_id
@@ -216,10 +330,22 @@ class GameState:
         )
 
     def _refresh_comm_towers(self) -> None:
-        """Sync each CO's comm_towers count from current property ownership."""
+        """Sync per-CO property counts from current ownership.
+
+        Tracks both ``comm_towers`` (Javier) and ``urban_props`` (Kindle
+        SCOP +3% ATK per owned urban property). "Urban" here = the same
+        set listed on the AWBW CO Chart under Kindle's D2D: HQs, bases,
+        airports, ports, cities, labs, comm towers. Every entry in
+        ``self.properties`` is by construction one of those urban tiles,
+        so a plain owner-filtered count gives the Kindle rider its input.
+        """
         for player in (0, 1):
-            self.co_states[player].comm_towers = sum(
+            co = self.co_states[player]
+            co.comm_towers = sum(
                 1 for p in self.properties if p.owner == player and p.is_comm_tower
+            )
+            co.urban_props = sum(
+                1 for p in self.properties if p.owner == player
             )
 
     # ------------------------------------------------------------------
@@ -328,7 +454,7 @@ class GameState:
             capture_shaping = self._apply_capture(action)
 
         elif action.action_type == ActionType.WAIT:
-            self._apply_wait(action)
+            self._apply_wait(action, oracle_mode=oracle_mode)
 
         elif action.action_type == ActionType.DIVE_HIDE:
             self._apply_dive_hide(action)
@@ -364,6 +490,37 @@ class GameState:
         co.cop_active  = False
         co.scop_active = False
 
+        # Phase 11J-VONBOLT-SCOP-SHIP — clear Von Bolt "Ex Machina" stun on
+        # the units of the player whose turn just ended. AWBW canon: the
+        # stun "prevents all affected enemy units from acting next turn"
+        # (https://awbw.fandom.com/wiki/Von_Bolt). Ex Machina fires on
+        # Player A's turn → stun set on Player B's units → Player B's next
+        # turn (the one we are now ending) is the served turn → clearing
+        # here returns Player B to normal for their next-next turn while
+        # leaving any *fresh* stun applied later this same envelope chain
+        # untouched (Ex Machina cannot fire during the opponent's turn —
+        # SCOPs only fire on the activator's own turn).
+        for u in self.units[player]:
+            u.is_stunned = False
+
+        # Phase 11J-SASHA-WARBONDS-SHIP: Sasha's SCOP "War Bonds" persists past
+        # her own end-turn so her counter-attacks during the opponent's
+        # intervening turn still accumulate. The accumulated payout is
+        # credited to her treasury HERE — at the end of the opponent's
+        # intervening turn, immediately before Sasha's next turn begins.
+        # PHP defers the credit to the start-of-next-turn settlement (see
+        # `pending_war_bonds_funds` docstring on COState for empirical
+        # grounding from game `1624082`).
+        opp_co = self.co_states[opponent]
+        if opp_co.co_id == 19 and opp_co.war_bonds_active:
+            payout = opp_co.pending_war_bonds_funds
+            if payout > 0:
+                self.funds[opponent] = min(
+                    999_999, self.funds[opponent] + payout
+                )
+            opp_co.pending_war_bonds_funds = 0
+            opp_co.war_bonds_active = False
+
         # Tick CO-induced weather.  Each end-turn consumes one segment; when the
         # counter reaches 0 the weather reverts to the map default.
         if self.co_weather_segments_remaining > 0:
@@ -381,7 +538,7 @@ class GameState:
 
         if opponent == 0:
             self.turn += 1
-            if self.turn > MAX_TURNS:
+            if self.turn > self.max_turns:
                 self.done = True
                 p0_props = self.count_properties(0)
                 p1_props = self.count_properties(1)
@@ -436,12 +593,35 @@ class GameState:
         # Remove units that crashed on fuel starvation
         self.units[opponent] = [u for u in self.units[opponent] if u.is_alive]
 
-        # Resupply units on APC-adjacent tiles: handled in _apply_wait
-        # Resupply on ports/airports
-        self._resupply_on_properties(opponent)
-
-        # Collect income
+        # Resupply units on APC-adjacent tiles: handled in _apply_wait.
+        #
+        # AWBW start-of-turn ordering — Phase 11J-FUNDS-SHIP (R1):
+        # **income FIRST, then property-day repair.** The opponent collects
+        # per-property funds before the heal pass spends any of them.
+        #
+        # Sources:
+        #   - User-confirmed AWBW canon (Imperator, Phase 11J-FUNDS-SHIP):
+        #     "the ordering is at the start of the turn you get your daily
+        #     income then you spend on repairs. In AWBW that's how it works."
+        #     This overrides the Phase 11A Kindle precedent block for R1.
+        #   - PHP-snapshot empirical proof: 69/69 Tier-3 income-before-repair
+        #     matches in the 100-game corpus (Phase 11J-FUNDS-CORPUS,
+        #     docs/oracle_exception_audit/phase11j_funds_corpus_derivation.md
+        #     §3) and 37/39 NEITHER rows match income-before-repair to the
+        #     gold under the IBR hypothetical (Phase 11J-FUNDS-DEEP,
+        #     docs/oracle_exception_audit/phase11j_funds_deep.md §3.4).
+        #   - Vanilla Advance Wars wiki "Turn" article (supplementary, not
+        #     AWBW-specific): "In the beginning of a turn, a side earns
+        #     funds for every property it controls, and units at allied
+        #     properties are repaired by 2HP."
+        #     https://advancewars.fandom.com/wiki/Turn
+        #
+        # The prior RBI order stranded heals the engine could not afford
+        # because the heal pass ran on pre-income funds (typically 0g);
+        # those skipped heals then accumulated as upstream funds drift
+        # into every subsequent turn-roll.
         self._grant_income(opponent)
+        self._resupply_on_properties(opponent)
 
         # Refresh tower counts now that ownership may have changed this turn
         self._refresh_comm_towers()
@@ -551,12 +731,39 @@ class GameState:
             for u in self.units[player]:
                 u.hp = min(100, u.hp + heal)
 
-        # Hawke: Black Wave (COP) 1 enemy HP / Black Storm (SCOP) 2 enemy HP;
-        # both heal own units +2 HP (co_data.json / AWBW wiki).
+        # Hawke (co_id 12) — power heal/damage canon.
+        #
+        #   * COP "Black Wave"  : friends +1 HP (+10 internal), enemies -1 HP
+        #     (-10 internal, floored at 1 internal).
+        #   * SCOP "Black Storm": friends +2 HP (+20 internal), enemies -2 HP
+        #     (-20 internal, floored at 1 internal).
+        #
+        # Sources (Phase 11J-FINAL-HAWKE-CLUSTER, 2026-04-21):
+        #   - AWBW CO Chart (Tier 1, amarriner.com canonical):
+        #     https://awbw.amarriner.com/co.php Hawke row —
+        #     Black Wave: "All units gain +1 HP. All enemy units take 1 HP damage."
+        #     Black Storm: "All units gain +2 HP. All enemy units take 2 HP damage."
+        #   - AWBW Fandom Wiki (Tier 2, supporting):
+        #     https://awbw.fandom.com/wiki/Hawke
+        #   - Wars Wiki (Tier 2, vanilla AW cross-check):
+        #     https://warswiki.org/wiki/Hawke
+        #   - PHP ground truth (Tier 3) — drilled gid 1635846 env 30 (Hawke COP
+        #     "Black Wave" day 16) via tools/_phase11j_hawke_cop_drill.py: own
+        #     non-combat units showed clean +1.0 display HP heals (Artillery
+        #     7.1->8.1, Infantry 7.0->8.0, Mech 5.6->6.6, Mech 8.5->9.5),
+        #     enemy non-combat units showed -1.0 baseline.
+        #
+        # Pre-fix bug: engine ALWAYS healed friends +20 internal HP regardless
+        # of cop/scop, over-healing on Black Wave by +10 internal (+1 display
+        # bar) per fire. data/co_data.json description for Black Wave
+        # ("All enemy units take 1 HP damage; all own units recover 2 HP")
+        # was also inconsistent with the AWBW chart and is corrected in the
+        # same closeout doc (phase11j_final_hawke_cluster.md).
         elif co.co_id == 12:
+            friend_heal = 10 if cop else 20
             enemy_loss = 10 if cop else 20
             for u in self.units[player]:
-                u.hp = min(100, u.hp + 20)
+                u.hp = min(100, u.hp + friend_heal)
             for u in self.units[opponent]:
                 u.hp = max(1, u.hp - enemy_loss)
 
@@ -608,17 +815,288 @@ class GameState:
                 u.fuel = stats.max_fuel
                 u.ammo = stats.max_ammo
 
-        # Sasha COP: drain power bar of enemy CO
-        elif co.co_id == 19 and cop:
-            self.co_states[opponent].power_bar = max(
-                0, self.co_states[opponent].power_bar - (self.count_properties(player) * 9000)
-            )
+        # Colin (co_id 15) — Phase 11J-COLIN-IMPL-SHIP.
+        #
+        # AWBW canon (Tier 1, both AWBW canonicals agree — see
+        # docs/oracle_exception_audit/phase11y_colin_scrape.md §0.2, §0.3, §7):
+        #
+        #   * COP "Gold Rush" — *"Funds are multiplied by 1.5x."*
+        #     Sources: https://awbw.amarriner.com/co.php (Colin row) and
+        #     https://awbw.fandom.com/wiki/Colin
+        #
+        #   * Rounding: AWBW uses **round-half-up** (PHP's default ``round()``
+        #     mode) on the ``× 1.5`` product. Both wikis are silent on
+        #     rounding; the PHP-payload empirical drill (scrape §7.3,
+        #     `tools/_colin_gold_rush_drill_strict.py`) confirmed
+        #     round-half-up on **15 / 15** sub=0 COP envelopes carrying
+        #     ``playerReplace.players_funds`` (3 boundary cases on the .5
+        #     mark all matched ``round_half_up``, NOT ``int()`` floor).
+        #     Using ``int()`` would silently desync ~20 % of Colin COP fires.
+        #     Funds are clamped to the engine's universal 999 999 cap.
+        #
+        #   * SCOP "Power of Money" — funds snapshot only. The +(3 * funds /
+        #     1000)% attack rider is computed in
+        #     ``engine/combat.py::_colin_atk_rider`` from the snapshot field
+        #     ``COState.colin_pom_funds_snapshot``. Snapshotting at activation
+        #     (rather than reading live during each attack) keeps the bonus
+        #     stable across mid-turn 80%-cost builds — the AW design intent
+        #     for one-turn power durations.
+        #
+        # Closure: zero Colin gids in the 936-zip GL std corpus
+        # (`logs/desync_register_post_phase11j_v2_936.jsonl`) so direct
+        # gid validation is unavailable; ships the canon for the 15 ingested
+        # Colin replays in `data/amarriner_gl_colin_batch.json` (12 of which
+        # carry COP envelopes, see scrape §5).
+        elif co.co_id == 15:
+            if cop:
+                # round_half_up(funds * 1.5) via pure integer arithmetic:
+                #   (3 * funds + 1) // 2  for funds >= 0.
+                # Examples (PHP-payload anchors from scrape §7.3):
+                #   50 835 → 76 253; 48 533 → 72 800; 23 331 → 34 997.
+                pre = self.funds[player]
+                self.funds[player] = min(999_999, (3 * pre + 1) // 2)
+            else:
+                co.colin_pom_funds_snapshot = self.funds[player]
 
-        # Von Bolt SCOP (Ex Machina): simplified global 3 HP to all enemies
-        # (live AWBW is an AOE strike; stun not modeled here).
-        elif co.co_id == 30 and not cop:
+        # Sasha COP "Market Crash" — Phase 11J-SASHA-MARKETCRASH-FIX.
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart, Sasha row):
+        #   *"Market Crash -- Reduces enemy power bar(s) by
+        #   (10 * Funds / 5000)% of their maximum power bar."*
+        #   https://awbw.amarriner.com/co.php
+        #
+        # The drain is proportional to Sasha's current treasury, NOT her
+        # property count. The pre-fix formula was
+        # ``count_properties(player) * 9000`` — wildly wrong magnitude
+        # (e.g. 14 properties × 9000 = 126,000 power-bar drain on an opp
+        # with a max bar of ~54,000 → effectively always full-clear).
+        #
+        # "Maximum power bar" = the opponent's SCOP charge ceiling, which
+        # mirrors ``_scop_threshold`` in engine/co.py: the bar visually
+        # maxes at SCOP, and that ceiling rises by +1800 per star per
+        # prior power use (AWBW changelog rev 139, 2018-06-30).
+        #
+        # Math: ``(10 * funds / 5000)%`` simplifies to
+        # ``funds / 50000`` as a fraction, so
+        # ``drain = max_bar * funds // 50000``. Floored at 0.
+        #
+        # Closure: ≥2 oracle_gap rows (1626284, 1628953) per
+        # docs/oracle_exception_audit/phase11j_co_mechanics_survey.md.
+        elif co.co_id == 19 and cop:
+            opp_co = self.co_states[opponent]
+            sasha_funds = self.funds[player]
+            opp_max_bar = opp_co.scop_stars * (9000 + opp_co.power_uses * 1800)
+            drain = (opp_max_bar * sasha_funds) // 50000
+            opp_co.power_bar = max(0, opp_co.power_bar - drain)
+
+        # Sasha SCOP "War Bonds" — Phase 11J-SASHA-WARBONDS-SHIP.
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart, Sasha row):
+        #   *"War Bonds — Returns 50% of damage dealt as funds (subject to
+        #   a 9HP cap)."*  https://awbw.amarriner.com/co.php
+        #
+        # Mechanics implemented in `_apply_attack` →
+        # `_apply_war_bonds_payout`:
+        #   payout = min(damage_display_hp, 9) * unit_cost(target_type) // 20
+        # Hybrid crediting (Phase 11J-L1-WAVE-2-SHIP):
+        #   * **Own SCOP-turn attacks** (damage_dealer == active_player):
+        #     credited IMMEDIATELY to Sasha's treasury so in-turn builds
+        #     can spend the bonds. PHP behaves the same — five 936-cohort
+        #     BUILD-FUNDS-RESIDUAL gids (1624082, 1626284, 1628953,
+        #     1634267, 1634893) all show SCOP at action [0] followed by
+        #     ≥4 attacks then builds totalling more than pre-SCOP funds.
+        #   * **Counter-attacks during opp's intervening turn**
+        #     (damage_dealer != active_player): accumulated into
+        #     ``pending_war_bonds_funds`` and credited at the END of opp's
+        #     turn (preserves the 1624082 env-22 −200g anchor where the
+        #     delta only materialises after opp's intervening turn ends).
+        # Active window = activator's remainder + opponent's full intervening
+        # turn (cleared in `_end_turn` when the opponent finishes — see the
+        # `war_bonds_active` clear block there).
+        #
+        # The earlier "all-real-time" experiment regressed 23/100 GL std
+        # games (mid-turn spending-power drift in opp-counter scenarios);
+        # the hybrid keeps deferred crediting on opp's turn so that
+        # regression does not return.
+        elif co.co_id == 19 and not cop:
+            co.war_bonds_active = True
+            co.pending_war_bonds_funds = 0
+
+        # Kindle COP "Urban Blight" — Phase 11J-L1-BUILD-FUNDS-SHIP.
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart https://awbw.amarriner.com/co.php
+        # Kindle row): *"Urban Blight -- All enemy units lose -3 HP on urban
+        # terrain."* Urban = HQs, bases, airports, ports, cities, labs,
+        # comtowers — every tile type the terrain registry flags as
+        # ``is_property``.
+        #
+        # SCOP "High Society" deals NO area damage per the same Tier-1
+        # chart; its effect is purely the +130 urban ATK rider + 3/prop
+        # global rider, both handled in ``engine/combat.py``. Do not add
+        # a SCOP branch here.
+        #
+        # Flat HP loss — no luck, no damage formula, no terrain / CO DEF.
+        # Floored at 1 internal (~0.1 display) like Hawke / Olaf / Von Bolt
+        # AOE COP-paths above.
+        #
+        # Cluster: five BUILD-FUNDS-RESIDUAL oracle_gap rows in the Phase
+        # 11J-L1 25-gid set where Kindle is the opponent CO — enemy units
+        # remained healthier in the engine than in PHP because the -3 HP
+        # AOE was unmodeled, which cascaded into lower PHP-side repair
+        # costs vs engine (and the engine-side build refusals after).
+        elif co.co_id == 23 and cop:
             for u in self.units[opponent]:
-                u.hp = max(1, u.hp - 30)
+                tinfo = get_terrain(self.map_data.terrain[u.pos[0]][u.pos[1]])
+                if tinfo.is_property:
+                    u.hp = max(1, u.hp - 30)
+
+        # Von Bolt SCOP (Ex Machina): AOE damage + stun on affected enemy
+        # units. AWBW canon (Tier 1, AWBW Wiki Von Bolt page; mirrored on
+        # the AWBW CO Chart https://awbw.amarriner.com/co.php Von Bolt row):
+        #   *"Ex Machina — A 2-range missile deals 3 HP damage and prevents
+        #   all affected enemy units from acting next turn. The missile
+        #   targets the opponents' greatest accumulation of unit value."*
+        # Damage is a flat 30 internal HP / 3 display HP (no luck, no terrain
+        # / CO defense), floored at 1 internal (~0.1 display) — same model
+        # as Hawke / Olaf flat-loss SCOPs handled above.
+        #
+        # When the oracle has pinned the AOE tile set via
+        # ``_oracle_power_aoe_positions`` (parsed from the Power action's
+        # ``missileCoords``), apply the loss + stun only to enemy units
+        # inside that set. ``None`` keeps the historical global behaviour
+        # for the RL / non-oracle path (no missile targeter implemented;
+        # global enemy stun is the safest legality posture). One-shot:
+        # cleared after consumption.
+        #
+        # AOE shape: 13 tiles, Manhattan ≤ 2 from ``missileCoords`` (Tier 1–3
+        # citations on the oracle Von Bolt pin). Engine is membership-only on
+        # ``_oracle_power_aoe_positions``.
+        #
+        # Stun (Phase 11J-VONBOLT-SCOP-SHIP):
+        #   - Set ``Unit.is_stunned = True`` on every affected enemy.
+        #   - The flag is read by ``engine/action.py::_get_select_actions``
+        #     (no SELECT_UNIT emitted), the STEP-GATE in ``step``, and
+        #     ``_apply_attack`` (counter-attack skipped against a stunned
+        #     defender). Cleared in ``_end_turn`` on the units of the
+        #     player whose turn just ended — the stunned army serves the
+        #     stun across exactly one of its own turns.
+        #   - Own units are not stunned (wiki: "all affected *enemy*
+        #     units") even though the AWBW CO Chart shorthand says "all
+        #     affected units"; the wiki is the more specific source and
+        #     the cluster-B engine drift is consistent with enemy-only.
+        #
+        # Diagnostic source: phase11j_funds_deep.md §5.2 + drill on 1622328
+        # env 28 (PHP diamond vs historical global engine -30).
+        elif co.co_id == 30 and not cop:
+            aoe = self._oracle_power_aoe_positions
+            self._oracle_power_aoe_positions = None
+            for u in self.units[opponent]:
+                if aoe is None or u.pos in aoe:
+                    u.hp = max(1, u.hp - 30)
+                    u.is_stunned = True
+
+        # Sturm (co_id 29) COP "Meteor Strike" / SCOP "Meteor Strike II" —
+        # Phase 11J-FINAL-STURM-SCOP-SHIP. The Sturm SCOP freeze imposed
+        # in Phase 11J-FINAL-BUILD-NO-OP-RESIDUALS was lifted by the
+        # imperator on 2026-04-21 once the build no-op residual on gid
+        # 1635679 was attributed to this exact missing branch.
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart https://awbw.amarriner.com/co.php
+        # Sturm row, fetched 2026-04-21):
+        #   *"Meteor Strike -- A 2-range missile deals 4 HP damage. The
+        #     missile targets an enemy unit located at the greatest
+        #     accumulation of unit value."*
+        #   *"Meteor Strike II -- A 2-range missile deals 8 HP damage. The
+        #     missile targets an enemy unit located at the greatest
+        #     accumulation of unit value."*
+        # Site ``powerName`` for SCOP is ``"Meteor Strike II"`` (not the
+        # ``co_data.json`` lore name "Fury Storm").
+        #
+        # Damage: flat HP loss — 40 internal (4 display) on COP, 80 internal
+        # (8 display) on SCOP. No luck, no terrain / CO defense; floored at
+        # 1 internal (~0.1 display) — same flat-loss SCOP family as Hawke,
+        # Olaf SCOP, Drake, Von Bolt SCOP. Enemy units only (chart text
+        # targets "an enemy unit").
+        #
+        # AOE shape: 13-tile Manhattan diamond (M<=2) around the
+        # ``missileCoords`` center. Confirmed empirically against PHP
+        # ``unitReplace`` ground truth on three envelopes:
+        #   * gid 1615143 env 33 (COP center=(8,7)): exactly 5 enemies at
+        #     M<=2 in engine pre-state, 5 affected in unitReplace.
+        #   * gid 1615143 env 57 (COP center=(12,17)): exactly 2 (Fighter
+        #     + Infantry), 2 affected — confirms air units are hit.
+        #   * gid 1635679 env 28 (SCOP center=(6,9)): post-disp HPs all
+        #     land at 1-2 from pre-disp 3-10 — consistent with -80 HP
+        #     internal + 1-internal clamp.
+        #
+        # Oracle pin: ``_oracle_power_aoe_positions`` is filled by
+        # ``tools/oracle_zip_replay.py`` from ``missileCoords`` before the
+        # ``ACTIVATE_COP``/``ACTIVATE_SCOP`` step. ``None`` keeps the
+        # historical no-op behaviour for the RL / non-oracle path (no
+        # missile targeter implemented; global enemy -40/-80 would massively
+        # over-damage). One-shot: cleared after consumption.
+        #
+        # Cluster: gid 1635679 BUILD-NO-OP residual (Sturm vs Hawke);
+        # confirmed cohort 8 Sturm power activations across 3 zips
+        # (1615143, 1635679, 1637200) per
+        # ``tools/_phase11j_sturm_cohort.py``.
+        elif co.co_id == 29:
+            aoe = self._oracle_power_aoe_positions
+            self._oracle_power_aoe_positions = None
+            dmg = 40 if cop else 80
+            if aoe is not None:
+                for u in self.units[opponent]:
+                    if u.pos in aoe:
+                        u.hp = max(1, u.hp - dmg)
+
+        # Rachel SCOP "Covering Fire" — Phase 11J-RACHEL-SCOP-COVERING-FIRE-SHIP.
+        #
+        # AWBW canon (Tier 1, AWBW CO Chart https://awbw.amarriner.com/co.php
+        # Rachel row): *"Covering Fire — Three 2-range missiles deal 3 HP
+        # damage each. The missiles target the opponents' greatest accumulation
+        # of footsoldier HP, unit value, and unit HP (in that order)."*
+        #
+        # Damage: flat 30 internal HP / 3 display HP per missile, floored at
+        # 1 internal (~0.1 display) — same flat-loss SCOP family as Hawke,
+        # Olaf SCOP, Von Bolt SCOP. Enemy units only (chart text targets
+        # "the opponents'" accumulations; mirrors Von Bolt's wiki-anchored
+        # enemy-only convention).
+        #
+        # Multiplicity: Rachel fires three independent missiles, and the
+        # player MAY aim two of them at the same tile (drilled on gid
+        # 1622501 env 20: missileCoords = [(11,20), (4,9), (11,20)] — the
+        # (11,20) cluster is hit by two missiles). The oracle pin is a
+        # ``Counter[(y, x)] -> hit_count`` (see oracle_zip_replay.py Rachel
+        # branch). A unit at a tile with count=2 takes 60 HP, count=3 takes
+        # 90 HP. We multiply 30 × count and floor once.
+        #
+        # AOE shape: 5x5 Manhattan diamond (2-range) per missile — AWBW canon.
+        # Phase 11J-RACHEL-FUNDS-DRIFT-SHIP closed the prior 3x3 Chebyshev box
+        # gap by widening the oracle pin in ``oracle_zip_replay.py`` Rachel
+        # branch. The engine consumer here is shape-agnostic (Counter lookup
+        # by ``u.pos``); the only behavioural change is that more enemy tiles
+        # appear in the Counter. Canon source + drill cited in
+        # ``docs/oracle_exception_audit/phase11j_rachel_funds_drift_ship.md``.
+        #
+        # No oracle pin: the engine alone cannot decide where Rachel's
+        # missiles land (the targeter chases enemy-cluster heuristics that
+        # are not modeled in the engine). Falling back to a global -90 HP
+        # would massively over-damage; falling back to no-op preserves the
+        # RL / non-oracle path's prior silent behavior. We choose no-op.
+        #
+        # Cluster: five BUILD-FUNDS-RESIDUAL oracle_gap rows in the Phase
+        # 11J-L1 25-gid set where Rachel is active (1622501, 1630669,
+        # 1634146, 1635164, 1635658) — engine units stayed healthier than
+        # PHP because the missile damage was unmodeled, cascading into
+        # lower PHP-side repair costs vs engine.
+        elif co.co_id == 28 and not cop:
+            aoe = self._oracle_power_aoe_positions
+            self._oracle_power_aoe_positions = None
+            if isinstance(aoe, Counter):
+                for u in self.units[opponent]:
+                    hits = aoe.get(u.pos, 0)
+                    if hits > 0:
+                        u.hp = max(1, u.hp - 30 * hits)
 
         # Prune dead units from power effects
         for p in (0, 1):
@@ -641,7 +1119,10 @@ class GameState:
         if sel is not None and sel.is_alive and sel.pos == action.unit_pos:
             attacker = sel
         if attacker is None:
-            attacker = self.get_unit_at(*action.unit_pos)
+            # Phase 11J-F5-OCCUPANCY: prefer oracle id when set, defends against duplicate-position oracle states.
+            attacker = self.get_unit_at_oracle_id(
+                *action.unit_pos, action.select_unit_id
+            )
         if attacker is None:
             raise ValueError(
                 f"_apply_attack: no attacker at {action.unit_pos}"
@@ -706,6 +1187,9 @@ class GameState:
         override_counter = override[1] if override is not None else None
 
         # Primary attack
+        # Phase 11J-SASHA-WARBONDS-SHIP: capture defender display HP BEFORE
+        # damage so we can compute display-HP loss for the War Bonds payout.
+        pre_def_disp = defender.display_hp
         if override_dmg is not None:
             dmg = max(0, int(override_dmg))
         else:
@@ -720,12 +1204,32 @@ class GameState:
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
             self._charge_power(attacker.player, defender.player, dmg)
+            self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
         else:
             dmg = 0
 
         # Counterattack (only if defender survived and attacker is direct)
         att_stats = UNIT_STATS[attacker.unit_type]
-        if defender.is_alive and not att_stats.is_indirect:
+        # Phase 11J-VONBOLT-SCOP-SHIP — stunned defenders do not counter.
+        # AWBW canon (https://awbw.fandom.com/wiki/Von_Bolt): Ex Machina
+        # *"prevents all affected enemy units from acting next turn."* A
+        # counter-attack is an act; PHP correctly emits no counter from a
+        # stunned defender. The pre-fix engine ran the counter regardless,
+        # which (a) damaged the attacker that PHP left untouched and (b)
+        # consumed defender ammo PHP did not — both surfacing as drift in
+        # the cluster-B funds gids (1621434, 1621898, 1622328: see
+        # ``docs/oracle_exception_audit/phase11j_vonbolt_scop_ship.md`` §3
+        # for the drill).
+        defender_can_counter = (
+            defender.is_alive
+            and not att_stats.is_indirect
+            and not defender.is_stunned
+        )
+        if defender_can_counter:
+            # Phase 11J-SASHA-WARBONDS-SHIP: capture attacker display HP BEFORE
+            # the counter so the defender's War Bonds payout (when defender
+            # is Sasha) reflects the correct display-HP loss.
+            pre_atk_disp = attacker.display_hp
             if override_counter is not None:
                 counter = max(0, int(override_counter))
             else:
@@ -741,6 +1245,15 @@ class GameState:
                 if attacker.hp == 0:
                     self.losses_units[attacker.player] += 1  # Track unit destroyed
                 self._charge_power(defender.player, attacker.player, counter)
+                # War Bonds payout for Sasha when she's defending and her
+                # unit deals counter-damage. Roles flipped: defender is the
+                # damage-dealer, attacker is the recipient of the counter.
+                self._apply_war_bonds_payout(defender, attacker, pre_atk_disp)
+
+        # Phase 11J-CLOSE-1624082 — clear the oracle War Bonds pin once
+        # the primary + counter pair has run (one-shot per Fire, mirrors
+        # ``_oracle_combat_damage_override`` consumption above).
+        self._oracle_war_bonds_payout_override = None
 
         # Consume attacker ammo. AWBW canon: the secondary Machine Gun is
         # **unlimited** and does NOT draw from the unit's primary ammo
@@ -810,6 +1323,85 @@ class GameState:
         """Charge CO power bars. Attacker gains less than defender (approx AWBW rates)."""
         self.co_states[attacker_player].power_bar += damage * 18
         self.co_states[defender_player].power_bar += damage * 27
+
+    def _apply_war_bonds_payout(
+        self,
+        damage_dealer: Unit,
+        damage_target: Unit,
+        target_pre_display_hp: int,
+    ) -> None:
+        """Sasha SCOP "War Bonds" funds payout — Phase 11J-SASHA-WARBONDS-SHIP.
+
+        AWBW canon (Tier 1, AWBW CO Chart Sasha row):
+          *"War Bonds — Returns 50% of damage dealt as funds (subject to a
+          9HP cap)."*  https://awbw.amarriner.com/co.php
+
+        Formula:
+          ``payout = min(display_hp_loss, 9) * unit_cost(target_type) // 20``
+
+        ``display_hp_loss`` is computed from the **display** HP scale (1–10),
+        i.e. ``ceil(internal_hp / 10)``. The 9 HP cap matches the Tier-1
+        chart text and is a per-attack cap (not cumulative). All AWBW unit
+        costs are multiples of 1000, so ``cost // 20`` is always integer
+        and the payout never has rounding ambiguity.
+
+        Hybrid crediting model (Phase 11J-L1-WAVE-2-SHIP):
+
+        * **Activator's OWN attacks during her SCOP turn** —
+          ``damage_dealer.player == self.active_player`` — credit the
+          payout IMMEDIATELY to her treasury so the in-turn builds /
+          repairs that follow can spend the bonds. PHP empirically does
+          the same: in five 936-cohort BUILD-FUNDS-RESIDUAL games
+          (1624082, 1626284, 1628953, 1634267, 1634893) Sasha activates
+          SCOP at envelope action ``[0]``, attacks ≥4 enemy units, then
+          builds vehicles whose total cost exceeds her pre-SCOP funds —
+          the only way PHP allows those builds is by crediting bonds in
+          real time during the activator's own SCOP turn.
+        * **Counter-attacks while Sasha is the defender** (i.e. the
+          activator is not the active player — opp's intervening turn)
+          — accumulate into ``pending_war_bonds_funds`` and defer the
+          credit to ``_end_turn`` at the end of the opponent's turn.
+          This preserves the empirical anchor of game ``1624082`` env 22
+          where the −200g delta only materialises at the env-22 snapshot
+          (after opp's intervening turn ends), not earlier.
+
+        Does nothing when the dealer is not Sasha (``co_id == 19``) or
+        her War Bonds window is inactive.
+
+        Phase 11J-CLOSE-1624082 — oracle pin: when
+        ``_oracle_war_bonds_payout_override`` carries an entry for this
+        dealer's player, use that pinned PHP-side payout instead of the
+        formula. See the field docstring on ``GameState`` for the
+        empirical grounding (gid ``1624082`` env 33).
+        """
+        co = self.co_states[damage_dealer.player]
+        if co.co_id != 19 or not co.war_bonds_active:
+            return
+        oracle_pinned: Optional[int] = None
+        if self._oracle_war_bonds_payout_override is not None:
+            oracle_pinned = self._oracle_war_bonds_payout_override.pop(
+                int(damage_dealer.player), None
+            )
+        if oracle_pinned is not None:
+            payout = max(0, int(oracle_pinned))
+        else:
+            post_disp = damage_target.display_hp
+            damage_disp = max(0, target_pre_display_hp - post_disp)
+            if damage_disp <= 0:
+                return
+            damage_capped = min(damage_disp, 9)
+            target_cost = UNIT_STATS[damage_target.unit_type].cost
+            payout = damage_capped * (target_cost // 20)
+        if payout <= 0:
+            return
+        # Hybrid: own SCOP-turn attacks credit immediately; counter-attacks
+        # during opp's intervening turn defer to end-of-opp-turn settlement.
+        if damage_dealer.player == self.active_player:
+            self.funds[damage_dealer.player] = min(
+                999_999, self.funds[damage_dealer.player] + payout
+            )
+        else:
+            co.pending_war_bonds_funds += payout
 
     def _evaluate_army_wipe_after_combat(self) -> None:
         """One side has no units left; other side wins (checked only after an attack resolves)."""
@@ -912,8 +1504,14 @@ class GameState:
     # Wait
     # ------------------------------------------------------------------
 
-    def _apply_wait(self, action: Action):
-        unit = self.get_unit_at(*action.unit_pos)
+    def _apply_wait(self, action: Action, *, oracle_mode: bool = False):
+        # Phase 11J-FINAL (T3 escalation, kept): mirror _apply_attack — prefer
+        # selected_unit, then oracle-id pin, before falling back to tile lookup.
+        # Closes gid 1636707 (extras catalog: P0 Infantry + P1 Md.Tank shared
+        # tile, plain get_unit_at returned wrong seat).
+        unit = self.selected_unit
+        if unit is None or unit.pos != action.unit_pos:
+            unit = self.get_unit_at_oracle_id(*action.unit_pos, action.select_unit_id)
         if unit is None:
             return
 
@@ -930,6 +1528,18 @@ class GameState:
             and unit.unit_type in get_loadable_into(occupant.unit_type)
             and len(occupant.loaded_units) < UNIT_STATS[occupant.unit_type].carry_capacity
         ):
+            # Same oracle WAIT->LOAD reroute pattern as the JOIN guard below
+            # (Phase 11J-FINAL): mask emits LOAD, AWBW envelope encodes Wait.
+            if oracle_mode:
+                self._apply_load(
+                    Action(
+                        ActionType.LOAD,
+                        unit_pos=action.unit_pos,
+                        move_pos=action.move_pos,
+                        select_unit_id=action.select_unit_id,
+                    )
+                )
+                return
             raise ValueError(
                 f"Illegal WAIT: {unit.unit_type.name} cannot stop on friendly "
                 f"transport {occupant.unit_type.name} at {action.move_pos}; "
@@ -942,6 +1552,23 @@ class GameState:
             and occupant.player == unit.player
             and units_can_join(unit, occupant)
         ):
+            # Phase 11J-FINAL (T3 follow-up): the engine's get_legal_actions
+            # mask emits ONLY ActionType.JOIN at this destination — WAIT is
+            # never legal here. AWBW's recorded envelope can still encode the
+            # tail as `Wait` (the upstream paths.global lands on a same-type
+            # ally), so in oracle_mode we silently route to JOIN — same end
+            # state as the AWBW player would have produced via the JOIN menu.
+            # RL / non-oracle callers retain the strict raise (defense in depth).
+            if oracle_mode:
+                self._apply_join(
+                    Action(
+                        ActionType.JOIN,
+                        unit_pos=action.unit_pos,
+                        move_pos=action.move_pos,
+                        select_unit_id=action.select_unit_id,
+                    )
+                )
+                return
             raise ValueError(
                 f"Illegal WAIT: {unit.unit_type.name} cannot idle on injured "
                 f"same-type ally at {action.move_pos}; use JOIN to merge."
@@ -1284,8 +1911,29 @@ class GameState:
         Fuel and ammo take the max of the two (capped at stats). The mover is
         removed; ``partner`` keeps its ``unit_id`` and tile.
         """
-        mover = self.get_unit_at(*action.unit_pos)
-        partner = self.get_unit_at(*action.move_pos) if action.move_pos else None
+        # Phase 11J-FINAL: mirror _apply_attack/_apply_wait — prefer
+        # selected_unit, then oracle-id pin, before falling back to tile lookup.
+        # Without this, when two friendly same-type units share a tile via
+        # oracle drift (e.g. gid 1632226: two P1 TANKs at (12,6)), get_unit_at
+        # returns the first-in-roster for BOTH mover and partner → silent
+        # return → action_stage never advances → settle loop infinite-loops.
+        mover = self.selected_unit
+        if mover is None or mover.pos != action.unit_pos:
+            mover = self.get_unit_at_oracle_id(*action.unit_pos, action.select_unit_id)
+        partner = None
+        if action.move_pos:
+            for lst in self.units.values():
+                for u in lst:
+                    if (
+                        u.is_alive
+                        and u.pos == action.move_pos
+                        and u is not mover
+                        and (mover is None or u.player == mover.player)
+                    ):
+                        partner = u
+                        break
+                if partner is not None:
+                    break
         if mover is None or partner is None or mover is partner:
             if oracle_strict:
                 raise IllegalActionError("JOIN: no merge partner at target")
@@ -1575,30 +2223,77 @@ class GameState:
 
         CO modifiers applied here:
           * **Rachel** (co_id 28) D2D — heal **+3 displayed HP** (``+30``
-            internal) per property-day instead of +2. AWBW CO Chart
-            (https://awbw.amarriner.com/co.php) Rachel row reads:
-            *"Units repair +1 additional HP (note: liable for costs)."*
-            ``data/co_data.json`` only mentions luck and is **not** trusted
-            for this rule (see Phase 11Y-CO-WAVE-2 §5). The per-internal-HP
-            cost formula in ``_property_day_repair_gold`` is linear, so a
-            full +30 step naturally costs 30% of the unit's deployment cost
-            (vs 20% for the standard +20 step) — Rachel pays for the extra
-            bar exactly as the chart specifies. Empirical grounding: 69
-            Rachel-bearing GL std replays in the 936-zip pool (Phase 11Y
-            recon §1) plus per-replay drills (§4) showing engine-overstated
-            funds vs PHP at the first Rachel property-heal step on multiple
-            games (e.g. ``1622501`` step 13 +200, ``1623772`` step 11 +100,
-            ``1624721`` step 17 +300, ``1625211`` step 14 +300), consistent
-            with current engine **under-charging** repair. Phase 10T
-            ``phase10t_co_income_audit.md`` flagged this as HIGH priority.
+            internal) per property-day instead of +2. Sources (all in
+            agreement; PHP wins on disagreement per the Phase 11A Kindle
+            precedent):
+
+              - AWBW CO Chart https://awbw.amarriner.com/co.php Rachel row:
+                *"Units repair +1 additional HP (note: liable for costs)."*
+              - AWBW Fandom Wiki https://awbw.fandom.com/wiki/Rachel
+                Day-to-Day: *"Units repair +1 additional HP on properties
+                (note: liable for costs)."* (The amarriner.com/wiki/ path
+                returns HTTP 404; the Fandom wiki is the canonical
+                community wiki.)
+              - AWBW Fandom Wiki repair-step rule
+                https://awbw.fandom.com/wiki/Changes_in_AWBW: *"Repairs
+                will only take place in increments of exactly 20 hitpoints,
+                or 2 full visual hitpoints."* Combined with the Rachel
+                +1 line ⇒ Rachel heals exactly +30 internal HP (3 visual
+                bars).
+              - Repair cost rule https://advancewars.fandom.com/wiki/Repairing:
+                *"10% cost per 10% health, or 1HP."* ⇒ +30 internal HP =
+                30% of deployment cost. The existing helper
+                ``_property_day_repair_gold`` is already linear, so no cost
+                rework is needed.
+              - **PHP cross-check** (``tools/_phase11y_rachel_php_check.py``):
+                across 7 Rachel-bearing zips and 5 Andy-control zips from
+                the 936-zip GL std pool, AWBW PHP snapshot bar-deltas at
+                Rachel turn boundaries are: **43 of 48 positive heals at
+                exactly +3 bars** (the remaining 5 explained by HP-cap or
+                post-heal combat damage). Andy control: **39 of 39 = +2**.
+                Funds parity post-fix: ``funds_delta_by_seat == {0, 0}``
+                on 4 of 5 drilled Rachel zips (1622501 / 1623772 / 1624181
+                / 1625211), confirming PHP also charges 30% of unit cost
+                for the full Rachel band.
+
+            ``data/co_data.json`` Rachel entry (only mentions luck) is
+            **not** trusted for D2D repair (chart + wiki + PHP all win).
+
+            Recon: ``docs/oracle_exception_audit/phase11y_co_wave_2.md`` §4
+            (10-zip drill showing engine-overstated funds pre-fix) and
+            ``phase11y_rachel_impl.md`` (this fix, full PHP audit).
         """
         co = self.co_states[player]
         property_heal = 30 if co.co_id == 28 else 20  # Rachel: +3 bars, others +2
+
+        # Phase 11J-FUNDS-SHIP (R3) — Deterministic iteration order.
+        #
+        # Sort eligible units by (prop.col, prop.row) ascending —
+        # column-major-from-left. With R2 below enforcing all-or-nothing
+        # per-unit repair, the iteration order becomes observable when the
+        # treasury is exactly straddling the cost of a single full step:
+        # the engine and PHP can otherwise pick different units to heal,
+        # producing a funds delta even though both spend the same total
+        # ±1 step. Without this ordering the Rachel game ``1622501``
+        # regresses on R1 + R2 alone (see
+        # docs/oracle_exception_audit/phase11j_funds_deep.md §6).
+        #
+        # Citation (Tier-4, supporting only — not amarriner / not the AWBW
+        # Wiki): RPGHQ AWBW Q&A — *"Repair priority is checked by columns
+        # (top to bottom) starting from the left. Units which the player
+        # doesn't have sufficient funds to repair are skipped."* Documented
+        # in docs/oracle_exception_audit/phase11j_f2_koal_fu_oracle_funds.md
+        # §2 (Tier-4 supporting note). Required to keep the 100-game gate
+        # green under R1 + R2.
+        eligible: list[tuple[Unit, PropertyState]] = []
         for unit in self.units[player]:
             prop = self.get_property_at(*unit.pos)
             if prop is None or prop.owner != player:
                 continue
+            eligible.append((unit, prop))
+        eligible.sort(key=lambda up: (up[1].col, up[1].row))
 
+        for unit, prop in eligible:
             stats = UNIT_STATS[unit.unit_type]
             cls   = stats.unit_class
 
@@ -1620,20 +2315,113 @@ class GameState:
                 and not prop.is_comm_tower
                 and unit.hp < 100
             ):
-                desired = min(property_heal, 100 - unit.hp)
-                funds   = self.funds[player]
-                h       = desired
-                while h > 0:
-                    cost = _property_day_repair_gold(h, unit.unit_type)
-                    if funds >= cost:
-                        unit.hp = min(100, unit.hp + h)
-                        self.funds[player] = max(
-                            0, min(999_999, self.funds[player] - cost),
-                        )
-                        self.gold_spent[player] += cost
-                        break
-                    h -= 1
+                # Phase 11J-FUNDS-SHIP (R2) — All-or-nothing per-unit step.
+                #
+                # Compute the FULL step (capped only by the unit's max HP):
+                # +20 internal HP for standard COs, +30 for Rachel
+                # (co_id 28). If the player can pay for it in full, heal the
+                # full step. Otherwise skip the unit entirely — NO partial
+                # heals, even if the player can afford a smaller increment.
+                # The previous ``while h > 0: h -= 1`` partial-degrade loop
+                # violated AWBW canon and silently masked the R1 ordering
+                # bug at funds-tight boundaries.
+                #
+                # Sources (Tier 2, AWBW Wiki):
+                #   - "Units" article, *Repairing and Resupplying* /
+                #     *Transports* section: *"If a unit is not specifically
+                #     at 9HP, repair costs will be calculated only in
+                #     increments of 2HP. This can create a fringe scenario
+                #     where a unit that is at 8 or less with <20% of the
+                #     unit's full value available (such as an 8HP Fighter
+                #     on an Airport with less than 4000 funds) will not be
+                #     repaired, even if a 1HP repair is technically
+                #     affordable."* https://awbw.fandom.com/wiki/Units
+                #   - "Advance Wars Overview" Economy section: *"Repairs
+                #     are handled similarly [to builds], with money being
+                #     deducted depending on the base price of the unit —
+                #     if the repairs cannot be afforded, no repairs will
+                #     take place."*
+                #     https://awbw.fandom.com/wiki/Advance_Wars_Overview
+                #   - "Units" article, Black-Boat repair bullet: *"This
+                #     repair is liable for costs - if the player cannot
+                #     afford the cost to repair the unit, it will only be
+                #     resupplied and no repairs will be given."*
+                #     https://awbw.fandom.com/wiki/Units
+                #
+                # Recon: docs/oracle_exception_audit/phase11j_funds_deep.md
+                # §4 R2 collected the three cites above; the prior
+                # partial-loop matched canon outcome only at the funds=0
+                # boundary (cluster A) and diverged everywhere else.
+                #
+                # Phase 11J-BUILD-NO-OP-CLUSTER-CLOSE (R4, 2026-04-21) —
+                # Display-cap repair cost canon for non-Rachel COs.
+                #
+                # Internal HP scale 0–100 has display HP = ceil(internal/10).
+                # AWBW PHP repair canon (per the AWBW Wiki "Units" article
+                # already cited above) operates on DISPLAY HP, not internal
+                # HP:
+                #   * display 10 (internal 91–99): NO REPAIR — bar is
+                #     already maxed; PHP refuses and charges 0g. The
+                #     pre-R4 engine charged ``(100-hp)% × unit_cost`` for
+                #     a phantom +1..+9 internal heal that never appears
+                #     on the AWBW HP bar (e.g. Tank at HP 94 → engine
+                #     charged 420g for +6 internal HP).
+                #   * display 9 (internal 81–90): exactly +1 display bar
+                #     (+10 internal HP), cost = 10% of unit cost. The
+                #     pre-R4 engine charged ``min(20,100-hp)%`` (e.g.
+                #     Tank at HP 85 → engine charged 1050g for +15
+                #     internal; canon is 700g for +10 internal to
+                #     display 10).
+                #   * display ≤ 8 (internal ≤ 80): +2 display bars
+                #     (+20 internal HP), cost = 20% of unit cost. The
+                #     existing engine path already matches here; full
+                #     cost is charged even when capping internal HP at
+                #     100.
+                #
+                # Rachel (co_id 28) is left on the prior internal-cap
+                # path — empirically PHP-matched in Phase 11Y across
+                # 7 Rachel zips (see Rachel D2D commentary above).
+                #
+                # PHP cross-check for the new branch — five
+                # Sonja-bearing gids in the GL std corpus
+                # (1627563/1632289/1634961/1634980/1637338) showed funds
+                # drift exactly equal to the predicted display-based
+                # delta on the failing turn boundaries. See
+                # docs/oracle_exception_audit/phase11j_build_no_op_cluster_close.md
+                # for the per-gid breakdown.
+                listed = UNIT_STATS[unit.unit_type].cost
+                display_hp = (unit.hp + 9) // 10  # ceil(internal/10)
+                if display_hp >= 10:
+                    # Display bar already maxed — PHP does not repair
+                    # (Rachel included; ``TestR4DisplayCapRepairCanon``).
+                    cost = 0
+                    step = 0
+                elif co.co_id != 28:
+                    display_step = 1 if display_hp == 9 else 2
+                    cost = max(1, (display_step * 10 * listed) // 100) if listed > 0 else 0
+                    step = min(display_step * 10, 100 - unit.hp)
+                else:
+                    # Phase 11J-FINAL-LASTMILE — Rachel D2D display-based
+                    # repair cost canon for **display ≤ 9** (display 10
+                    # internal 91–99 is skipped above — same bar-maxed rule
+                    # as non-Rachel R4; see ``TestR4DisplayCapRepairCanon``).
+                    # Anchor gids / narrative: ``phase11j_build_no_op_cluster_close.md``,
+                    # ``phase11j_funds_drift_extermination.md``, Rachel D2D
+                    # commentary at top of ``_resupply_on_properties``.
+                    display_step = min(3, 10 - display_hp)
+                    cost = max(1, (display_step * 10 * listed) // 100) if listed > 0 else 0
+                    step = min(display_step * 10, 100 - unit.hp)
+                if step > 0 and self.funds[player] >= cost:
+                    unit.hp = min(100, unit.hp + step)
+                    self.funds[player] = max(
+                        0, min(999_999, self.funds[player] - cost),
+                    )
+                    self.gold_spent[player] += cost
 
+            # Resupply (fuel/ammo) runs even when the heal is skipped — the
+            # AWBW canon line above explicitly preserves resupply on the
+            # all-or-nothing branch ("it will only be resupplied and no
+            # repairs will be given").
             unit.fuel = stats.max_fuel
             if stats.max_ammo > 0:
                 unit.ammo = stats.max_ammo
@@ -1767,6 +2555,7 @@ def make_initial_state(
     default_weather: str = "clear",
     *,
     replay_first_mover: Optional[int] = None,
+    max_turns: Optional[int] = None,
 ) -> GameState:
     # Treasuries always start at 0g in AWBW; the opening player receives income
     # at the start of their first turn via _grant_income below. ``starting_funds``
@@ -1775,7 +2564,12 @@ def make_initial_state(
     Create a fresh GameState for a new game.
 
     Uses make_co_state_safe so it works even before co_data.json is generated.
+
+    ``max_turns`` overrides the engine day cap (default ``MAX_TURNS``). Must be >= 1.
     """
+    mt = MAX_TURNS if max_turns is None else int(max_turns)
+    if mt < 1:
+        raise ValueError(f"max_turns must be >= 1, got {mt}")
     props = copy.deepcopy(map_data.properties)
     units = specs_to_initial_units(map_data.predeployed_specs)
 
@@ -1830,6 +2624,7 @@ def make_initial_state(
         win_reason=None,
         game_log=[],
         tier_name=tier_name,
+        max_turns=mt,
         full_trace=[],
         seam_hp=seam_hp,
         weather=default_weather,

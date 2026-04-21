@@ -65,6 +65,42 @@ class COState:
     _data: dict = field(repr=False, compare=False)
     power_uses: int = 0    # incremented each time COP or SCOP is activated
     comm_towers: int = 0   # owned comm towers; updated by GameState each turn
+    # Sasha (co_id 19) SCOP "War Bonds" — credits 50% of damage cost (capped at
+    # 9 display HP per attack) to her treasury for damage dealt by her units.
+    #
+    # Lifecycle:
+    #   * Set ``war_bonds_active = True`` when Sasha activates SCOP.
+    #   * Each qualifying attack (her own attacks during her turn AND counter-
+    #     attacks dealt by her defending units during the opponent's
+    #     intervening turn) ACCUMULATES the payout into
+    #     ``pending_war_bonds_funds`` rather than crediting funds immediately.
+    #   * At the end of the opponent's intervening turn (i.e., immediately
+    #     before Sasha's next turn begins), ``_end_turn`` credits
+    #     ``pending_war_bonds_funds`` to her treasury, resets the counter to
+    #     0, and clears ``war_bonds_active``.
+    #
+    # Why deferred: PHP credits the War Bonds bonus as part of the start-of-
+    # next-turn settlement, not in real-time during each strike. Empirically
+    # confirmed on game ``1624082``: the −200g engine→PHP delta first appears
+    # at the snapshot AFTER P0's intervening turn (env 22), not during
+    # Sasha's own turn (env 21) where the snapshot still matched. Crediting
+    # in real-time also creates upstream state drift mid-turn (extra spending
+    # power → different unit-build/repair decisions) that regressed 23 of
+    # 100 games in the GL std corpus during initial roll-out.
+    war_bonds_active: bool = False
+    pending_war_bonds_funds: int = 0
+    # Kindle (co_id=23): count of urban properties (HQs, bases, airports,
+    # ports, cities, labs, comm towers) she currently owns. Updated alongside
+    # ``comm_towers`` via ``GameState._refresh_comm_towers``. Consumed by the
+    # SCOP "High Society" +3%/prop global ATK rider in ``engine/combat.py``.
+    urban_props: int = 0
+    # Colin (co_id=15) SCOP "Power of Money" — funds snapshot at SCOP
+    # activation. Consumed by ``_colin_atk_rider`` in ``engine/combat.py`` to
+    # compute the +(3 * funds / 1000)% attack rider for the SCOP duration.
+    # Snapshotted at activation (not read live during each attack) so the
+    # bonus stays stable across mid-turn builds/spending. Phase
+    # 11J-COLIN-IMPL-SHIP. Source: docs/oracle_exception_audit/phase11y_colin_scrape.md §0.3.
+    colin_pom_funds_snapshot: int = 0
 
     # ------------------------------------------------------------------
     # Modifier helpers

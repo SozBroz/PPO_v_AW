@@ -252,7 +252,16 @@ def test_property_day_repair_partial_hp_charges_proportionally():
 
 
 def test_property_day_repair_respects_insufficient_funds():
-    """Heal only as much HP as the player can pay for (integer cost per HP chunk)."""
+    """All-or-nothing per-unit repair: cannot afford full +20 → no heal at all.
+
+    Phase 11J-FUNDS-SHIP (R2) — AWBW canon is all-or-nothing per-unit step.
+    Three Tier-2 AWBW Wiki citations (Units / Advance Wars Overview /
+    Black-Boat) confirm: *"if the repairs cannot be afforded, no repairs
+    will take place"* and explicitly call out the fringe case where a
+    1HP repair is technically affordable but the +20 step is not. The
+    pre-Phase-11J engine partial-degrade loop violated this rule and
+    silently masked the R1 income-ordering bug at funds-tight boundaries.
+    """
     m = load_map(123858, POOL_PATH, MAPS_DIR)
     s = make_initial_state(m, 1, 5, tier_name="T3")
     city = next(
@@ -278,6 +287,6 @@ def test_property_day_repair_respects_insufficient_funds():
     s.funds[0] = 150
     s.units[0].append(u)
     s._resupply_on_properties(0)
-    # Full +20 costs 200; largest h with cost <= 150 is h=15 (150g)
-    assert u.hp == 65
-    assert s.funds[0] == 0
+    # Full +20 step costs 200g (20% of 1000). Funds 150 < 200 → no heal.
+    assert u.hp == 50, "All-or-nothing canon: under-budget → no partial heal."
+    assert s.funds[0] == 150, "Treasury untouched when full step unaffordable."

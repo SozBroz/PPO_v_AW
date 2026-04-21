@@ -395,8 +395,11 @@ class AWBWEnv(gym.Env):
         Optional label appended to game_log records for slicing runs by stage.
     max_env_steps:
         If set, end the episode with ``truncated=True`` once this many P0
-        ``step`` calls have completed (independent of engine ``MAX_TURNS`` /
-        calendar days). Useful for playoff / eval so games cannot run unbounded.
+        ``step`` calls have completed (independent of engine calendar /
+        ``max_turns``). Useful for playoff / eval so games cannot run unbounded.
+    max_turns:
+        Engine day-count tiebreak threshold (passed to ``make_initial_state``).
+        Defaults to ``MAX_TURNS`` from ``engine.game`` when ``None``.
     max_p1_microsteps:
         Cap on engine ``step`` calls while auto-playing player 1 in one P0
         ``env.step`` (prevents infinite loops if the opponent never hands back).
@@ -419,6 +422,7 @@ class AWBWEnv(gym.Env):
         curriculum_tag: str | None = None,
         max_env_steps: int | None = None,
         max_p1_microsteps: int | None = None,
+        max_turns: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -436,6 +440,7 @@ class AWBWEnv(gym.Env):
             self._max_p1_microsteps_cap = max(500, self._max_env_steps * 30)
         else:
             self._max_p1_microsteps_cap = None
+        self._max_turns: int | None = int(max_turns) if max_turns is not None else None
         # Explicit kwarg wins over env var; env var defaults off.
         if log_replay_frames is None:
             log_replay_frames = os.environ.get(LOG_REPLAY_FRAMES_ENV, "0") == "1"
@@ -523,13 +528,10 @@ class AWBWEnv(gym.Env):
         map_id, tier_name, p0_co, p1_co, map_name = self._sample_config()
         map_data = self._load_map(map_id)
 
-        self.state = make_initial_state(
-            map_data,
-            p0_co,
-            p1_co,
-            starting_funds=0,
-            tier_name=tier_name,
-        )
+        _mk: dict = dict(starting_funds=0, tier_name=tier_name)
+        if self._max_turns is not None:
+            _mk["max_turns"] = self._max_turns
+        self.state = make_initial_state(map_data, p0_co, p1_co, **_mk)
         # Who opens (engine seat 0 or 1) per make_initial_state predeploy rule; see engine/game.py.
         self._opening_player = int(self.state.active_player)
 

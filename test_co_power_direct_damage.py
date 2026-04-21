@@ -64,13 +64,18 @@ class TestHawkeWaveVsStorm(unittest.TestCase):
         st._apply_power_effects(player=0, cop=False)
         self.assertEqual(foe.hp, 80)
 
-    def test_both_powers_heal_own_two_display_hp(self) -> None:
+    def test_powers_heal_own_per_canon(self) -> None:
+        # AWBW CO Chart (Hawke row, https://awbw.amarriner.com/co.php):
+        #   * Black Wave (COP)   : own units +1 HP (10 internal).
+        #   * Black Storm (SCOP) : own units +2 HP (20 internal).
+        # Engine canon set in ``_apply_power_effects`` co_id == 12 branch
+        # (Phase 11J-FINAL-HAWKE-CLUSTER closeout).
         st = _empty_state(12, 1)
         st.active_player = 0
         ally = _make_unit(st, UnitType.TANK, 0, (3, 2))
         ally.hp = 50
         st._apply_power_effects(player=0, cop=True)
-        self.assertEqual(ally.hp, 70)
+        self.assertEqual(ally.hp, 60)
         ally.hp = 50
         st._apply_power_effects(player=0, cop=False)
         self.assertEqual(ally.hp, 70)

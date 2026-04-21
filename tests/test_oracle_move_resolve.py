@@ -103,10 +103,24 @@ class TestOracleMoveResolve(unittest.TestCase):
         u = s.units[0][0]
         self.assertEqual((int(u.pos[0]), int(u.pos[1])), (5, 7))
 
-    def test_plain_move_truncation_still_raises_when_tail_occupied_by_other_unit(
+    def test_plain_move_truncation_evicts_full_hp_friendly_twin_at_tail(
         self,
     ) -> None:
-        """Do not ``_move_unit_forced`` onto a tile held by another live unit."""
+        """Phase 11J-LANE-L-WIDEN-SHIP — extends MOVE-TRUNCATE-SHIP (60d9cb36).
+
+        AWBW envelope pins the mover on ``(5, 7)``; engine still holds a
+        full-HP same-type friendly twin there from earlier silent-skip drift.
+        ``_oracle_path_tail_occupant_is_evictable_drift`` recognises the
+        twin shape (both unloaded, ``units_can_join`` declines because both
+        full HP), the twin is evicted (``occ.hp = 0``) and the mover snaps
+        to ``(5, 7)``.  Mirrors the FM/PK Fire-branch widening at
+        ``tools/oracle_zip_replay.py`` lines 5917 / 6144.
+
+        Pre-widening this test asserted the truncation must raise; post-
+        widening the snap is the intended replay-continuity behaviour for
+        the same drift footprint that Phase 11J-MOVE-TRUNCATE-SHIP closed in
+        the Fire snap branches (drilled GIDs 1619504 PK, 1622140 FM, etc.).
+        """
         m = load_map(77060, POOL_PATH, MAPS_DIR)
         s = make_initial_state(m, 1, 1, tier_name="T3", starting_funds=0)
         s.units[0] = []
@@ -189,17 +203,18 @@ class TestOracleMoveResolve(unittest.TestCase):
         def fake_costs(_st: object, _u: object) -> dict[tuple[int, int], int]:
             return {(5, 5): 0, (5, 6): 1}
 
-        with (
-            patch("tools.oracle_zip_replay.compute_reachable_costs", fake_costs),
-            self.assertRaises(UnsupportedOracleAction) as ctx,
-        ):
+        with patch("tools.oracle_zip_replay.compute_reachable_costs", fake_costs):
             apply_oracle_action_json(
                 s,
                 move,
                 {awbw_pid: 0},
                 envelope_awbw_player_id=awbw_pid,
             )
-        self.assertIn("engine truncated path", str(ctx.exception))
+
+        mover = next(x for x in s.units[0] if int(x.unit_id) == 1)
+        self.assertEqual((int(mover.pos[0]), int(mover.pos[1])), (5, 7))
+        twin = next(x for x in s.units[0] if int(x.unit_id) == 2)
+        self.assertFalse(twin.is_alive)
 
 
 if __name__ == "__main__":

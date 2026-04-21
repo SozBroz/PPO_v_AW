@@ -6,12 +6,20 @@ Fixed-length head-to-head on one map: ``--candidate`` plays P0 (challenger) for
 
 Uses the same env wiring as ``scripts/bo3_checkpoint_playoff.py`` (no file writes).
 
+At startup, copies both zips to ``<repo>/.tmp/eval_snap_*`` so mid-run overwrites
+of shared paths (e.g. ``Z:\\latest.zip``) do not change the policies under test.
+
 Example (Misery Andy mirror, ~7 games)::
 
   python scripts/symmetric_checkpoint_eval.py \\
     --candidate checkpoints/amarriner_bc.zip --baseline checkpoints/latest.zip \\
     --map-id 123858 --tier T3 --co-p0 1 --co-p1 1 \\
-    --games-first-seat 4 --games-second-seat 3 --seed 0
+    --games-first-seat 4 --games-second-seat 3 --seed 0 \\
+    --max-env-steps 0 --max-turns 150
+
+Use ``--max-env-steps 0`` for unlimited P0 steps per game (otherwise the default
+cap can truncate before a natural winner). Use ``--max-turns`` to raise the
+engine calendar tiebreak above ``engine.game.MAX_TURNS`` (default 100).
 """
 from __future__ import annotations
 
@@ -43,6 +51,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool]:
     deterministic = bool(payload["deterministic"])
     max_env_steps = payload.get("max_env_steps")
     max_p1_microsteps = payload.get("max_p1_microsteps")
+    max_turns = payload.get("max_turns")
 
     class _Opp:
         def __init__(self) -> None:
@@ -50,7 +59,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool]:
 
         def __call__(self, obs, mask):
             if self._m is None:
-                self._m = load_maskable_ppo_compat(str(df), device="cpu")
+                self._m = load_maskable_ppo_compat(str(df), device="cpu", cache=True)
             a, _ = self._m.predict(obs, action_masks=mask, deterministic=deterministic)
             return int(a)
 
@@ -67,11 +76,13 @@ def _worker_game(payload: dict) -> tuple[int, int, bool]:
         env_kw["max_env_steps"] = int(max_env_steps)
     if max_p1_microsteps is not None:
         env_kw["max_p1_microsteps"] = int(max_p1_microsteps)
+    if max_turns is not None:
+        env_kw["max_turns"] = int(max_turns)
     env = ActionMasker(
         AWBWEnv(**env_kw),
         lambda e: e.action_masks(),
     )
-    p0 = load_maskable_ppo_compat(str(ch), device="cpu")
+    p0 = load_maskable_ppo_compat(str(ch), device="cpu", cache=True)
     obs, _ = env.reset(seed=seed)
     done = False
     last_trunc = False
@@ -111,137 +122,182 @@ def main() -> int:
         default=None,
         help="Override cap on P1 engine steps per P0 step (default: derived from max-env-steps).",
     )
+    ap.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Engine calendar tiebreak: end-of-game property count after N days (default: MAX_TURNS from engine.game, usually 100).",
+    )
     args = ap.parse_args()
 
     max_env_steps = (
         None if args.max_env_steps is None or args.max_env_steps <= 0 else int(args.max_env_steps)
     )
+    if args.max_turns is not None:
+        if int(args.max_turns) < 1:
+            raise SystemExit("--max-turns must be >= 1")
 
-    cand, base = args.candidate.resolve(), args.baseline.resolve()
-    if not cand.is_file():
-        raise SystemExit(f"Missing candidate: {cand}")
-    if not base.is_file():
-        raise SystemExit(f"Missing baseline: {base}")
+    cand_src, base_src = args.candidate.resolve(), args.baseline.resolve()
+    if not cand_src.is_file():
+        raise SystemExit(f"Missing candidate: {cand_src}")
+    if not base_src.is_file():
+        raise SystemExit(f"Missing baseline: {base_src}")
 
-    from rl.self_play import POOL_PATH
-
-    import numpy as np
-
-    with Path(POOL_PATH).open(encoding="utf-8") as f:
-        map_pool = json.load(f)
-    map_pool = [m for m in map_pool if m.get("map_id") == args.map_id]
-    if not map_pool:
-        raise SystemExit("no maps for --map-id")
-    pool_json = json.dumps(map_pool)
-    rng = np.random.default_rng(args.seed)
-
-    results: list[dict] = []
-    cand_wins = 0
-    base_wins = 0
-    game_no = 0
-
-    def run_block(
-        *,
-        challenger: Path,
-        defender: Path,
-        n_games: int,
-        label: str,
-    ) -> None:
-        nonlocal game_no, cand_wins, base_wins
-        for _ in range(n_games):
-            game_no += 1
-            seed = int(rng.integers(0, 2**31 - 1))
-            _gi, w, was_trunc = _worker_game(
-                {
-                    "game_i": game_no,
-                    "seed": seed,
-                    "challenger": str(challenger),
-                    "defender": str(defender),
-                    "map_pool_json": pool_json,
-                    "tier": args.tier,
-                    "co_p0": args.co_p0,
-                    "co_p1": args.co_p1,
-                    "deterministic": args.deterministic,
-                    "max_env_steps": max_env_steps,
-                    "max_p1_microsteps": args.max_p1_microsteps,
-                }
-            )
-            # Candidate win: P0 win when candidate is challenger, P1 win when candidate is defender
-            if challenger == cand:
-                cw = w == 0
-                bw = w == 1
-            else:
-                cw = w == 1
-                bw = w == 0
-            if cw:
-                cand_wins += 1
-            elif bw:
-                base_wins += 1
-            print(
-                f"[sym] game={game_no} block={label} seed={seed} winner_p0={w} "
-                f"candidate_win={cw} truncated={was_trunc}"
-            )
-            results.append(
-                {
-                    "game": game_no,
-                    "block": label,
-                    "seed": seed,
-                    "winner": w,
-                    "candidate_win": cw,
-                    "truncated": was_trunc,
-                }
-            )
-
-    print(
-        f"[sym] candidate_as_P0 x{args.games_first_seat} "
-        f"then candidate_as_P1 x{args.games_second_seat} "
-        f"(max_env_steps={max_env_steps})"
-    )
-    run_block(challenger=cand, defender=base, n_games=args.games_first_seat, label="candidate_P0")
-    run_block(challenger=base, defender=cand, n_games=args.games_second_seat, label="candidate_P1")
-
-    total = cand_wins + base_wins
-    print(
-        f"[sym] summary candidate_wins={cand_wins} baseline_wins={base_wins} "
-        f"total_decided={total} (draws if winner==-1 not counted above)"
-    )
-    if total:
-        print(f"[sym] candidate_win_rate={cand_wins / total:.3f}")
-
-    # Per-seat candidate win counts
-    w_p0 = sum(1 for r in results if r["block"] == "candidate_P0" and r["candidate_win"])
-    n_p0 = sum(1 for r in results if r["block"] == "candidate_P0")
-    w_p1 = sum(1 for r in results if r["block"] == "candidate_P1" and r["candidate_win"])
-    n_p1 = sum(1 for r in results if r["block"] == "candidate_P1")
-    print(f"[sym] as_P0: candidate {w_p0}/{n_p0}  as_P1: candidate {w_p1}/{n_p1}")
-
-    promote_ok = cand_wins > base_wins and (n_p1 == 0 or w_p1 > 0) and (n_p0 == 0 or w_p0 > 0)
-    print(
-        f"[sym] promotion_heuristic_ok={promote_ok} "
-        "(candidate ahead overall; no 0-for-N collapse in either seat)"
+    from rl.ckpt_compat import (
+        clear_maskable_ppo_load_cache,
+        delete_eval_snapshots,
+        snapshot_eval_checkpoints,
     )
 
-    if args.json_out:
-        summary = {
-            "candidate": str(cand),
-            "baseline": str(base),
-            "map_id": args.map_id,
-            "tier": args.tier,
-            "max_env_steps": max_env_steps,
-            "max_p1_microsteps": args.max_p1_microsteps,
-            "co_p0": args.co_p0,
-            "co_p1": args.co_p1,
-            "candidate_wins": cand_wins,
-            "baseline_wins": base_wins,
-            "per_seat": {"candidate_as_p0": [w_p0, n_p0], "candidate_as_p1": [w_p1, n_p1]},
-            "games": results,
-            "promotion_heuristic_ok": promote_ok,
-        }
-        args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        args.json_out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        print(f"[sym] wrote {args.json_out}")
+    snap_paths: tuple[Path, ...] | None = None
+    try:
+        run_id, (cand_snap, base_snap) = snapshot_eval_checkpoints(
+            [("candidate", cand_src), ("baseline", base_src)]
+        )
+        snap_paths = (cand_snap, base_snap)
+        print(f"[sym] frozen snapshots run_id={run_id}")
+        print(f"[sym]   candidate -> {cand_snap}")
+        print(f"[sym]   baseline -> {base_snap}")
 
-    return 0
+        from rl.self_play import POOL_PATH
+
+        import numpy as np
+
+        with Path(POOL_PATH).open(encoding="utf-8") as f:
+            map_pool = json.load(f)
+        map_pool = [m for m in map_pool if m.get("map_id") == args.map_id]
+        if not map_pool:
+            raise SystemExit("no maps for --map-id")
+        pool_json = json.dumps(map_pool)
+        rng = np.random.default_rng(args.seed)
+
+        results: list[dict] = []
+        cand_wins = 0
+        base_wins = 0
+        game_no = 0
+
+        def run_block(
+            *,
+            challenger: Path,
+            defender: Path,
+            n_games: int,
+            label: str,
+        ) -> None:
+            nonlocal game_no, cand_wins, base_wins
+            for _ in range(n_games):
+                game_no += 1
+                seed = int(rng.integers(0, 2**31 - 1))
+                _gi, w, was_trunc = _worker_game(
+                    {
+                        "game_i": game_no,
+                        "seed": seed,
+                        "challenger": str(challenger),
+                        "defender": str(defender),
+                        "map_pool_json": pool_json,
+                        "tier": args.tier,
+                        "co_p0": args.co_p0,
+                        "co_p1": args.co_p1,
+                        "deterministic": args.deterministic,
+                        "max_env_steps": max_env_steps,
+                        "max_p1_microsteps": args.max_p1_microsteps,
+                        "max_turns": args.max_turns,
+                    }
+                )
+                # Candidate win: P0 win when candidate is challenger, P1 win when candidate is defender
+                if challenger == cand_snap:
+                    cw = w == 0
+                    bw = w == 1
+                else:
+                    cw = w == 1
+                    bw = w == 0
+                if cw:
+                    cand_wins += 1
+                elif bw:
+                    base_wins += 1
+                print(
+                    f"[sym] game={game_no} block={label} seed={seed} winner_p0={w} "
+                    f"candidate_win={cw} truncated={was_trunc}"
+                )
+                results.append(
+                    {
+                        "game": game_no,
+                        "block": label,
+                        "seed": seed,
+                        "winner": w,
+                        "candidate_win": cw,
+                        "truncated": was_trunc,
+                    }
+                )
+
+        print(
+            f"[sym] candidate_as_P0 x{args.games_first_seat} "
+            f"then candidate_as_P1 x{args.games_second_seat} "
+            f"(max_env_steps={max_env_steps}, max_turns={args.max_turns})"
+        )
+        run_block(
+            challenger=cand_snap,
+            defender=base_snap,
+            n_games=args.games_first_seat,
+            label="candidate_P0",
+        )
+        run_block(
+            challenger=base_snap,
+            defender=cand_snap,
+            n_games=args.games_second_seat,
+            label="candidate_P1",
+        )
+
+        total = cand_wins + base_wins
+        print(
+            f"[sym] summary candidate_wins={cand_wins} baseline_wins={base_wins} "
+            f"total_decided={total} (draws if winner==-1 not counted above)"
+        )
+        if total:
+            print(f"[sym] candidate_win_rate={cand_wins / total:.3f}")
+
+        # Per-seat candidate win counts
+        w_p0 = sum(1 for r in results if r["block"] == "candidate_P0" and r["candidate_win"])
+        n_p0 = sum(1 for r in results if r["block"] == "candidate_P0")
+        w_p1 = sum(1 for r in results if r["block"] == "candidate_P1" and r["candidate_win"])
+        n_p1 = sum(1 for r in results if r["block"] == "candidate_P1")
+        print(f"[sym] as_P0: candidate {w_p0}/{n_p0}  as_P1: candidate {w_p1}/{n_p1}")
+
+        promote_ok = cand_wins > base_wins and (n_p1 == 0 or w_p1 > 0) and (n_p0 == 0 or w_p0 > 0)
+        print(
+            f"[sym] promotion_heuristic_ok={promote_ok} "
+            "(candidate ahead overall; no 0-for-N collapse in either seat)"
+        )
+
+        if args.json_out:
+            summary = {
+                "candidate": str(cand_src),
+                "baseline": str(base_src),
+                "candidate_snapshot": str(cand_snap),
+                "baseline_snapshot": str(base_snap),
+                "eval_snapshot_run_id": run_id,
+                "map_id": args.map_id,
+                "tier": args.tier,
+                "max_env_steps": max_env_steps,
+                "max_turns": args.max_turns,
+                "max_p1_microsteps": args.max_p1_microsteps,
+                "co_p0": args.co_p0,
+                "co_p1": args.co_p1,
+                "candidate_wins": cand_wins,
+                "baseline_wins": base_wins,
+                "per_seat": {"candidate_as_p0": [w_p0, n_p0], "candidate_as_p1": [w_p1, n_p1]},
+                "games": results,
+                "promotion_heuristic_ok": promote_ok,
+            }
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            print(f"[sym] wrote {args.json_out}")
+
+        return 0
+    finally:
+        clear_maskable_ppo_load_cache()
+        if snap_paths:
+            delete_eval_snapshots(snap_paths)
 
 
 if __name__ == "__main__":

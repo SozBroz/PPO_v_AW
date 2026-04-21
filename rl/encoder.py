@@ -270,7 +270,7 @@ def encode_state(
             float(co0.scop_active),
             float(co1.cop_active),
             float(co1.scop_active),
-            state.turn / MAX_TURNS,
+            state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS))),
             float(state.active_player),
             co0.co_id / 30.0,
             co1.co_id / 30.0,
