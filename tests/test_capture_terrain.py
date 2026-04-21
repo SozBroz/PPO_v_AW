@@ -1,4 +1,11 @@
-"""Full capture swaps property terrain IDs; owned-property resupply includes AWBW day heal."""
+"""Full capture swaps property terrain IDs; owned-property resupply includes AWBW day heal.
+
+These tests verify the ``_apply_capture`` handler in isolation: they
+parachute a CAPTURE Action onto a SELECT-stage state without walking
+SELECT_UNIT → MOVE first, so under STEP-GATE (Phase 3
+``desync_purge_engine_harden``) they pass ``oracle_mode=True`` to bypass
+the legality gate and exercise the handler directly.
+"""
 
 from __future__ import annotations
 
@@ -51,7 +58,7 @@ def test_full_capture_updates_terrain_on_misery_neutral_city():
     s.units[0].append(inf)
     s.active_player = 0
 
-    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
+    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)), oracle_mode=True)
 
     assert prop.owner == 0
     cid = country_id_for_player_seat(s.map_data.country_to_player, 0)
@@ -111,7 +118,7 @@ def test_full_capture_neutral_comm_tower_swaps_tid():
         )
     )
     s.active_player = 0
-    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
+    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)), oracle_mode=True)
     assert prop.owner == 0
     exp = property_terrain_id_after_owner_change(133, 0, s.map_data.country_to_player)
     assert exp == 128
@@ -160,7 +167,7 @@ def test_full_capture_neutral_lab_swaps_tid():
         )
     )
     s.active_player = 0
-    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)))
+    s.step(Action(ActionType.CAPTURE, unit_pos=(r, c), move_pos=(r, c)), oracle_mode=True)
     assert prop.owner == 0
     exp = property_terrain_id_after_owner_change(145, 0, s.map_data.country_to_player)
     assert exp == 139

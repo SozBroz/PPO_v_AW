@@ -181,8 +181,9 @@ class TestTransportDeathKillsCargo(unittest.TestCase):
             lander.loaded_units.append(c)
         self.assertEqual(len(lander.loaded_units), 2)
 
-        # Adjacent enemy battleship — strong enough to one-shot the lander.
-        bship = _make_unit(st, UnitType.BATTLESHIP, 1, (0, 2))
+        # Indirect-capable battleship (min range 2). Manhattan 1 from (0,2) to
+        # lander is illegal in-mask; place at (0,0) for Manhattan 3 (Phase 10M).
+        bship = _make_unit(st, UnitType.BATTLESHIP, 1, (0, 0))
 
         before_p0_units = st.losses_units[0]
 

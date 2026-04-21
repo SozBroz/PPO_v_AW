@@ -4,7 +4,8 @@ Game 182065: both COs Sami (co_id 8). Full engine replay succeeds; seam damage m
 ``game_log`` attack_seam entries.
 
 In this engine, ``full_trace`` entries' ``turn`` field is the **calendar day** (it
-advances when Player 1 ends a turn). So e.g. ``"turn": 24`` is **Day 24** on the
+advances when **P1** ends a turn — i.e. ``active_player`` **1**, blue / second
+seat, not “human player #1” in 1-based counting). So e.g. ``"turn": 24`` is **Day 24** on the
 in-game clock.
 
 Facts pinned here:
@@ -58,7 +59,7 @@ class TestTrace182065SeamValidation(unittest.TestCase):
             tier_name=self.record.get("tier", "T2"),
         )
         for entry in self.full_trace:
-            state.step(_trace_to_action(entry))
+            state.step(_trace_to_action(entry), oracle_mode=True)
 
     def test_attack_seam_log_matches_expected_two_hit_breaks(self) -> None:
         seams = [x for x in self.game_log if x.get("type") == "attack_seam"]

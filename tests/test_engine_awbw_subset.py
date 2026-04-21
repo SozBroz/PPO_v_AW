@@ -213,8 +213,15 @@ def test_relax_wait_on_capturable_property_does_not_raise():
     s.step(Action(ActionType.SELECT_UNIT, unit_pos=inf.pos, move_pos=inf.pos))
 
     # ``step`` must accept this WAIT without raising — even though the
-    # ``get_legal_actions`` mask hides it for RL shaping.
-    s.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=inf.pos))
+    # ``get_legal_actions`` mask hides it for RL shaping. STEP-GATE
+    # (Phase 3 ``desync_purge_engine_harden``) makes the mask authoritative
+    # for non-oracle callers, so this handler-level "does not raise" claim
+    # opts into ``oracle_mode=True`` (the intent is to verify ``_apply_wait``
+    # tolerates the carve-out, not to assert the mask permits it).
+    s.step(
+        Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=inf.pos),
+        oracle_mode=True,
+    )
 
     assert inf.moved is True
     assert target_prop.capture_points == 20  # WAIT does not start a capture
@@ -241,5 +248,12 @@ def test_select_unit_id_pins_engine_unit_when_tile_stacked():
     u_first = _spawn(s, UnitType.INFANTRY, 0, pos, unit_id=101)
     u_second = _spawn(s, UnitType.INFANTRY, 0, pos, unit_id=202)
     assert s.get_unit_at(*pos) is u_first
-    s.step(Action(ActionType.SELECT_UNIT, unit_pos=pos, select_unit_id=202))
+    # ``select_unit_id`` is an oracle/replay disambiguator (see Action docstring);
+    # it is never set by RL legal actions, so the mask Action(SELECT_UNIT, ...)
+    # never carries it. STEP-GATE therefore treats this as out-of-mask — opt
+    # into ``oracle_mode=True`` to exercise the disambiguation path itself.
+    s.step(
+        Action(ActionType.SELECT_UNIT, unit_pos=pos, select_unit_id=202),
+        oracle_mode=True,
+    )
     assert s.selected_unit is u_second

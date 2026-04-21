@@ -12,7 +12,6 @@ from server.play_human import MAPS_DIR, POOL_PATH
 from tools.oracle_zip_replay import (
     UnsupportedOracleAction,
     _merge_move_gu_fields,
-    _oracle_drift_spawn_unloaded_cargo,
     _oracle_unload_unit_global_for_envelope,
     _resolve_unload_transport,
 )
@@ -161,99 +160,6 @@ class TestOracleUnloadTransportResolve(unittest.TestCase):
                 1,
                 cargo_awbw_units_id=None,
             )
-
-
-class TestOracleDriftSpawnUnloadedCargo(unittest.TestCase):
-    """Drift recovery for ``Unload`` when engine carrier hull went empty.
-
-    Oracle missed an earlier ``Load`` (engine drift), so AWBW emits an
-    ``Unload`` whose carrier the engine sees as empty. Recovery spawns the
-    cargo on the unload tile only when an empty friendly carrier of the
-    right ``carry_classes`` is orth-adjacent — same shape AWBW would have
-    accepted before drift.
-    """
-
-    def setUp(self) -> None:
-        m = load_map(126428, POOL_PATH, MAPS_DIR)
-        self.state = make_initial_state(m, 14, 21, tier_name="T4", starting_funds=0)
-        self.state.units[0] = []
-        self.state.units[1] = []
-
-    def test_spawn_cargo_when_empty_carrier_orth_adjacent(self) -> None:
-        """Map 126428 (2,4)/(2,5) are plain (terrain id 1) → walkable."""
-        s = self.state
-        s.units[1].append(_apc((2, 4), 100, []))
-        ok = _oracle_drift_spawn_unloaded_cargo(
-            s, 1, UnitType.INFANTRY, (2, 5), {"units_id": 555}, 555
-        )
-        self.assertTrue(ok)
-        self.assertIsNotNone(s.get_unit_at(2, 5))
-        self.assertEqual(s.get_unit_at(2, 5).unit_type, UnitType.INFANTRY)
-        self.assertTrue(s.get_unit_at(2, 5).moved)
-
-    def test_no_spawn_when_no_orth_carrier(self) -> None:
-        s = self.state
-        ok = _oracle_drift_spawn_unloaded_cargo(
-            s, 1, UnitType.INFANTRY, (2, 5), {"units_id": 555}, 555
-        )
-        self.assertFalse(ok)
-        self.assertIsNone(s.get_unit_at(2, 5))
-
-    def test_no_spawn_when_target_occupied(self) -> None:
-        s = self.state
-        s.units[1].append(_apc((2, 4), 100, []))
-        blocker = _foot(UnitType.MECH, 600)
-        blocker.pos = (2, 5)
-        s.units[1].append(blocker)
-        ok = _oracle_drift_spawn_unloaded_cargo(
-            s, 1, UnitType.INFANTRY, (2, 5), {"units_id": 555}, 555
-        )
-        self.assertFalse(ok)
-
-    def test_kill_enemy_occupant_then_spawn(self) -> None:
-        """(B') AWBW would never Unload onto an enemy-held tile → engine ghost
-        from missed combat. Drift kills it and spawns the cargo on the cleared
-        target. Surfaced by GL 1627561 (Mech Unload onto enemy-held (0,9))."""
-        s = self.state
-        s.units[1].append(_apc((2, 4), 100, []))
-        ghost = _foot(UnitType.INFANTRY, 700, player=0)
-        ghost.pos = (2, 5)
-        s.units[0].append(ghost)
-        ok = _oracle_drift_spawn_unloaded_cargo(
-            s, 1, UnitType.INFANTRY, (2, 5), {"units_id": 555}, 555
-        )
-        self.assertTrue(ok)
-        self.assertFalse(ghost.is_alive)
-        spawned = s.get_unit_at(2, 5)
-        self.assertIsNotNone(spawned)
-        self.assertEqual(spawned.player, 1)
-        self.assertEqual(spawned.unit_type, UnitType.INFANTRY)
-
-    def test_distant_carrier_spawns_cargo_without_teleport(self) -> None:
-        """(E) Carrier farther than orth-adjacent → spawn cargo, **do not move
-        the carrier**. Teleporting the carrier broke later ``Move`` lookups
-        (GL 1629092 / 1631302); the carrier must stay where AWBW expects it."""
-        s = self.state
-        carrier = _apc((2, 0), 100, [])
-        s.units[1].append(carrier)
-        ok = _oracle_drift_spawn_unloaded_cargo(
-            s, 1, UnitType.INFANTRY, (2, 5), {"units_id": 555}, 555
-        )
-        self.assertTrue(ok)
-        self.assertEqual(carrier.pos, (2, 0))
-        spawned = s.get_unit_at(2, 5)
-        self.assertIsNotNone(spawned)
-        self.assertEqual(spawned.unit_type, UnitType.INFANTRY)
-
-    def test_distant_carrier_out_of_range_no_spawn(self) -> None:
-        """(E) bound: carrier farther than Manhattan 8 → no spawn (drift too deep)."""
-        s = self.state
-        s.units[1].append(_apc((10, 12), 100, []))
-        ok = _oracle_drift_spawn_unloaded_cargo(
-            s, 1, UnitType.INFANTRY, (0, 0), {"units_id": 555}, 555
-        )
-        self.assertFalse(ok)
-        self.assertIsNone(s.get_unit_at(0, 0))
 
 
 if __name__ == "__main__":

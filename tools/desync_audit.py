@@ -75,6 +75,12 @@ from tools.amarriner_catalog_cos import (  # noqa: E402
     pair_catalog_cos_ids,
 )
 from tools.gl_std_maps import gl_std_map_ids  # noqa: E402
+from tools.replay_snapshot_compare import (  # noqa: E402
+    compare_funds,
+    compare_snapshot_to_engine,
+    replay_snapshot_pairing,
+)
+from engine.unit import UNIT_STATS  # noqa: E402
 
 CATALOG_DEFAULT = ROOT / "data" / "amarriner_gl_std_catalog.json"
 ZIPS_DEFAULT = ROOT / "replays" / "amarriner_gl"
@@ -100,7 +106,14 @@ CLS_ORACLE_GAP = "oracle_gap"                  # action kind not yet mapped in o
 CLS_LOADER_ERROR = "loader_error"              # snapshot CO/player mapping or zip layout problem
 CLS_REPLAY_NO_ACTION_STREAM = "replay_no_action_stream"  # RV1 zip: PHP snapshot only, no p: stream (not a corrupt zip)
 CLS_ENGINE_BUG = "engine_bug"                  # engine raised under a mapped action
-CLS_STATE_MISMATCH_INVESTIGATE = "state_mismatch_investigate"  # reserved (snapshot diff, not implemented)
+# state_mismatch_* family — opt-in via --enable-state-mismatch. Phase 11STATE-MISMATCH:
+# replay completed without exception but the engine state diverged from the PHP
+# snapshot frame at the post-envelope cadence (Option B per design spec). The
+# specific suffix records which axis (or combination) drifted first.
+CLS_STATE_MISMATCH_FUNDS = "state_mismatch_funds"
+CLS_STATE_MISMATCH_UNITS = "state_mismatch_units"
+CLS_STATE_MISMATCH_MULTI = "state_mismatch_multi"
+CLS_STATE_MISMATCH_INVESTIGATE = "state_mismatch_investigate"  # comparator failure / unknown layout
 CLS_CATALOG_INCOMPLETE = "catalog_incomplete"  # missing co_p0_id / co_p1_id in JSON — cannot build GameState
 
 
@@ -118,18 +131,264 @@ class _ReplayProgress:
     last_envelope_index: Optional[int] = None
 
 
+# ---------------------------------------------------------------------------
+# Phase 11STATE-MISMATCH — per-envelope PHP snapshot diff (opt-in)
+# ---------------------------------------------------------------------------
+# These knobs are OFF by default. When --enable-state-mismatch is passed,
+# ``_run_replay_instrumented`` calls ``_diff_engine_vs_snapshot`` after every
+# successful ``p:`` envelope (Option B cadence per phase11state_mismatch_design
+# §2). The first non-empty diff stops the replay and surfaces a
+# ``state_mismatch_*`` row instead of the silent ``ok`` we'd otherwise emit
+# (Phase 10F: 78% of "ok" rows hide PHP drift; Phase 11K: 74.5% on n=200).
+class StateMismatchError(Exception):
+    """Sentinel raised by the snapshot-diff hook in ``_run_replay_instrumented``.
+
+    Carries enough metadata for ``_audit_one`` to populate the register row's
+    ``state_mismatch`` payload (envelope/frame index, PHP day, pairing mode,
+    structured ``diff_summary``). Caught and re-classified by ``_classify``
+    /``_classify_state_mismatch``; never escapes the audit boundary.
+    """
+
+    def __init__(
+        self,
+        *,
+        env_i: int,
+        snap_i: int,
+        day_php: Optional[int],
+        pairing: Optional[str],
+        diff_summary: dict[str, Any],
+    ) -> None:
+        msg = "; ".join((diff_summary.get("human_readable") or [])[:2]) or "state mismatch"
+        super().__init__(msg)
+        self.env_i = env_i
+        self.snap_i = snap_i
+        self.day_php = day_php
+        self.pairing = pairing
+        self.diff_summary = diff_summary
+
+
+# Name aliases the PHP comparator already tolerates (mirror
+# ``replay_snapshot_compare.compare_units``). Kept local so we don't import a
+# private map and so the audit's diff stays self-describing.
+_PHP_NAME_ALIASES: dict[str, str] = {
+    "Md.Tank": "Medium Tank",
+    "Md. Tank": "Medium Tank",
+}
+
+
+def _diff_engine_vs_snapshot(
+    state: GameState,
+    php_frame: dict[str, Any],
+    awbw_to_engine: dict[int, int],
+    *,
+    hp_internal_tolerance: int = 0,
+) -> dict[str, Any]:
+    """Compare a single PHP frame to the engine ``state``.
+
+    Returns a structured diff dict (axes + per-seat funds + count + first-K
+    human-readable lines) or an empty dict when everything matches within the
+    configured tolerance. ``hp_internal_tolerance`` is the maximum absolute
+    delta on **internal HP** (engine ``Unit.hp`` vs ``round(php.hit_points*10)``)
+    that we silently absorb. Default 0 = EXACT (per design §4); leave that
+    alone for canonical runs and only widen for narrow luck-noise experiments.
+
+    Carried units (``carried == 'Y'`` in PHP) are excluded — they live inside
+    transports' ``loaded_units`` in the engine and would otherwise duplicate
+    the carrier's tile (see ``compare_units`` for the same exclusion).
+    """
+    funds_lines = compare_funds(php_frame, state, awbw_to_engine)
+    funds_axis_present = bool(funds_lines)
+
+    funds_engine: dict[str, int] = {}
+    funds_php: dict[str, int] = {}
+    funds_delta: dict[str, int] = {}
+    for _k, pl in (php_frame.get("players") or {}).items():
+        if not isinstance(pl, dict):
+            continue
+        try:
+            pid = int(pl["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        eng = awbw_to_engine.get(pid)
+        if eng is None:
+            continue
+        try:
+            php_f = int(pl.get("funds", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        eng_f = int(state.funds[eng])
+        funds_engine[str(eng)] = eng_f
+        funds_php[str(eng)] = php_f
+        funds_delta[str(eng)] = eng_f - php_f
+
+    php_by_tile: dict[tuple[int, int, int], dict[str, Any]] = {}
+    for _k, u in (php_frame.get("units") or {}).items():
+        if not isinstance(u, dict):
+            continue
+        if str(u.get("carried", "N")).upper() == "Y":
+            continue
+        try:
+            col, row = int(u["x"]), int(u["y"])
+            pid = int(u["players_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        eng_seat = awbw_to_engine.get(pid)
+        if eng_seat is None:
+            continue
+        php_by_tile[(eng_seat, row, col)] = u
+
+    eng_by_tile: dict[tuple[int, int, int], Any] = {}
+    for seat in (0, 1):
+        for u in state.units[seat]:
+            if u.is_alive:
+                r, c = u.pos
+                eng_by_tile[(seat, r, c)] = u
+
+    units_count_mismatch = set(php_by_tile) != set(eng_by_tile)
+    units_type_mismatch_count = 0
+    units_hp_mismatch_count = 0
+    # Keep our own human-readable lines for HP/type/count drift. Required
+    # because ``compare_snapshot_to_engine`` only flags **display-bar**
+    # mismatches (ceil(php.hit_points)) and silently misses internal-HP drift
+    # like engine.hp=50 vs php.hit_points=4.5 (both ceil to bar 5). The diff
+    # spec (§4) treats internal HP as the comparison axis, so we have to emit
+    # our own lines or downstream triage sees ``state_mismatch_units`` rows
+    # with no diagnostic body.
+    own_lines: list[str] = []
+    for key in sorted(set(php_by_tile) & set(eng_by_tile)):
+        pu, eu = php_by_tile[key], eng_by_tile[key]
+        php_name = str(pu.get("name", "")).strip()
+        eng_name = UNIT_STATS[eu.unit_type].name
+        eng_cmp = _PHP_NAME_ALIASES.get(eng_name, eng_name)
+        php_cmp = _PHP_NAME_ALIASES.get(php_name, php_name)
+        if php_name and eng_cmp != php_cmp:
+            units_type_mismatch_count += 1
+            own_lines.append(
+                f"at {key} type engine={eng_name!r} php={php_name!r}"
+            )
+            continue
+        php_hp = pu.get("hit_points")
+        if php_hp is None:
+            continue
+        try:
+            php_internal = int(round(float(php_hp) * 10))
+        except (TypeError, ValueError):
+            continue
+        delta = int(eu.hp) - php_internal
+        if abs(delta) > hp_internal_tolerance:
+            units_hp_mismatch_count += 1
+            own_lines.append(
+                f"at {key} hp engine={int(eu.hp)} php_internal={php_internal} "
+                f"(php_hit_points={float(php_hp)}) delta={delta}"
+            )
+
+    if units_count_mismatch:
+        only_php = sorted(set(php_by_tile) - set(eng_by_tile))
+        only_eng = sorted(set(eng_by_tile) - set(php_by_tile))
+        own_lines.insert(
+            0,
+            f"unit tile set mismatch only_in_php={only_php[:8]}"
+            f"{'…' if len(only_php) > 8 else ''} only_in_engine={only_eng[:8]}"
+            f"{'…' if len(only_eng) > 8 else ''}",
+        )
+
+    axes: list[str] = []
+    if funds_axis_present:
+        axes.append("funds")
+    if units_count_mismatch:
+        axes.append("units_count")
+    if units_type_mismatch_count > 0:
+        axes.append("units_type")
+    if units_hp_mismatch_count > 0:
+        axes.append("units_hp")
+
+    if not axes:
+        return {}
+
+    # Stitched human_readable preview: funds_lines first (already structured by
+    # compare_funds), then unit-axis lines from our own scan. Reuses
+    # ``compare_snapshot_to_engine`` only as a fallback for lines we haven't
+    # generated locally (e.g. comparator-side aliases or future axes).
+    human: list[str] = list(funds_lines)
+    for ln in own_lines:
+        if ln not in human:
+            human.append(ln)
+        if len(human) >= 16:
+            break
+    if len(human) < 4:
+        for ln in compare_snapshot_to_engine(php_frame, state, awbw_to_engine):
+            if ln not in human:
+                human.append(ln)
+            if len(human) >= 16:
+                break
+    return {
+        "axes": axes,
+        "funds_engine_by_seat": funds_engine,
+        "funds_php_by_seat": funds_php,
+        "funds_delta_by_seat": funds_delta,
+        "unit_mismatch_count": (
+            units_hp_mismatch_count
+            + units_type_mismatch_count
+            + (1 if units_count_mismatch else 0)
+        ),
+        "unit_hp_mismatch_count": units_hp_mismatch_count,
+        "unit_type_mismatch_count": units_type_mismatch_count,
+        "unit_count_mismatch": bool(units_count_mismatch),
+        "human_readable": human[:16],
+    }
+
+
+def _classify_state_mismatch(diff_summary: dict[str, Any]) -> str:
+    """Pick the most specific ``state_mismatch_*`` class for a non-empty diff.
+
+    Heuristic: funds-only -> ``state_mismatch_funds``; units-only ->
+    ``state_mismatch_units``; both families -> ``state_mismatch_multi``;
+    empty/garbled -> ``state_mismatch_investigate``. ``meta`` and
+    ``properties`` are reserved (Section 3 of the design spec) and not
+    emitted in this initial implementation — diff_summary today doesn't
+    populate those axes.
+    """
+    axes = diff_summary.get("axes") or []
+    has_funds = "funds" in axes
+    has_units = any(a.startswith("units") for a in axes)
+    if has_funds and has_units:
+        return CLS_STATE_MISMATCH_MULTI
+    if has_funds:
+        return CLS_STATE_MISMATCH_FUNDS
+    if has_units:
+        return CLS_STATE_MISMATCH_UNITS
+    return CLS_STATE_MISMATCH_INVESTIGATE
+
+
 def _run_replay_instrumented(
     state: GameState,
     envelopes: list[tuple[int, int, list[dict[str, Any]]]],
     awbw_to_engine: dict[int, int],
     progress: _ReplayProgress,
+    *,
+    frames: Optional[list[dict[str, Any]]] = None,
+    enable_state_mismatch: bool = False,
+    hp_internal_tolerance: int = 0,
 ) -> Optional[Exception]:
     """
     Step the engine through ``envelopes``. On the first exception, populate
     ``progress`` with the divergence location and return the exception. Return
     ``None`` if the entire stream replayed cleanly (including resign / terminal).
+
+    When ``enable_state_mismatch`` is True and ``frames`` is provided with a
+    valid ``replay_snapshot_pairing`` (trailing or tight), a per-envelope diff
+    runs after each successful envelope. The first non-empty diff is returned
+    as a ``StateMismatchError`` (treated as an "exception" by the caller for
+    return-type uniformity; ``_classify`` routes it to a state_mismatch_* row).
     """
     progress.envelopes_total = len(envelopes)
+    n_frames = len(frames) if frames is not None else 0
+    pairing = (
+        replay_snapshot_pairing(n_frames, len(envelopes))
+        if enable_state_mismatch and frames is not None
+        else None
+    )
+    diff_active = enable_state_mismatch and frames is not None and pairing is not None
     for env_i, (_pid, day, actions) in enumerate(envelopes):
         for obj in actions:
             if state.done:
@@ -148,6 +407,32 @@ def _run_replay_instrumented(
                 progress.envelopes_applied = env_i + 1
                 return None
         progress.envelopes_applied = env_i + 1
+
+        if diff_active:
+            snap_i = env_i + 1
+            if snap_i < n_frames:
+                php_frame = frames[snap_i]
+                ds = _diff_engine_vs_snapshot(
+                    state,
+                    php_frame,
+                    awbw_to_engine,
+                    hp_internal_tolerance=hp_internal_tolerance,
+                )
+                if ds:
+                    php_day = php_frame.get("day")
+                    try:
+                        php_day_int: Optional[int] = (
+                            int(php_day) if php_day is not None else None
+                        )
+                    except (TypeError, ValueError):
+                        php_day_int = None
+                    return StateMismatchError(
+                        env_i=env_i,
+                        snap_i=snap_i,
+                        day_php=php_day_int,
+                        pairing=pairing,
+                        diff_summary=ds,
+                    )
     return None
 
 
@@ -157,6 +442,8 @@ def _classify(exc: Optional[Exception]) -> tuple[str, str, str]:
         return CLS_OK, "", ""
     et = type(exc).__name__
     msg = str(exc)
+    if isinstance(exc, StateMismatchError):
+        return _classify_state_mismatch(exc.diff_summary), et, msg
     if isinstance(exc, UnsupportedOracleAction):
         return CLS_ORACLE_GAP, et, msg
     # Snapshot / player mapping problems vs zip layout (keep patterns tight:
@@ -300,9 +587,14 @@ class AuditRow:
     envelopes_total: int
     envelopes_applied: int
     actions_applied: int
+    # Optional structured payload populated only when --enable-state-mismatch is on
+    # AND the snapshot diff hook fires. Keep ``None`` everywhere else so the
+    # default-OFF JSONL is byte-identical to pre-Phase-11 audits (regression
+    # gate #7 in the campaign rules).
+    state_mismatch: Optional[dict[str, Any]] = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "games_id": self.games_id,
             "map_id": self.map_id,
             "tier": self.tier,
@@ -321,6 +613,9 @@ class AuditRow:
             "envelopes_applied": self.envelopes_applied,
             "actions_applied": self.actions_applied,
         }
+        if self.state_mismatch is not None:
+            out["state_mismatch"] = self.state_mismatch
+        return out
 
 
 def _audit_catalog_incomplete(
@@ -370,6 +665,8 @@ def _audit_one(
     map_pool: Path,
     maps_dir: Path,
     seed: int,
+    enable_state_mismatch: bool = False,
+    state_mismatch_hp_tolerance: int = 0,
 ) -> AuditRow:
     # Pin Python's process-wide RNG to a value derived from games_id (mixed
     # with the audit's --seed). engine.combat.calculate_damage falls back to
@@ -446,7 +743,15 @@ def _audit_one(
         return base
 
     progress = _ReplayProgress()
-    exc = _run_replay_instrumented(state, envelopes, awbw_to_engine, progress)
+    exc = _run_replay_instrumented(
+        state,
+        envelopes,
+        awbw_to_engine,
+        progress,
+        frames=frames if enable_state_mismatch else None,
+        enable_state_mismatch=enable_state_mismatch,
+        hp_internal_tolerance=state_mismatch_hp_tolerance,
+    )
     base.envelopes_total = progress.envelopes_total
     base.envelopes_applied = progress.envelopes_applied
     base.actions_applied = progress.actions_applied
@@ -454,6 +759,29 @@ def _audit_one(
     if exc is None:
         base.status = "ok"
         base.cls = CLS_OK
+        return base
+
+    if isinstance(exc, StateMismatchError):
+        # Snapshot-diff lane: NOT a first oracle divergence — the engine
+        # consumed every action without raising; the divergence is silent
+        # (Phase 10F / 11K class). Use a distinct status string so dashboards
+        # and the cluster_desync_register can split state-mismatch rows from
+        # ``first_divergence`` exception rows.
+        base.status = "snapshot_divergence"
+        cls, et, msg = _classify(exc)
+        base.cls = cls
+        base.exception_type = et
+        base.message = msg
+        base.approx_day = progress.last_day
+        base.approx_action_kind = progress.last_action_kind
+        base.approx_envelope_index = exc.env_i
+        base.state_mismatch = {
+            "first_mismatch_envelope": exc.env_i,
+            "first_mismatch_frame_index": exc.snap_i,
+            "first_mismatch_day_php": exc.day_php,
+            "pairing": exc.pairing,
+            "diff_summary": exc.diff_summary,
+        }
         return base
 
     base.status = "first_divergence"
@@ -510,6 +838,29 @@ def main() -> int:
             "Process-wide RNG seed mixed with each games_id before that game's "
             "replay (default: CANONICAL_SEED=%(default)s). Required for the "
             "regression gate to be deterministic; see logs/desync_regression_log.md."
+        ),
+    )
+    ap.add_argument(
+        "--enable-state-mismatch",
+        action="store_true",
+        help=(
+            "Phase 11STATE-MISMATCH: after each successful p: envelope, diff "
+            "engine state vs the matching PHP snapshot frame. First mismatch "
+            "stops the replay and emits a state_mismatch_{funds,units,multi} "
+            "row instead of the silent ``ok`` we otherwise produce. Default OFF "
+            "for backward compat with the canonical regression register; "
+            "expect ~1.5-3x wall time when enabled."
+        ),
+    )
+    ap.add_argument(
+        "--state-mismatch-hp-tolerance",
+        type=int,
+        default=0,
+        help=(
+            "Maximum absolute internal-HP delta (engine.Unit.hp vs round("
+            "php.hit_points*10)) absorbed silently by the state-mismatch hook. "
+            "Default 0 = EXACT (per design spec §4). Widen only for narrow "
+            "luck-noise experiments — wider values mask real combat bugs."
         ),
     )
     args = ap.parse_args()
@@ -594,6 +945,8 @@ def main() -> int:
                         map_pool=args.map_pool,
                         maps_dir=args.maps_dir,
                         seed=args.seed,
+                        enable_state_mismatch=args.enable_state_mismatch,
+                        state_mismatch_hp_tolerance=args.state_mismatch_hp_tolerance,
                     )
             except Exception as exc:  # safety net — never let one zip stop the batch
                 row = AuditRow(

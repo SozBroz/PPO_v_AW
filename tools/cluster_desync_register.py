@@ -73,7 +73,7 @@ def desync_subtype(row: dict[str, Any]) -> str:
         if "AttackSeam" in msg or msg.startswith("Seam"):
             return "oracle_seam"
         if msg.startswith("Build"):
-            # Strict BUILD no-op / envelope drift (`ORACLE_STRICT_BUILD`, engine refused).
+            # Strict BUILD no-op / envelope drift (engine refused BUILD).
             return "oracle_build"
         if msg.startswith("Power"):
             return "oracle_power"

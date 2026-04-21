@@ -20,7 +20,7 @@ from engine.action import (
     Action, ActionType, ActionStage,
     get_legal_actions,
 )
-from engine.game import make_initial_state
+from engine.game import IllegalActionError, make_initial_state
 from engine.unit import Unit, UnitType, UNIT_STATS
 
 from test_lander_and_fuel import _fresh_state, _make_unit, _select_and_move
@@ -45,7 +45,7 @@ def _state_with_boat() -> tuple:
 # ---------------------------------------------------------------------------
 
 class TestBlackBoatLegalRepair(unittest.TestCase):
-    """``get_legal_actions`` must offer REPAIR only for eligible adjacent allies."""
+    """REPAIR listing follows AWBW permissive rules (``_black_boat_repair_eligible``)."""
 
     def test_repair_offered_per_adjacent_ally_needing_help(self) -> None:
         state, bb = _state_with_boat()
@@ -57,11 +57,24 @@ class TestBlackBoatLegalRepair(unittest.TestCase):
         self.assertEqual(repairs[0].target_pos, damaged.pos)
 
     def test_repair_not_offered_for_full_hp_full_supply(self) -> None:
+        """Phase 10M / Option A: REPAIR stays in the legal mask; apply-layer is a no-op
+        when ally is already full HP/fuel/ammo (AWBW permissive listing)."""
         state, bb = _state_with_boat()
-        _make_unit(state, UnitType.INFANTRY, 0, (2, 2))  # 100 HP, max fuel/ammo
+        ally = _make_unit(state, UnitType.INFANTRY, 0, (2, 2))  # 100 HP, max fuel/ammo
+        fuel_before = ally.fuel
+        ammo_before = ally.ammo
+        funds_before = state.funds[0]
         _select_and_move(state, bb, bb.pos)
         types = {a.action_type for a in get_legal_actions(state)}
-        self.assertNotIn(ActionType.REPAIR, types)
+        self.assertIn(ActionType.REPAIR, types)
+        state.step(Action(
+            ActionType.REPAIR,
+            unit_pos=bb.pos, move_pos=bb.pos, target_pos=ally.pos,
+        ))
+        self.assertEqual(ally.hp, 100)
+        self.assertEqual(ally.fuel, fuel_before)
+        self.assertEqual(ally.ammo, ammo_before)
+        self.assertEqual(state.funds[0], funds_before)
 
     def test_repair_offered_for_full_hp_when_ally_needs_fuel(self) -> None:
         state, bb = _state_with_boat()
@@ -155,18 +168,26 @@ class TestBlackBoatRepairBehaviour(unittest.TestCase):
         self.assertEqual(inf.ammo, stats.max_ammo)
 
     def test_self_repair_is_refused(self) -> None:
-        """Hand-crafted REPAIR with target_pos == boat.pos must no-op heal-wise."""
+        """Phase 10M: crafted self-target is not in the legal mask — STEP-GATE fires first.
+        With ``oracle_mode=True``, ``_apply_repair`` still refuses self-heal (apply-layer)."""
         state, bb = _state_with_boat()
         # Damage the boat itself (hypothetically) to make the test observable.
         bb.hp = 50
         fuel_before = bb.fuel
         _select_and_move(state, bb, bb.pos)
+        with self.assertRaises(IllegalActionError):
+            state.step(Action(
+                ActionType.REPAIR,
+                unit_pos=bb.pos, move_pos=bb.pos, target_pos=bb.pos,
+            ))
+        self.assertEqual(bb.hp, 50)
+        self.assertEqual(bb.fuel, fuel_before)
+        # Apply path: explicit self-repair guard, no heal and no self-resupply branch.
         state.step(Action(
             ActionType.REPAIR,
             unit_pos=bb.pos, move_pos=bb.pos, target_pos=bb.pos,
-        ))
+        ), oracle_mode=True)
         self.assertEqual(bb.hp, 50, "Boat must not be its own heal target.")
-        # No resupply either — the action resolved as a no-op terminator.
         self.assertEqual(bb.fuel, fuel_before)
 
     def test_wait_does_not_mass_repair(self) -> None:

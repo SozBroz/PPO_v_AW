@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from engine.action import Action, ActionStage, ActionType
-from engine.game import GameState, make_initial_state
+from engine.game import GameState, IllegalActionError, make_initial_state
 from engine.map_loader import MapData, load_map
 from engine.unit import Unit, UnitType, UNIT_STATS
 
@@ -512,6 +512,9 @@ def _emit_move_or_fire(
     step_failed = False
     try:
         state.step(action)
+    except IllegalActionError:
+        # STEP-GATE: trace actions come from AWBW envelopes, not get_legal_actions.
+        state.step(action, oracle_mode=True)
     except ValueError:
         # Re-executed state has diverged from the original game (a blocker
         # occupies a tile it didn't hold during the live match). Force-move
@@ -638,7 +641,7 @@ def _rebuild_and_emit(
         if atype == ActionType.BUILD:
             # Apply, then look up the new unit by position to read its unit_id.
             try:
-                state.step(action)
+                state.step(action, oracle_mode=True)
             except Exception:
                 continue
             new_unit = state.get_unit_at(*action.move_pos) if action.move_pos else None
@@ -657,7 +660,7 @@ def _rebuild_and_emit(
             continue
 
         if atype == ActionType.END_TURN:
-            state.step(action)
+            state.step(action, oracle_mode=True)
             next_player = state.active_player
             next_day    = state.turn
             # ``updatedInfo.day`` must be the calendar day *after* END_TURN for the
@@ -676,7 +679,7 @@ def _rebuild_and_emit(
         # Powers could be surfaced as a PowerAction later; for MVP we let the
         # turn snapshot communicate the transition.
         try:
-            state.step(action)
+            state.step(action, oracle_mode=True)
         except Exception:
             pass
 
@@ -732,7 +735,7 @@ def _rebuild_and_emit_with_snapshots(
 
         if atype == ActionType.BUILD:
             try:
-                state.step(action)
+                state.step(action, oracle_mode=True)
             except Exception:
                 continue
             new_unit = state.get_unit_at(*action.move_pos) if action.move_pos else None
@@ -751,10 +754,7 @@ def _rebuild_and_emit_with_snapshots(
             continue
 
         if atype == ActionType.END_TURN:
-            try:
-                state.step(action)
-            except Exception:
-                continue
+            state.step(action, oracle_mode=True)
             next_player = state.active_player
             next_day = state.turn
             current.actions.append(_end_turn_action_json(
@@ -768,7 +768,7 @@ def _rebuild_and_emit_with_snapshots(
             continue
 
         try:
-            state.step(action)
+            state.step(action, oracle_mode=True)
         except Exception:
             pass
 

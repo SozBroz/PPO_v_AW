@@ -33,6 +33,37 @@ SEAM_MAX_HP: int = 99
 
 MAX_TURNS = 100   # after this, winner = player with more properties; tie if equal
 
+
+# AWBW Wiki: https://awbw.fandom.com/wiki/Machine_Gun
+# Units listed below carry both a primary weapon (cannon / bazooka / missile)
+# and a secondary Machine Gun. The MG is unlimited (no ammo cost) and is
+# AWBW's default weapon when the defender is Infantry or Mech.
+# Used by ``_apply_attack`` to decide whether the strike consumes one round
+# of primary ammo.
+_MG_SECONDARY_USERS: frozenset[UnitType] = frozenset({
+    UnitType.MECH,
+    UnitType.TANK,
+    UnitType.MED_TANK,
+    UnitType.NEO_TANK,
+    UnitType.MEGA_TANK,
+    UnitType.B_COPTER,
+})
+_MG_SECONDARY_TARGETS: frozenset[UnitType] = frozenset({
+    UnitType.INFANTRY,
+    UnitType.MECH,
+})
+
+
+class IllegalActionError(ValueError):
+    """Raised by ``GameState.step`` when an action is not in
+    ``get_legal_actions(state)`` and the call did not opt into ``oracle_mode``.
+
+    STEP-GATE invariant — see
+    ``.cursor/plans/desync_purge_engine_harden_d85bd82c.plan.md`` Phase 3
+    Thread STEP-GATE and ``docs/oracle_exception_audit/phase3_step_gate.md``.
+    """
+    pass
+
 # Dense shaping for CAPTURE (acting-player frame). Kept small vs terminal ±1.0.
 # Coefficients raised after the P0-skew investigation (plan p0-capture-architecture-fix):
 # the previous values were dominated by the per-step property-diff penalty in
@@ -195,11 +226,44 @@ class GameState:
     # Main step
     # ------------------------------------------------------------------
 
-    def step(self, action: Action) -> tuple[GameState, float, bool]:
+    def step(
+        self,
+        action: Action,
+        *,
+        oracle_mode: bool = False,
+        oracle_strict: bool = False,
+    ) -> tuple[GameState, float, bool]:
         """
         Apply action in-place, return (self, reward, done).
         reward is from the perspective of active_player at the time of the call.
+
+        STEP-GATE: when ``oracle_mode`` is False (the default — RL, agent, tests,
+        any normal caller), ``action`` must appear in ``get_legal_actions(self)``.
+        Violations raise :class:`IllegalActionError`. ``get_legal_actions`` is
+        the single source of truth for legality; this gate makes ``step``
+        enforce it. Oracle / replay tooling that intentionally crafts actions
+        outside the mask (e.g. AWBW zip replay reconstructing a game from
+        recorded action envelopes) opts out by passing ``oracle_mode=True``.
+
+        ``oracle_strict`` (default False) threads an audit-only lane: when True,
+        some ``_apply_*`` paths that would silently no-op under oracle replay
+        raise :class:`IllegalActionError` instead, surfacing AWBW disagreements.
+        Does not affect the default oracle zip consumer, which leaves it False.
+
+        See ``.cursor/plans/desync_purge_engine_harden_d85bd82c.plan.md``
+        Phase 3 Thread STEP-GATE and
+        ``docs/oracle_exception_audit/phase3_step_gate.md``.
         """
+        if not oracle_mode:
+            legal = get_legal_actions(self)
+            if action not in legal:
+                raise IllegalActionError(
+                    f"Action {action!r} not in get_legal_actions() at "
+                    f"turn={self.turn} active_player={self.active_player} "
+                    f"action_stage={self.action_stage.name}; "
+                    f"mask size={len(legal)}"
+                )
+
         acting_player = self.active_player
 
         # Full trace — record every action for replay export.
@@ -270,19 +334,19 @@ class GameState:
             self._apply_dive_hide(action)
 
         elif action.action_type == ActionType.LOAD:
-            self._apply_load(action)
+            self._apply_load(action, oracle_strict=oracle_strict)
 
         elif action.action_type == ActionType.JOIN:
-            self._apply_join(action)
+            self._apply_join(action, oracle_strict=oracle_strict)
 
         elif action.action_type == ActionType.UNLOAD:
-            self._apply_unload(action)
+            self._apply_unload(action, oracle_strict=oracle_strict)
 
         elif action.action_type == ActionType.BUILD:
-            self._apply_build(action)
+            self._apply_build(action, oracle_strict=oracle_strict)
 
         elif action.action_type == ActionType.REPAIR:
-            self._apply_repair(action)
+            self._apply_repair(action, oracle_strict=oracle_strict)
 
         reward = self._check_win_conditions(acting_player) + capture_shaping
         return self, reward, self.done
@@ -397,6 +461,20 @@ class GameState:
             AWBW's by ~100g × props × turn, surfacing as ``Build no-op
             (insufficient funds)`` at every Tank build (game ``1623012`` was
             the first traced case; the Sasha bucket dominates this cluster).
+
+        Kindle (co_id 23) is **deliberately not branched here.** Phase 11A
+        attempted a +50% city-income bonus per ``data/co_data.json`` but
+        ``tools/_phase10n_drilldown.py`` on game ``1628546`` (Kindle vs Max,
+        map 159501) showed PHP rejecting the bonus on the very first Kindle
+        city capture (turn 4 grant: PHP +4000 / engine +4500), pulling the
+        first funds mismatch from envelope 11 (pre-fix) up to envelope 5
+        (post-fix, +500 to engine). This matches the AWBW CO Chart
+        (https://awbw.amarriner.com/co.php) which is **silent** on Kindle
+        income — the +50% line in ``co_data.json`` and the community wiki is
+        a discrepancy already flagged in
+        ``docs/oracle_exception_audit/phase10t_co_income_audit.md`` Section
+        3, and the live PHP oracle sides with the chart. See
+        ``phase11a_kindle_hachi_canon.md`` for the rollback record.
 
         SCOP / COP income multipliers (Colin's "Power of Money" funds ×1.5 of
         base income, Sasha's "Market Crash" funds drain on opponent) are
@@ -551,9 +629,56 @@ class GameState:
     # ------------------------------------------------------------------
 
     def _apply_attack(self, action: Action):
-        attacker = self.get_unit_at(*action.unit_pos)
+        # Phase 11J P-COLO-ATTACKER: if STEP-GATE has already pinned the actor
+        # via ``selected_unit`` and that unit is alive on ``action.unit_pos``,
+        # prefer it over ``get_unit_at`` — the latter returns the *first*
+        # match on a co-occupied tile, which can pick a stationary same-tile
+        # unit (e.g. cargo or prior-turn arrival) instead of the actually
+        # selected mover. Falls through to ``get_unit_at`` for legacy paths
+        # (tests, seam attacks) where ``selected_unit`` is None.
+        attacker: Optional[Unit] = None
+        sel = self.selected_unit
+        if sel is not None and sel.is_alive and sel.pos == action.unit_pos:
+            attacker = sel
         if attacker is None:
-            return
+            attacker = self.get_unit_at(*action.unit_pos)
+        if attacker is None:
+            raise ValueError(
+                f"_apply_attack: no attacker at {action.unit_pos}"
+            )
+
+        # Phase 3 ATTACK-INV defense-in-depth (mirrors get_attack_targets /
+        # get_legal_actions; redundant when STEP-GATE is enforced, fires only
+        # if step() is called with a crafted action that bypassed the mask).
+        # Seam attacks (defender is None) are owned by SEAM thread and routed
+        # through _apply_seam_attack below, so we only police the unit-vs-unit
+        # branch here.
+        defender_pre = (
+            self.get_unit_at(*action.target_pos)
+            if action.target_pos is not None
+            else None
+        )
+        if defender_pre is not None and defender_pre.player == attacker.player:
+            raise ValueError(
+                f"_apply_attack: friendly fire from player {attacker.player} "
+                f"on {defender_pre.unit_type.name} at {action.target_pos}"
+            )
+        # Phase 11J P-AMMO override-bypass: when the oracle has pinned the
+        # post-strike HPs via ``_oracle_combat_damage_override``, AWBW already
+        # decided the strike was legal (e.g. Mech/B-Copter using their
+        # secondary MG with primary ammo=0 — ``get_attack_targets`` shorts
+        # out at ``ammo == 0`` even though the MG is unmetered). Trust the
+        # oracle and skip this defense-in-depth check; the override is
+        # consumed at L684 below so any subsequent step is gated normally.
+        oracle_pinned = self._oracle_combat_damage_override is not None
+        if defender_pre is not None and not oracle_pinned:
+            atk_from = action.move_pos if action.move_pos is not None else attacker.pos
+            if action.target_pos not in get_attack_targets(self, attacker, atk_from):
+                raise ValueError(
+                    f"_apply_attack: target {action.target_pos} not in attack "
+                    f"range for {attacker.unit_type.name} from {atk_from} "
+                    f"(unit_pos={action.unit_pos})"
+                )
 
         self._move_unit(attacker, action.move_pos)
 
@@ -617,9 +742,23 @@ class GameState:
                     self.losses_units[attacker.player] += 1  # Track unit destroyed
                 self._charge_power(defender.player, attacker.player, counter)
 
-        # Consume attacker ammo
+        # Consume attacker ammo. AWBW canon: the secondary Machine Gun is
+        # **unlimited** and does NOT draw from the unit's primary ammo
+        # magazine; only the primary weapon (cannon, bazooka, missile)
+        # consumes one round per shot. Per the AWBW Wiki Machine_Gun page
+        # (https://awbw.fandom.com/wiki/Machine_Gun) the MG is the
+        # secondary weapon for Mech, Tank, Md.Tank, Neotank, Mega Tank and
+        # B-Copter, and is used only against Infantry and Mech defenders.
+        # The pre-fix engine consumed primary ammo on every strike, which
+        # falsely zeroed B-Copter / Mech / Mega Tank magazines several
+        # turns earlier than AWBW (47 GL std-tier engine_bug rows in
+        # logs/desync_register_post_phase9.jsonl bottomed out at ammo=0).
         att_stats = UNIT_STATS[attacker.unit_type]
-        if att_stats.max_ammo > 0:
+        used_secondary_mg = (
+            attacker.unit_type in _MG_SECONDARY_USERS
+            and defender.unit_type in _MG_SECONDARY_TARGETS
+        )
+        if att_stats.max_ammo > 0 and not used_secondary_mg:
             attacker.ammo = max(0, attacker.ammo - 1)
 
         # If a transport just died, all units it was carrying go down with it.
@@ -694,16 +833,27 @@ class GameState:
         (acting player's) frame. No shaping when the tile is already owned by
         that player (non-contest).
         """
+        if action.move_pos is None:
+            raise ValueError("_apply_capture: action.move_pos is required")
         unit = self.get_unit_at(*action.unit_pos)
         if unit is None:
-            return 0.0
-
-        self._move_unit(unit, action.move_pos)
+            raise ValueError(f"_apply_capture: no unit at {action.unit_pos}")
+        if not UNIT_STATS[unit.unit_type].can_capture:
+            raise ValueError(
+                f"_apply_capture: {unit.unit_type.name} cannot capture"
+            )
         prop = self.get_property_at(*action.move_pos)
         if prop is None:
-            self._finish_action(unit)
-            return 0.0
+            raise ValueError(
+                f"_apply_capture: no capturable property at {action.move_pos}"
+            )
+        if prop.owner == unit.player:
+            raise ValueError(
+                f"_apply_capture: property at {action.move_pos} already owned "
+                f"by player {unit.player}"
+            )
 
+        self._move_unit(unit, action.move_pos)
         old_owner = prop.owner
         old_cp = prop.capture_points
         contest = old_owner is None or old_owner != unit.player
@@ -892,7 +1042,7 @@ class GameState:
         listed = UNIT_STATS[target_type].cost
         return max(1, listed // 10)
 
-    def _apply_repair(self, action: Action):
+    def _apply_repair(self, action: Action, *, oracle_strict: bool = False):
         """Resolve a Black Boat REPAIR action on an orthogonally adjacent ally.
 
         AWBW rules (see ``engine.action._black_boat_repair_eligible`` and
@@ -913,6 +1063,18 @@ class GameState:
         """
         boat = self.get_unit_at(*action.unit_pos)
         if boat is None or boat.unit_type != UnitType.BLACK_BOAT:
+            if oracle_strict:
+                raise IllegalActionError(
+                    "REPAIR: not a Black Boat or unit missing",
+                )
+            # Close ACTION/MOVE stage drift: old path returned without
+            # finalizing; mirror _finish_action state transitions.
+            if boat is not None:
+                self._finish_action(boat)
+            else:
+                self.action_stage = ActionStage.SELECT
+                self.selected_unit = None
+                self.selected_move_pos = None
             return
 
         # Move first (boat may have a move_pos different from unit_pos).
@@ -1064,10 +1226,15 @@ class GameState:
     # Load
     # ------------------------------------------------------------------
 
-    def _apply_load(self, action: Action):
+    def _apply_load(self, action: Action, *, oracle_strict: bool = False):
         unit      = self.get_unit_at(*action.unit_pos)
         transport = self.get_unit_at(*action.move_pos)
         if unit is None or transport is None:
+            if oracle_strict:
+                raise IllegalActionError(
+                    "_apply_load: mover or transport missing at unit_pos or move_pos "
+                    f"(unit={unit!r}, transport={transport!r}, action={action!r})"
+                )
             return
 
         # Capacity + compatibility guards (the engine should never produce an
@@ -1108,7 +1275,7 @@ class GameState:
     # Join (merge same-type allies)
     # ------------------------------------------------------------------
 
-    def _apply_join(self, action: Action):
+    def _apply_join(self, action: Action, *, oracle_strict: bool = False):
         """Move ``mover`` onto ``partner`` and merge (AWBW join).
 
         Partner (occupant of ``move_pos``) must be injured; combined HP caps at
@@ -1120,6 +1287,8 @@ class GameState:
         mover = self.get_unit_at(*action.unit_pos)
         partner = self.get_unit_at(*action.move_pos) if action.move_pos else None
         if mover is None or partner is None or mover is partner:
+            if oracle_strict:
+                raise IllegalActionError("JOIN: no merge partner at target")
             return
         if not units_can_join(mover, partner):
             raise ValueError(
@@ -1161,7 +1330,7 @@ class GameState:
     # Unload
     # ------------------------------------------------------------------
 
-    def _apply_unload(self, action: Action):
+    def _apply_unload(self, action: Action, *, oracle_strict: bool = False):
         """
         Drop one cargo unit from a transport onto an adjacent legal tile.
 
@@ -1203,16 +1372,36 @@ class GameState:
         dr = abs(drop_pos[0] - transport.pos[0])
         dc = abs(drop_pos[1] - transport.pos[1])
         if dr + dc != 1:
+            if oracle_strict:
+                raise IllegalActionError(
+                    "_apply_unload: drop tile not orthogonally adjacent to transport "
+                    f"after move (transport={transport!r}, action={action!r})"
+                )
             return
         if not (0 <= drop_pos[0] < self.map_data.height and 0 <= drop_pos[1] < self.map_data.width):
+            if oracle_strict:
+                raise IllegalActionError(
+                    "_apply_unload: drop position out of bounds "
+                    f"(transport={transport!r}, action={action!r})"
+                )
             return
         if self.get_unit_at(*drop_pos) is not None:
+            if oracle_strict:
+                raise IllegalActionError(
+                    "_apply_unload: drop tile occupied "
+                    f"(transport={transport!r}, action={action!r})"
+                )
             return
         from engine.terrain import INF_PASSABLE
         from engine.weather import effective_move_cost
         cargo_unit = transport.loaded_units[cargo_idx]
         tid = self.map_data.terrain[drop_pos[0]][drop_pos[1]]
         if effective_move_cost(self, cargo_unit, tid) >= INF_PASSABLE:
+            if oracle_strict:
+                raise IllegalActionError(
+                    "_apply_unload: drop terrain impassable for cargo "
+                    f"(transport={transport!r}, action={action!r})"
+                )
             return
 
         cargo = transport.loaded_units.pop(cargo_idx)
@@ -1241,10 +1430,12 @@ class GameState:
     # Build
     # ------------------------------------------------------------------
 
-    def _apply_build(self, action: Action):
+    def _apply_build(self, action: Action, *, oracle_strict: bool = False):
         player = self.active_player
         ut     = action.unit_type
         if ut is None or action.move_pos is None:
+            if oracle_strict:
+                raise IllegalActionError("BUILD: missing unit_type or move_pos")
             return
 
         # Defense-in-depth: `get_legal_actions` already filters BUILD to owned
@@ -1255,23 +1446,37 @@ class GameState:
         from engine.terrain import get_terrain
         prop = self.get_property_at(*action.move_pos)
         if prop is None or prop.owner != player:
+            if oracle_strict:
+                raise IllegalActionError(
+                    "BUILD: tile is not an owned factory property",
+                )
             return
         terrain = get_terrain(self.map_data.terrain[prop.row][prop.col])
         if not (terrain.is_base or terrain.is_airport or terrain.is_port):
+            if oracle_strict:
+                raise IllegalActionError("BUILD: terrain is not base/airport/port")
             return
 
         # Unit class must match terrain type: naval on port, air on airport,
         # ground/pipe on base. `get_producible_units` is the canonical rule
         # set; reuse it so we never drift out of sync with action generation.
         if ut not in get_producible_units(terrain, self.map_data.unit_bans):
+            if oracle_strict:
+                raise IllegalActionError(
+                    "BUILD: unit type not producible on this terrain",
+                )
             return
 
         cost = _build_cost(ut, self, player, action.move_pos)
         if self.funds[player] < cost:
+            if oracle_strict:
+                raise IllegalActionError("BUILD: insufficient funds")
             return
 
         # Verify factory is empty (important for direct factory builds)
         if self.get_unit_at(*action.move_pos) is not None:
+            if oracle_strict:
+                raise IllegalActionError("BUILD: factory tile occupied")
             return
 
         self.funds[player] -= cost
@@ -1367,8 +1572,28 @@ class GameState:
         fraction per internal HP (integer gold, minimum 1 when listed cost
         > 0). Labs and comm towers do not grant this heal. CO power heals are
         separate and do not use this path.
+
+        CO modifiers applied here:
+          * **Rachel** (co_id 28) D2D — heal **+3 displayed HP** (``+30``
+            internal) per property-day instead of +2. AWBW CO Chart
+            (https://awbw.amarriner.com/co.php) Rachel row reads:
+            *"Units repair +1 additional HP (note: liable for costs)."*
+            ``data/co_data.json`` only mentions luck and is **not** trusted
+            for this rule (see Phase 11Y-CO-WAVE-2 §5). The per-internal-HP
+            cost formula in ``_property_day_repair_gold`` is linear, so a
+            full +30 step naturally costs 30% of the unit's deployment cost
+            (vs 20% for the standard +20 step) — Rachel pays for the extra
+            bar exactly as the chart specifies. Empirical grounding: 69
+            Rachel-bearing GL std replays in the 936-zip pool (Phase 11Y
+            recon §1) plus per-replay drills (§4) showing engine-overstated
+            funds vs PHP at the first Rachel property-heal step on multiple
+            games (e.g. ``1622501`` step 13 +200, ``1623772`` step 11 +100,
+            ``1624721`` step 17 +300, ``1625211`` step 14 +300), consistent
+            with current engine **under-charging** repair. Phase 10T
+            ``phase10t_co_income_audit.md`` flagged this as HIGH priority.
         """
-        property_heal = 20  # +2 display HP
+        co = self.co_states[player]
+        property_heal = 30 if co.co_id == 28 else 20  # Rachel: +3 bars, others +2
         for unit in self.units[player]:
             prop = self.get_property_at(*unit.pos)
             if prop is None or prop.owner != player:

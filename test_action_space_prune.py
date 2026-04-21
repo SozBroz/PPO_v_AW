@@ -21,7 +21,7 @@ from engine.action import (
     Action, ActionType, ActionStage,
     get_legal_actions,
 )
-from engine.game import GameState, make_initial_state
+from engine.game import GameState, IllegalActionError, make_initial_state
 from engine.map_loader import MapData, PropertyState
 from engine.unit import Unit, UnitType, UNIT_STATS
 
@@ -240,9 +240,9 @@ class TestWaitPruningOnProperty(unittest.TestCase):
         self.assertNotIn(ActionType.CAPTURE, types)
 
     def test_step_accepts_hand_crafted_wait_on_neutral_city(self) -> None:
-        """Engine ⊂ AWBW: WAIT on a capturable property is legal in AWBW
-        (the player can decline to capture). ``get_legal_actions`` still
-        prunes WAIT here for RL shaping, but ``step`` must accept it."""
+        """Phase 10M: WAIT on capturable tile is pruned from the mask; STEP-GATE
+        rejects the same action (canonical engine contract — not AWBW superset
+        via ``step`` without ``oracle_mode``)."""
         terrain = [[PLAIN] * 5 for _ in range(5)]
         terrain[2][2] = NEUTRAL_CITY
         prop = _neutral_city(2, 2)
@@ -250,15 +250,16 @@ class TestWaitPruningOnProperty(unittest.TestCase):
         inf = _make_unit(st, UnitType.INFANTRY, 0, (2, 3))
 
         _select_and_move(st, inf, (2, 2))
-        st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
-
-        self.assertTrue(inf.moved)
-        self.assertEqual(prop.capture_points, 20)  # WAIT did not start a capture
+        cap_before = prop.capture_points
+        with self.assertRaises(IllegalActionError):
+            st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
+        # Move is staged (unit still on start tile) until a legal ACTION completes.
+        self.assertEqual(st.selected_move_pos, (2, 2))
+        self.assertIs(st.selected_unit, inf)
+        self.assertEqual(prop.capture_points, cap_before)
 
     def test_step_accepts_wait_on_partially_capped_city(self) -> None:
-        """Same as above with a partial-capture pre-state. AWBW lets the
-        capturer step away (or here, just WAIT in place); the pre-existing
-        capture progress is preserved (only resets on tile vacate or death)."""
+        """Phase 10M: same STEP-GATE contract as ``test_step_accepts_hand_crafted_wait_on_neutral_city``."""
         terrain = [[PLAIN] * 5 for _ in range(5)]
         terrain[2][2] = NEUTRAL_CITY
         prop = _neutral_city(2, 2, capture_points=8)
@@ -266,14 +267,12 @@ class TestWaitPruningOnProperty(unittest.TestCase):
         inf = _make_unit(st, UnitType.INFANTRY, 0, (2, 3))
 
         _select_and_move(st, inf, (2, 2))
-        st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
-
-        self.assertTrue(inf.moved)
-        # ``_move_unit`` only resets the *source* tile (here a plain), not the
-        # destination. The pre-existing partial cap therefore persists; AWBW
-        # would clear it on the prior owner's tile-vacate event, which the
-        # engine already models elsewhere.
-        self.assertEqual(prop.capture_points, 8)
+        cap_before = prop.capture_points
+        with self.assertRaises(IllegalActionError):
+            st.step(Action(ActionType.WAIT, unit_pos=inf.pos, move_pos=(2, 2)))
+        self.assertEqual(st.selected_move_pos, (2, 2))
+        self.assertIs(st.selected_unit, inf)
+        self.assertEqual(prop.capture_points, cap_before)
 
 
 if __name__ == "__main__":

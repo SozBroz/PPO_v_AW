@@ -1,10 +1,9 @@
 """Defense-in-depth tests for `_apply_build`.
 
-`get_legal_actions` already restricts BUILD to factories owned by the
-active player, but engines are also callable with hand-constructed
-`Action` objects. These tests bypass the legal-action filter and feed
-`GameState.step` a crafted BUILD, then verify that the guard in
-`_apply_build` rejects the move without mutating state.
+Phase 10M: STEP-GATE runs before `_apply_build`. Crafted illegal BUILD actions
+raise :class:`IllegalActionError` unless ``oracle_mode=True``. Tests below assert
+gate-level rejection; use oracle mode in a separate lane if exercising
+`_apply_build` guards directly.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ import unittest
 
 from engine.action import Action, ActionType, ActionStage
 from engine.co import make_co_state_safe
-from engine.game import GameState
+from engine.game import GameState, IllegalActionError
 from engine.map_loader import MapData, PropertyState
 from engine.unit import UnitType
 
@@ -83,11 +82,12 @@ class TestBuildGuard(unittest.TestCase):
         self.assertEqual(len(state.units[1]), 0, "P1 must not receive a unit")
 
     def test_build_on_opponent_factory_rejected(self) -> None:
-        # Active player is 1, factory is owned by 0. Crafted action must be rejected.
+        # Phase 10M: illegal BUILD rejected at STEP-GATE (mask does not include it).
         state = _minimal_state(active_player=1, factory_owner=0)
         action = Action(ActionType.BUILD, move_pos=(0, 1), unit_type=UnitType.INFANTRY)
 
-        state.step(action)
+        with self.assertRaises(IllegalActionError):
+            state.step(action)
 
         self.assertEqual(len(state.units[0]), 0, "no unit may be placed for P0")
         self.assertEqual(len(state.units[1]), 0, "no unit may be placed for P1 either")
@@ -98,7 +98,8 @@ class TestBuildGuard(unittest.TestCase):
         state = _minimal_state(active_player=0, factory_owner=None)
         action = Action(ActionType.BUILD, move_pos=(0, 1), unit_type=UnitType.INFANTRY)
 
-        state.step(action)
+        with self.assertRaises(IllegalActionError):
+            state.step(action)
 
         self.assertEqual(len(state.units[0]), 0)
         self.assertEqual(state.funds[0], 10_000)

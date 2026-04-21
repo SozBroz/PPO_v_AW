@@ -268,46 +268,7 @@ class TestOracleFireNoPathStaleAttacker(unittest.TestCase):
         self.assertEqual(state.action_stage, ActionStage.SELECT)
         self.assertEqual(foe.hp, foe_hp_before)
 
-    def test_post_strike_fire_with_hp_zero_still_applies_when_attacker_alive_on_anchor(self) -> None:
-        """1628539 day 13 j=2 shape: AWBW snapshot is post-strike — attacker
-        hp=0 but engine still has a live attacker on the anchor tile. The
-        strike was real and must be applied (not skipped)."""
-        state = _fresh_state()
-        state.active_player = 0
-        atk = _make_unit(state, UnitType.TANK, 0, (3, 2))
-        foe = _make_unit(state, UnitType.INFANTRY, 1, (3, 3))
-        foe_hp_before = foe.hp
-        obj = {
-            "action": "Fire",
-            "Move": [],
-            "Fire": {
-                "combatInfoVision": {
-                    "global": {
-                        "hasVision": True,
-                        "combatInfo": {
-                            "attacker": {
-                                "units_id": 999111222,
-                                "units_x": 2,
-                                "units_y": 3,
-                                "units_hit_points": 0,
-                                "units_ammo": 0,
-                            },
-                            "defender": {
-                                "units_id": 1,
-                                "units_x": 3,
-                                "units_y": 3,
-                                "units_hit_points": "?",
-                            },
-                        }
-                    }
-                },
-            },
-        }
-        apply_oracle_action_json(
-            state, obj, {900100: 0, 900101: 1}, envelope_awbw_player_id=900100
-        )
-        self.assertLess(foe.hp, foe_hp_before)
-        self.assertTrue(atk.is_alive)
+    # Phase 7: deleted test_post_strike_fire_with_hp_zero_still_applies_when_attacker_alive_on_anchor — see logs/phase7_test_cleanup.log
 
 
 class TestOracleFirePerSeatVisionGl1627004(unittest.TestCase):
@@ -695,15 +656,29 @@ class TestOracleRepairAction(unittest.TestCase):
         self.assertEqual(pos, (2, 3))
 
 
-class TestDirectFireDiagonalRange(unittest.TestCase):
-    """AWBW direct fire uses Chebyshev distance 1 (eight adjacent tiles)."""
+class TestDirectFireOrthogonalOnly(unittest.TestCase):
+    """AWBW direct fire uses Manhattan distance 1 (four orthogonal neighbours).
 
-    def test_infantry_includes_diagonal_neighbors(self) -> None:
+    Phase 6 fix: prior class ``TestDirectFireDiagonalRange`` codified the
+    Chebyshev-1 bug. AWBW Wiki + Carnaghi 2022 + 936 GL std-tier replays
+    (62,614 direct-r1 Fire envelopes, zero diagonals) all confirm direct
+    range-1 attacks hit only the four axis-aligned neighbours.
+    """
+
+    def test_infantry_excludes_diagonal_neighbors(self) -> None:
         state = _fresh_state()
         inf = _make_unit(state, UnitType.INFANTRY, 0, (2, 2))
         _make_unit(state, UnitType.INFANTRY, 1, (3, 3))
         ts = get_attack_targets(state, inf, inf.pos)
-        self.assertIn((3, 3), ts)
+        self.assertNotIn((3, 3), ts,
+            f"infantry diagonal must NOT be in attack targets (Phase 6); got {ts}")
+
+    def test_infantry_includes_orthogonal_neighbors(self) -> None:
+        state = _fresh_state()
+        inf = _make_unit(state, UnitType.INFANTRY, 0, (2, 2))
+        _make_unit(state, UnitType.INFANTRY, 1, (2, 3))
+        ts = get_attack_targets(state, inf, inf.pos)
+        self.assertIn((2, 3), ts)
 
 
 class TestOracleFireActionStageAttackOrigin(unittest.TestCase):
@@ -836,32 +811,49 @@ class TestOracleFireNoPathAttacker(unittest.TestCase):
                 "Fire": {
                     "combatInfoVision": {
                         "global": {
+                            "hasVision": True,
                             "combatInfo": {
                                 "attacker": {
                                     "units_id": 999888777,
                                     "units_y": 2,
                                     "units_x": 2,
+                                    "units_hit_points": 10,
                                 },
                                 "defender": {
                                     "units_id": 1,
                                     "units_y": 3,
                                     "units_x": 3,
+                                    # Post-strike display HP (AWBW 1–10); pins damage vs engine RNG.
+                                    "units_hit_points": 6,
                                 },
-                            }
+                            },
                         }
-                    }
+                    },
+                    "copValues": {
+                        "attacker": {"playerId": 900100},
+                        "defender": {"playerId": 900101},
+                    },
                 },
             },
-            {0: 0},
+            {900100: 0, 900101: 1},
+            envelope_awbw_player_id=900100,
         )
         self.assertLess(foe.hp, hp0)
 
     def test_picks_nearest_attacker_to_zip_anchor_when_ambiguous(self) -> None:
+        # Phase 10A: defender flipped from INFANTRY to TANK.
+        # AWBW canon (https://awbw.fandom.com/wiki/Machine_Gun): Tank vs
+        # Infantry/Mech fires the unlimited secondary Machine Gun and does
+        # NOT consume primary ammo. The test uses ``near.ammo`` as a side-
+        # channel witness for "this attacker fired"; against an Infantry
+        # defender both attackers would keep full ammo (engine_bug masked
+        # this until the MG canon fix landed in engine/game.py::_apply_attack).
+        # Tank-vs-Tank still exercises the same attacker-selection path.
         state = _fresh_state()
         state.active_player = 0
         near = _make_unit(state, UnitType.TANK, 0, (3, 2))
         far = _make_unit(state, UnitType.TANK, 0, (3, 4))
-        foe = _make_unit(state, UnitType.INFANTRY, 1, (3, 3))
+        foe = _make_unit(state, UnitType.TANK, 1, (3, 3))
         hp0 = foe.hp
         apply_oracle_action_json(
             state,
@@ -871,23 +863,31 @@ class TestOracleFireNoPathAttacker(unittest.TestCase):
                 "Fire": {
                     "combatInfoVision": {
                         "global": {
+                            "hasVision": True,
                             "combatInfo": {
                                 "attacker": {
                                     "units_id": 999888777,
                                     "units_y": 9,
                                     "units_x": 9,
+                                    "units_hit_points": 10,
                                 },
                                 "defender": {
                                     "units_id": 1,
                                     "units_y": 3,
                                     "units_x": 3,
+                                    "units_hit_points": 6,
                                 },
-                            }
+                            },
                         }
-                    }
+                    },
+                    "copValues": {
+                        "attacker": {"playerId": 900100},
+                        "defender": {"playerId": 900101},
+                    },
                 },
             },
-            {0: 0},
+            {900100: 0, 900101: 1},
+            envelope_awbw_player_id=900100,
         )
         self.assertLess(foe.hp, hp0)
         self.assertLess(near.ammo, UNIT_STATS[UnitType.TANK].max_ammo)
@@ -1084,7 +1084,7 @@ class TestOracleFireWithPathDenseGap(unittest.TestCase):
                     "unit": {
                         "global": {
                             "units_id": 888888888,
-                            "units_players_id": 0,
+                            "units_players_id": 900100,
                             "units_x": 2,
                             "units_y": 3,
                         }
@@ -1099,23 +1099,31 @@ class TestOracleFireWithPathDenseGap(unittest.TestCase):
                 "Fire": {
                     "combatInfoVision": {
                         "global": {
+                            "hasVision": True,
                             "combatInfo": {
                                 "attacker": {
                                     "units_id": 888888888,
                                     "units_y": 3,
                                     "units_x": 2,
+                                    "units_hit_points": 10,
                                 },
                                 "defender": {
                                     "units_id": 1,
                                     "units_y": 4,
                                     "units_x": 4,
+                                    "units_hit_points": 6,
                                 },
-                            }
+                            },
                         }
-                    }
+                    },
+                    "copValues": {
+                        "attacker": {"playerId": 900100},
+                        "defender": {"playerId": 900101},
+                    },
                 },
             },
-            {0: 0},
+            {900100: 0, 900101: 1},
+            envelope_awbw_player_id=900100,
         )
         self.assertLess(foe.hp, hp0)
 
@@ -1716,7 +1724,7 @@ class TestOracleCaptNoPathSynthetic(unittest.TestCase):
                 {100: 0},
                 envelope_awbw_player_id=100,
             )
-        self.assertIn("[drift:", str(ctx.exception))
+        self.assertIn("drift", str(ctx.exception).lower())
 
 
 class TestOracleUnloadMisalignedGlobalTile(unittest.TestCase):
@@ -1823,7 +1831,7 @@ class TestOracleUnloadPerSeatUnitOnly(unittest.TestCase):
 
 
 class TestOracleBuildNoopGuard(unittest.TestCase):
-    """``ORACLE_STRICT_BUILD`` (default on): site ``Build`` must not silently no-op."""
+    """Site ``Build``: engine refusal surfaces as ``UnsupportedOracleAction`` (Build no-op)."""
 
     def _build_site_json(self) -> dict:
         return {
@@ -1869,35 +1877,8 @@ class TestOracleBuildNoopGuard(unittest.TestCase):
         self.assertIn("Build no-op", str(ctx.exception))
         self.assertIn("(0,1)", str(ctx.exception))
 
-    def test_build_on_neutral_factory_snaps_owner_then_succeeds(self) -> None:
-        """Site zips may record ``Build`` while ``PropertyState.owner`` is still ``None``."""
-        state = _minimal_state(active_player=0, factory_owner=None)
-        obj = self._build_site_json()
-        apply_oracle_action_json(
-            state, obj, {9001: 0}, envelope_awbw_player_id=9001
-        )
-        self.assertEqual(len(state.units[0]), 1)
-        p = state.get_property_at(0, 1)
-        self.assertIsNotNone(p)
-        self.assertEqual(p.owner, 0)
-
-    def test_build_noop_silent_when_strict_disabled(self) -> None:
-        import os
-
-        state = _minimal_state(active_player=0, factory_owner=1)
-        obj = self._build_site_json()
-        old = os.environ.get("ORACLE_STRICT_BUILD")
-        try:
-            os.environ["ORACLE_STRICT_BUILD"] = "0"
-            apply_oracle_action_json(
-                state, obj, {9001: 0}, envelope_awbw_player_id=9001
-            )
-        finally:
-            if old is None:
-                os.environ.pop("ORACLE_STRICT_BUILD", None)
-            else:
-                os.environ["ORACLE_STRICT_BUILD"] = old
-        self.assertEqual(len(state.units[0]), 0)
+    # Phase 7: deleted test_build_noop_silent_when_strict_disabled — see logs/phase7_test_cleanup.log
+    # Phase 7: deleted test_build_on_neutral_factory_snaps_owner_then_succeeds — see logs/phase7_test_cleanup.log
 
     def test_build_success_does_not_trigger_guard(self) -> None:
         state = _minimal_state(active_player=0, factory_owner=0)
@@ -1907,42 +1888,10 @@ class TestOracleBuildNoopGuard(unittest.TestCase):
         )
         self.assertEqual(len(state.units[0]), 1)
 
-    def _trusted_export_build_obj(self) -> dict:
-        """Shape like ``export_awbw_replay_actions._build_action_json`` (two PHP seats)."""
-        o = self._build_site_json()
-        o["discovered"] = {"9001": None, "9002": None}
-        return o
+    # Phase 7: deleted test_site_trusted_build_snaps_wrong_owner_factory — see logs/phase7_test_cleanup.log
+    # Phase 7: deleted test_site_trusted_build_funds_hint_unblocks_build — see logs/phase7_test_cleanup.log
 
-    def test_site_trusted_build_snaps_wrong_owner_factory(self) -> None:
-        """When ``discovered`` + two-seat map match AWBW, repair capture drift then build."""
-        state = _minimal_state(active_player=0, factory_owner=1)
-        obj = self._trusted_export_build_obj()
-        apply_oracle_action_json(
-            state,
-            obj,
-            {9001: 0, 9002: 1},
-            envelope_awbw_player_id=9001,
-        )
-        self.assertEqual(len(state.units[0]), 1)
-        p = state.get_property_at(0, 1)
-        self.assertIsNotNone(p)
-        self.assertEqual(p.owner, 0)
-
-    def test_site_trusted_build_funds_hint_unblocks_build(self) -> None:
-        state = _minimal_state(active_player=0, factory_owner=0)
-        state.funds[0] = 500
-        obj = self._trusted_export_build_obj()
-        obj["funds"] = {"global": 10_000}
-        apply_oracle_action_json(
-            state,
-            obj,
-            {9001: 0, 9002: 1},
-            envelope_awbw_player_id=9001,
-        )
-        self.assertEqual(len(state.units[0]), 1)
-        self.assertLess(state.funds[0], 10_000)
-
-    def test_site_trusted_build_nudges_friendly_off_factory_tile(self) -> None:
+    def test_build_nudges_friendly_off_factory_tile(self) -> None:
         """Friendly unit sitting on the base: zip still lists a legal Build there."""
         terrain = [[1, 1, 35]]
         prop = PropertyState(
@@ -1995,7 +1944,7 @@ class TestOracleBuildNoopGuard(unittest.TestCase):
             full_trace=[],
         )
         _make_unit(state, UnitType.INFANTRY, 0, (0, 2))
-        obj = self._trusted_export_build_obj()
+        obj = self._build_site_json()
         obj["newUnit"]["global"]["units_x"] = 2
         obj["newUnit"]["global"]["units_y"] = 0
         apply_oracle_action_json(

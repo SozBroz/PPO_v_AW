@@ -4,23 +4,18 @@ Canonical GL IDs in docstrings:
 
 * **1621898**, **1629921** — NeoTank vs B-Copter requires non-null ``get_base_damage``
   (``data/damage_table.json`` MG cells).
-* **1625784** — :func:`tools.oracle_zip_replay._oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor`.
 """
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 
-from engine.action import ActionStage
 from engine.combat import get_base_damage
 from engine.game import make_initial_state
 from engine.map_loader import load_map
 from engine.unit import UNIT_STATS, Unit, UnitType
 
-from tools.oracle_zip_replay import (
-    _oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor,
-    _oracle_move_med_tank_label_engine_tank_drift,
-)
+from tools.oracle_zip_replay import _oracle_move_med_tank_label_engine_tank_drift
 
 POOL = Path(__file__).resolve().parents[1] / "data" / "gl_map_pool.json"
 MAPS = Path(__file__).resolve().parents[1] / "data" / "maps"
@@ -42,58 +37,6 @@ class TestOracleFireLaneA(unittest.TestCase):
         # cannot lock fixed-wing aircraft).
         self.assertIsNone(get_base_damage(UnitType.INFANTRY, UnitType.FIGHTER))
         self.assertIsNone(get_base_damage(UnitType.MECH, UnitType.STEALTH))
-
-    def test_foot_snap_single_neighbor_gl1625784(self) -> None:
-        md = load_map(69201, POOL, MAPS)
-        s = make_initial_state(
-            md, 1, 10, tier_name="T2", starting_funds=0, replay_first_mover=0
-        )
-        s.units[0] = []
-        s.units[1] = []
-        ist = UNIT_STATS[UnitType.INFANTRY]
-        inf = Unit(
-            UnitType.INFANTRY,
-            0,
-            60,
-            ist.max_ammo,
-            ist.max_fuel,
-            (5, 9),
-            False,
-            [],
-            False,
-            60,
-            52001,
-        )
-        foe = Unit(
-            UnitType.INFANTRY,
-            1,
-            40,
-            ist.max_ammo,
-            ist.max_fuel,
-            (5, 11),
-            False,
-            [],
-            False,
-            40,
-            52002,
-        )
-        s.units[0].append(inf)
-        s.units[1].append(foe)
-        s.active_player = 0
-        s.action_stage = ActionStage.SELECT
-        self.assertTrue(
-            _oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor(
-                s,
-                eng=0,
-                awbw_units_id=999999,
-                anchor_r=5,
-                anchor_c=10,
-                target_r=5,
-                target_c=11,
-                hp_hint=None,
-            )
-        )
-        self.assertEqual(s.get_unit_at(5, 10), inf)
 
     def test_move_med_tank_label_engine_tank_drift_gl1607045(self) -> None:
         """1607045: zip ``Md.Tank`` + PHP id while engine holds ``TANK`` (no ``MED_TANK``)."""

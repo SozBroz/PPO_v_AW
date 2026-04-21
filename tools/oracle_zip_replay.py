@@ -44,14 +44,6 @@ If the zip switches to another unit while a transport is still in ``ACTION``
 PHP snapshot loading reuses ``tools.diff_replay_zips.load_replay`` (first zip
 member = gzipped turn lines). ``parse_p_envelopes_from_zip`` returns no envelopes
 when the zip has no ``a<game_id>`` action gzip (ReplayVersion 1 snapshot-only).
-
-Set ``ORACLE_STRICT_BUILD=0`` to allow silent ``Build`` no-ops when the engine
-rejects ``ActionType.BUILD`` (default: strict — raises ``UnsupportedOracleAction``).
-When a Build line includes AWBW-shaped ``discovered`` for **both** PHP seats,
-``envelope_awbw_player_id`` matches ``units_players_id``, and ``awbw_to_engine``
-has two entries, the oracle may **repair** wrong factory ownership, apply
-``funds.global`` as a lower-bound hint, or nudge a friendly unmoved occupier
-off the tile before issuing ``BUILD`` (site-trusted replay only).
 """
 from __future__ import annotations
 
@@ -88,11 +80,25 @@ class UnsupportedOracleAction(ValueError):
     pass
 
 
+class OracleFireSeamNoAttackerCandidate(UnsupportedOracleAction):
+    """Exhaustive :func:`_resolve_fire_or_seam_attacker` search found no striker.
+
+    Narrower than :class:`UnsupportedOracleAction` so call sites can retry the
+    opposite ``engine_player`` without catching Lane I pin / upstream-drift errors.
+    """
+
 
 def _engine_step(state: GameState, act: Action, hook: EngineStepHook) -> None:
+    # STEP-GATE opt-out: every oracle replay action is reconstructed from an
+    # AWBW zip envelope, not from ``get_legal_actions``. Many envelopes are
+    # legitimately outside the mask (capture-timer convergence, drift snaps,
+    # multi-action terminators, etc.). The legality gate inside
+    # ``GameState.step`` (see ``IllegalActionError``) is therefore bypassed
+    # here — and only here — by passing ``oracle_mode=True``. Phase 3 plan:
+    # ``.cursor/plans/desync_purge_engine_harden_d85bd82c.plan.md`` STEP-GATE.
     if hook is not None:
         hook(state, act)
-    state.step(act)
+    state.step(act, oracle_mode=True)
 
 
 def _oracle_fire_stance_would_stack_on_transport(
@@ -140,9 +146,14 @@ def _oracle_resolve_fire_move_pos(
 
     - **Indirect** (Artillery / Rockets / Missiles): AWBW cannot move and fire the
       same turn — only :func:`get_attack_targets` from ``unit.pos`` is valid.
-    - **Direct**: Snap the JSON path tail with :func:`_nearest_reachable_along_path`
-      (same as :func:`_apply_move_paths_then_terminator`), then prefer a reachable
-      tile that can strike ``target``, else tiles near the snapped end.
+    - **Direct**: Prefer waypoints along ``paths.global`` from the path tail toward
+      the start that are both reachable and can strike ``target`` (Phase 8 Bucket A:
+      the first reachable waypoint along the reversed path can be one step short of
+      the ZIP tail when the tail hex is blocked in-engine, and that penultimate tile
+      may not be a valid direct-fire stance — GL **1618770**). Then snap with
+      :func:`_nearest_reachable_along_path` like :func:`_apply_move_paths_then_terminator`,
+      rank all reachable strike tiles, and never use the snapped end as ``move_pos``
+      when it cannot hit ``target`` (avoids a misleading ``_apply_attack`` range error).
     """
     tr, tc = target
     start = unit.pos
@@ -159,7 +170,6 @@ def _oracle_resolve_fire_move_pos(
         return start
 
     costs = compute_reachable_costs(state, unit)
-    er, ec = _nearest_reachable_along_path(paths, costs, path_end, start)
 
     def attacks_from(pos: tuple[int, int]) -> bool:
         if pos not in costs:
@@ -167,6 +177,18 @@ def _oracle_resolve_fire_move_pos(
         if _oracle_fire_stance_would_stack_on_transport(state, unit, pos):
             return False
         return (tr, tc) in get_attack_targets(state, unit, pos)
+
+    wps: list[tuple[int, int]] = []
+    for wp in paths:
+        try:
+            wps.append((int(wp["y"]), int(wp["x"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    for pos in reversed(wps):
+        if attacks_from(pos):
+            return pos
+
+    er, ec = _nearest_reachable_along_path(paths, costs, path_end, start)
 
     if attacks_from((er, ec)):
         return (er, ec)
@@ -181,7 +203,8 @@ def _oracle_resolve_fire_move_pos(
     # (wrong attacker resolution or drift). Keep snapped end so ``ATTACK`` still
     # raises ``ValueError`` / engine_bug — easier to cluster than a new oracle string.
     if not _oracle_fire_stance_would_stack_on_transport(state, unit, (er, ec)):
-        return (er, ec)
+        if (tr, tc) in get_attack_targets(state, unit, (er, ec)):
+            return (er, ec)
     for pos in (path_end, start):
         if attacks_from(pos):
             return pos
@@ -294,10 +317,14 @@ def _oracle_ensure_envelope_seat(
     """
     try:
         pid = int(envelope_awbw_player_id)
-    except (TypeError, ValueError):
-        return
+    except (TypeError, ValueError) as e:
+        raise UnsupportedOracleAction(
+            f"envelope seat: bad p: player id not int-convertible: {envelope_awbw_player_id!r}"
+        ) from e
     if pid not in awbw_to_engine:
-        return
+        raise UnsupportedOracleAction(
+            f"envelope seat: unmapped p: player id {pid} (awbw_to_engine keys={sorted(awbw_to_engine)!r})"
+        )
     want = int(awbw_to_engine[pid])
     if int(state.active_player) == want:
         return
@@ -710,613 +737,6 @@ def _oracle_diagnose_build_refusal(
     return "unknown (checks passed — investigate _apply_build vs oracle)"
 
 
-def _oracle_assign_production_property_owner(
-    state: GameState, r: int, c: int, eng: int
-) -> None:
-    """Set ``PropertyState.owner`` on a production tile to ``eng`` and sync terrain / comms."""
-    from engine.terrain import property_terrain_id_after_owner_change
-
-    prop = state.get_property_at(r, c)
-    if prop is None:
-        return
-    prop.owner = int(eng)
-    prop.capture_points = 20
-    old_tid = state.map_data.terrain[r][c]
-    new_tid = property_terrain_id_after_owner_change(
-        old_tid, int(eng), state.map_data.country_to_player
-    )
-    if new_tid is not None:
-        state.map_data.terrain[r][c] = new_tid
-        prop.terrain_id = new_tid
-    if prop.is_comm_tower:
-        state._refresh_comm_towers()
-
-
-def _oracle_snap_neutral_production_owner_for_build(
-    state: GameState,
-    r: int,
-    c: int,
-    eng: int,
-    ut: UnitType,
-) -> bool:
-    """Assign ``prop.owner`` when the site emits ``Build`` on a neutral factory tile.
-
-    ``PropertyState.owner`` can stay ``None`` on neutral base/air/port terrain while
-    AWBW already treats the tile as the builder's production (register: Build no-op
-    with ``property_owner=None``).
-    """
-    from engine.action import _build_cost, get_producible_units
-    from engine.terrain import get_terrain
-
-    prop = state.get_property_at(r, c)
-    if prop is None or prop.owner is not None:
-        return False
-    tid = state.map_data.terrain[r][c]
-    terrain = get_terrain(tid)
-    if not (terrain.is_base or terrain.is_airport or terrain.is_port):
-        return False
-    if state.get_unit_at(r, c) is not None:
-        return False
-    cost = _build_cost(ut, state, eng, (r, c))
-    if int(state.funds[eng]) < cost:
-        return False
-    if ut not in get_producible_units(terrain, state.map_data.unit_bans):
-        return False
-    _oracle_assign_production_property_owner(state, r, c, eng)
-    return True
-
-
-def _oracle_build_discovered_matches_awbw_player_map(
-    obj: dict[str, Any], awbw_to_engine: dict[int, int]
-) -> bool:
-    """``discovered`` dict keys must match every PHP ``players.id`` in ``awbw_to_engine``."""
-    d = obj.get("discovered")
-    if not isinstance(d, dict) or not d:
-        return False
-    want = {str(int(k)) for k in awbw_to_engine.keys()}
-    got = {str(k) for k in d.keys()}
-    if want != got:
-        return False
-    return all(v is None for v in d.values())
-
-
-def _oracle_site_trusted_build_envelope(
-    obj: dict[str, Any],
-    awbw_to_engine: dict[int, int],
-    envelope_awbw_player_id: Optional[int],
-    pid: int,
-) -> bool:
-    """AWBW export markers for a Build line we may repair (ownership / funds / blockers)."""
-    if envelope_awbw_player_id is None:
-        return False
-    if int(envelope_awbw_player_id) != int(pid):
-        return False
-    if len(awbw_to_engine) < 2:
-        return False
-    return _oracle_build_discovered_matches_awbw_player_map(obj, awbw_to_engine)
-
-
-def _oracle_optional_apply_build_funds_hint(
-    state: GameState, obj: dict[str, Any], eng: int, *, min_funds: int
-) -> None:
-    """Bump ``state.funds[eng]`` from optional ``funds.global`` when engine is short."""
-    raw = obj.get("funds")
-    if not isinstance(raw, dict):
-        return
-    v = raw.get("global")
-    if v is None:
-        return
-    try:
-        want = int(v)
-    except (TypeError, ValueError):
-        return
-    cur = int(state.funds[eng])
-    if want >= int(min_funds) and want > cur:
-        state.funds[eng] = want
-
-
-def _oracle_snap_wrong_owner_production_for_trusted_site_build(
-    state: GameState,
-    r: int,
-    c: int,
-    eng: int,
-    ut: UnitType,
-) -> bool:
-    """Force property owner to the builder when AWBW already recorded a legal Build."""
-    from engine.action import _build_cost, get_producible_units
-    from engine.terrain import get_terrain
-
-    prop = state.get_property_at(r, c)
-    if prop is None or prop.owner is None:
-        return False
-    if int(prop.owner) == int(eng):
-        return False
-    if int(prop.owner) not in (0, 1) or int(eng) not in (0, 1):
-        return False
-    tid = state.map_data.terrain[r][c]
-    terrain = get_terrain(tid)
-    if not (terrain.is_base or terrain.is_airport or terrain.is_port):
-        return False
-    if state.get_unit_at(r, c) is not None:
-        return False
-    cost = _build_cost(ut, state, eng, (r, c))
-    if int(state.funds[eng]) < cost:
-        return False
-    if ut not in get_producible_units(terrain, state.map_data.unit_bans):
-        return False
-    _oracle_assign_production_property_owner(state, r, c, eng)
-    return True
-
-
-def _oracle_drift_spawn_unloaded_cargo(
-    state: GameState,
-    eng: int,
-    cargo_ut: UnitType,
-    target: tuple[int, int],
-    cargo_global: dict[str, Any],
-    cargo_awbw_units_id: Optional[int],
-) -> bool:
-    """Reconcile an AWBW ``Unload`` when the engine has lost track of the carrier/cargo.
-
-    This is the *drift recovery path* for :func:`_resolve_unload_transport` and
-    the post-transport-found "no UNLOAD legal" branch in the ``Unload``
-    handler. AWBW says cargo ``cargo_ut`` is dropped at ``target`` from a
-    carrier the engine cannot reconcile (engine missed an earlier ``Load``,
-    the carrier ended on a different tile than AWBW, the carrier never moved,
-    etc.). We try the cheapest reconciliation that keeps the engine state
-    aligned with AWBW so subsequent envelopes still apply.
-
-    Sub-cases (in priority order):
-
-    A. **Cargo already on map by AWBW id** — same unit kept on map (engine
-       missed the ``Load``). Relocate it to ``target`` (if passable + free)
-       and mark ``moved=True``.
-    B. **Target tile already holds a friendly cargo-type unit** — engine
-       previously placed a unit there that AWBW now treats as unloaded.
-       Mark it ``moved=True`` and succeed silently.
-    C. **Target tile holds a friendly carrier** that can carry this cargo
-       (e.g. Black Boat on a shoal AWBW counts as the drop tile). Teleport
-       the carrier to a free, terrain-legal orth-adjacent tile, then spawn
-       the cargo on ``target``.
-    D. **Empty target + adjacent friendly carrier** that can load this
-       ``cargo_ut`` (original behaviour: `get_loadable_into`).
-    E. **Empty target + carrier farther away** (within Manhattan ≤ 8) that
-       can load ``cargo_ut``: teleport the carrier to a free terrain-legal
-       orth-adjacent tile, then spawn the cargo on ``target``.
-
-    Returns ``True`` on a successful reconciliation (caller skips the normal
-    Unload commit). Returns ``False`` to let the caller re-raise the
-    original resolver exception (drift too deep for safe recovery).
-    """
-    from engine.weather import effective_move_cost
-    from engine.terrain import INF_PASSABLE
-
-    h, w = state.map_data.height, state.map_data.width
-    tr, tc = int(target[0]), int(target[1])
-    if not (0 <= tr < h and 0 <= tc < w):
-        return False
-
-    cargo_stats = UNIT_STATS[cargo_ut]
-
-    def _passable_for(unit_type: UnitType, player: int, r: int, c: int) -> bool:
-        proxy = Unit(
-            unit_type=unit_type,
-            player=player,
-            hp=100,
-            ammo=UNIT_STATS[unit_type].max_ammo,
-            fuel=UNIT_STATS[unit_type].max_fuel,
-            pos=(r, c),
-            moved=True,
-            loaded_units=[],
-            is_submerged=False,
-            capture_progress=20,
-            unit_id=0,
-        )
-        tid = state.map_data.terrain[r][c]
-        return effective_move_cost(state, proxy, tid) < INF_PASSABLE
-
-    # (A) Cargo already on the map: relocate it.
-    if cargo_awbw_units_id is not None:
-        existing = _unit_by_awbw_units_id(state, int(cargo_awbw_units_id))
-        if existing is not None and int(existing.player) == int(eng):
-            if existing.unit_type == cargo_ut:
-                if existing.pos == (tr, tc):
-                    existing.moved = True
-                    return True
-                if (
-                    state.get_unit_at(tr, tc) is None
-                    and _passable_for(cargo_ut, eng, tr, tc)
-                ):
-                    existing.pos = (tr, tc)
-                    existing.moved = True
-                    return True
-
-    occupant = state.get_unit_at(tr, tc)
-
-    # (B) Friendly cargo-type unit already sits on the drop tile.
-    if (
-        occupant is not None
-        and int(occupant.player) == int(eng)
-        and occupant.unit_type == cargo_ut
-    ):
-        occupant.moved = True
-        return True
-
-    # (B') Enemy occupant on the drop tile — AWBW would never Unload onto an
-    # enemy-held tile, so the engine must hold a stale ghost AWBW already
-    # killed (combat drift the engine missed). Zero its HP so the tile is
-    # free for the drift spawn to land.
-    if occupant is not None and int(occupant.player) != int(eng):
-        occupant.hp = 0
-        occupant = None
-
-    # (C) Friendly carrier sitting on the drop tile (e.g. BB on shoal target).
-    if (
-        occupant is not None
-        and int(occupant.player) == int(eng)
-        and UNIT_STATS[occupant.unit_type].carry_capacity > 0
-        and cargo_ut in get_loadable_into(occupant.unit_type)
-    ):
-        # Teleport the carrier to any free, terrain-legal orth-adjacent tile.
-        teleport_to: Optional[tuple[int, int]] = None
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nr, nc = tr + dr, tc + dc
-            if not (0 <= nr < h and 0 <= nc < w):
-                continue
-            if state.get_unit_at(nr, nc) is not None:
-                continue
-            if not _passable_for(occupant.unit_type, eng, nr, nc):
-                continue
-            teleport_to = (nr, nc)
-            break
-        if teleport_to is None:
-            return False
-        occupant.pos = teleport_to
-        occupant.moved = True
-        # Target tile is now empty; fall through to spawn.
-        occupant = None
-
-    if occupant is not None:
-        return False
-
-    if not _passable_for(cargo_ut, eng, tr, tc):
-        return False
-
-    # (D) Adjacent friendly carrier already in place.
-    has_orth_carrier = False
-    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        nr, nc = tr + dr, tc + dc
-        if not (0 <= nr < h and 0 <= nc < w):
-            continue
-        adj = state.get_unit_at(nr, nc)
-        if adj is None or int(adj.player) != int(eng):
-            continue
-        adj_stats = UNIT_STATS[adj.unit_type]
-        if adj_stats.carry_capacity <= 0:
-            continue
-        if cargo_ut not in get_loadable_into(adj.unit_type):
-            continue
-        has_orth_carrier = True
-        break
-
-    # (E) Carrier farther away — spawn cargo without relocating the carrier.
-    # Teleporting the carrier into target adjacency was unsafe: the engine's
-    # ``Move`` resolver scans position-anchored fallbacks (path start / global
-    # tile) for the carrier on subsequent envelopes and breaks if we have moved
-    # it to a tile AWBW never used. Keep the carrier where it is and leave the
-    # cargo as a drift unit on ``target`` so AWBW timing is preserved.
-    if not has_orth_carrier:
-        carrier_in_range: Optional[Unit] = None
-        for u in state.units[eng]:
-            if not u.is_alive:
-                continue
-            if UNIT_STATS[u.unit_type].carry_capacity == 0:
-                continue
-            if cargo_ut not in get_loadable_into(u.unit_type):
-                continue
-            d = abs(u.pos[0] - tr) + abs(u.pos[1] - tc)
-            if d > 8:
-                continue
-            carrier_in_range = u
-            break
-        if carrier_in_range is None:
-            return False
-
-    # Spawn the cargo on the drop tile (drift unit; ``moved=True`` so the AWBW
-    # turn budget is respected).
-    proxy_cargo = Unit(
-        unit_type=cargo_ut,
-        player=eng,
-        hp=100,
-        ammo=cargo_stats.max_ammo if cargo_stats.max_ammo > 0 else 0,
-        fuel=cargo_stats.max_fuel,
-        pos=(tr, tc),
-        moved=True,
-        loaded_units=[],
-        is_submerged=False,
-        capture_progress=20,
-        unit_id=state._allocate_unit_id(),
-    )
-    if isinstance(cargo_global, dict):
-        try:
-            proxy_cargo.fuel = int(cargo_global.get("units_fuel", proxy_cargo.fuel))
-        except (TypeError, ValueError):
-            pass
-        try:
-            proxy_cargo.ammo = int(cargo_global.get("units_ammo", proxy_cargo.ammo))
-        except (TypeError, ValueError):
-            pass
-        try:
-            php_hp_internal = int(cargo_global.get("units_hit_points", 10)) * 10
-            proxy_cargo.hp = max(1, min(100, php_hp_internal))
-        except (TypeError, ValueError):
-            pass
-    state.units[eng].append(proxy_cargo)
-    return True
-
-
-def _oracle_drift_spawn_mover_from_global(
-    state: GameState,
-    eng: int,
-    gu: dict[str, Any],
-    declared_mover_type: Optional["UnitType"],
-    sr: int,
-    sc: int,
-    er: int,
-    ec: int,
-) -> Optional[Unit]:
-    """Last-resort drift spawn: instantiate the missing mover at path-start.
-
-    Sister of :func:`_oracle_drift_spawn_unloaded_cargo`. Triggered by
-    :func:`_apply_move_paths_then_terminator` when AWBW emits a
-    ``Move`` / ``Load`` / ``Join`` / ``Supply`` etc. with a clearly identified
-    unit (``unit.global.units_id``) and the engine has fully lost it (deep
-    state drift downstream of an earlier missed Fire / Move / damage roll).
-    AWBW remains the ground truth for unit presence; spawning a drift mover
-    keeps the rest of the action stream applicable instead of bailing here
-    and forfeiting the remaining envelopes.
-
-    Strict guards (decline → caller re-raises ``Move: no unit``):
-
-    1. ``declared_mover_type`` must be resolved (unit name in PHP global).
-    2. Path-start ``(sr, sc)`` in bounds. **Friendly** at path-start declines
-       (could be a legitimate same-tile presence earlier resolvers missed;
-       overwriting would mask a real bug). **Enemy** at path-start is treated
-       as a ghost AWBW already cleared and zeroed so the spawn can land.
-    3. Terrain at path-start passable for the unit type
-       (``effective_move_cost``) so the engine accepts the SELECT_UNIT.
-    4. Path-end may hold an **enemy ghost** AWBW already cleared — zero
-       its HP so the engine path-walker does not refuse the move. Friendly
-       at path-end is left alone (could be a Join / Load partner).
-
-    Spawned units take the AWBW ``units_id`` as ``unit_id`` so subsequent
-    envelopes that look the unit up by AWBW id (``_unit_by_awbw_units_id``)
-    still find it. Engine's monotonic ``_allocate_unit_id`` starts at 1 and
-    never reaches AWBW PHP id magnitudes (~10^8), so no collision.
-
-    PHP ``units_fuel`` / ``units_ammo`` reflect *post-move* state and would
-    leave the spawn unable to execute the move it was just spawned for; we
-    use ``UNIT_STATS`` maxes instead. ``units_hit_points`` is honoured when
-    sane (1..10 display).
-    """
-    if declared_mover_type is None:
-        return None
-    h, w = state.map_data.height, state.map_data.width
-    if not (0 <= sr < h and 0 <= sc < w):
-        return None
-
-    from engine.weather import effective_move_cost
-    from engine.terrain import INF_PASSABLE
-
-    stats = UNIT_STATS[declared_mover_type]
-
-    # Path-start may hold an enemy ghost AWBW already cleared (drift). Zero
-    # its HP so the spawn lands. A friendly transport that can carry the
-    # declared mover, with an empty terrain-legal path-end — most likely a
-    # ``Load`` envelope where AWBW has the carrier at path-end and the cargo
-    # at path-start, but engine drift left both consolidated on path-start.
-    # Teleport the carrier to path-end so the path-start tile frees up for
-    # the cargo spawn (game 1632702: T-Copter at engine (3,3), AWBW says
-    # T-Copter at (4,3) and Mech at (3,3) loading into it). Other friendly
-    # occupants decline — could be a legit unit the resolver chain missed.
-    start_occ = state.get_unit_at(sr, sc)
-    if start_occ is not None:
-        if int(start_occ.player) != int(eng):
-            start_occ.hp = 0
-        else:
-            teleported = False
-            if (
-                (sr, sc) != (er, ec)
-                and 0 <= er < h
-                and 0 <= ec < w
-                and state.get_unit_at(er, ec) is None
-                and UNIT_STATS[start_occ.unit_type].carry_capacity > 0
-                and declared_mover_type
-                in get_loadable_into(start_occ.unit_type)
-                and effective_move_cost(
-                    state, start_occ, state.map_data.terrain[er][ec]
-                )
-                < INF_PASSABLE
-            ):
-                start_occ.pos = (er, ec)
-                start_occ.moved = True
-                teleported = True
-            if not teleported:
-                return None
-
-    probe = Unit(
-        unit_type=declared_mover_type,
-        player=eng,
-        hp=100,
-        ammo=stats.max_ammo,
-        fuel=stats.max_fuel,
-        pos=(sr, sc),
-        moved=False,
-        loaded_units=[],
-        is_submerged=False,
-        capture_progress=20,
-        unit_id=0,
-    )
-    if effective_move_cost(state, probe, state.map_data.terrain[sr][sc]) >= INF_PASSABLE:
-        return None
-
-    # Clear an enemy ghost on path-end so the move terminates legally. Friendly
-    # at path-end may be a Join / Load partner — leave it alone.
-    if 0 <= er < h and 0 <= ec < w and (er, ec) != (sr, sc):
-        end_occ = state.get_unit_at(er, ec)
-        if end_occ is not None and int(end_occ.player) != int(eng):
-            end_occ.hp = 0
-
-    php_hp_internal = 100
-    raw_hp = gu.get("units_hit_points")
-    if raw_hp is not None:
-        try:
-            v = int(raw_hp) * 10
-            if 1 <= v <= 100:
-                php_hp_internal = v
-        except (TypeError, ValueError):
-            pass
-
-    awbw_uid: Optional[int] = None
-    raw_uid = gu.get("units_id")
-    if raw_uid is not None:
-        try:
-            awbw_uid = int(raw_uid)
-        except (TypeError, ValueError):
-            awbw_uid = None
-    new_uid = awbw_uid if awbw_uid is not None else state._allocate_unit_id()
-
-    spawned = Unit(
-        unit_type=declared_mover_type,
-        player=eng,
-        hp=php_hp_internal,
-        ammo=stats.max_ammo,
-        fuel=stats.max_fuel,
-        pos=(sr, sc),
-        moved=False,
-        loaded_units=[],
-        is_submerged=False,
-        capture_progress=20,
-        unit_id=new_uid,
-    )
-    state.units[eng].append(spawned)
-    return spawned
-
-
-def _oracle_drift_spawn_capturer_for_property(
-    state: GameState,
-    ap: int,
-    er: int,
-    ec: int,
-) -> Optional[Unit]:
-    """Spawn a default Infantry on a property tile to absorb a no-capturer ``Capt``.
-
-    Used by the ``Capt`` no-path branch when no engine capturer exists at all
-    on (or near) the property tile — deep state drift downstream of upstream
-    Fire / Move losses. AWBW's ground truth says capture progressed; spawning
-    Infantry on the property lets the standard CAPTURE step run so subsequent
-    envelopes (income, capture completion, follow-on actions) stay aligned.
-
-    Strict guards (decline → caller raises geom / missing-capturer):
-
-    1. Property tile in bounds.
-    2. Tile **empty** in engine — never overwrite an existing unit.
-    3. Terrain Infantry-passable (``effective_move_cost``); guards the few
-       odd ``is_property`` terrains where Infantry cannot stand.
-
-    Default is Infantry (most common capturer; same capture rate as Mech for
-    a given display HP). Spawned at full HP so the engine reduces capture
-    clock by 10 in the resulting CAPTURE step.
-    """
-    h, w = state.map_data.height, state.map_data.width
-    if not (0 <= er < h and 0 <= ec < w):
-        return None
-    if state.get_unit_at(er, ec) is not None:
-        return None
-    from engine.weather import effective_move_cost
-    from engine.terrain import INF_PASSABLE
-
-    stats = UNIT_STATS[UnitType.INFANTRY]
-    probe = Unit(
-        unit_type=UnitType.INFANTRY,
-        player=ap,
-        hp=100,
-        ammo=stats.max_ammo,
-        fuel=stats.max_fuel,
-        pos=(er, ec),
-        moved=False,
-        loaded_units=[],
-        is_submerged=False,
-        capture_progress=20,
-        unit_id=0,
-    )
-    if effective_move_cost(state, probe, state.map_data.terrain[er][ec]) >= INF_PASSABLE:
-        return None
-    spawned = Unit(
-        unit_type=UnitType.INFANTRY,
-        player=ap,
-        hp=100,
-        ammo=stats.max_ammo,
-        fuel=stats.max_fuel,
-        pos=(er, ec),
-        moved=False,
-        loaded_units=[],
-        is_submerged=False,
-        capture_progress=20,
-        unit_id=state._allocate_unit_id(),
-    )
-    state.units[ap].append(spawned)
-    return spawned
-
-
-def _oracle_drift_teleport_blocker_off_build_tile(
-    state: GameState,
-    r: int,
-    c: int,
-    before_engine_step: EngineStepHook,
-) -> bool:
-    """Last-resort drift recovery: relocate the unit at ``(r,c)`` so a Build can land.
-
-    Used when AWBW emits ``Build`` at a tile the engine still has occupied
-    (friendly *or* enemy) and normal nudge cannot move the unit (genuinely
-    trapped friendly, or enemy ghost AWBW already destroyed). Because the
-    tile is AWBW's ground truth for the new factory product, the occupier is
-    drift we cannot reconcile by replay.
-
-    Strategy (least-invasive first):
-
-    1. Teleport to any empty 8-neighbour cell whose terrain the unit can
-       legally enter under current weather (uses ``effective_move_cost``).
-    2. If no legal-terrain cell exists, mark the unit dead (drift ghost).
-    """
-    from engine.weather import effective_move_cost
-    from engine.terrain import INF_PASSABLE
-
-    u = state.get_unit_at(r, c)
-    if u is None:
-        return True
-    h, w = state.map_data.height, state.map_data.width
-    for dr, dc in (
-        (-1, 0), (1, 0), (0, -1), (0, 1),
-        (-1, -1), (-1, 1), (1, -1), (1, 1),
-    ):
-        nr, nc = r + dr, c + dc
-        if not (0 <= nr < h and 0 <= nc < w):
-            continue
-        if state.get_unit_at(nr, nc) is not None:
-            continue
-        tid = state.map_data.terrain[nr][nc]
-        if effective_move_cost(state, u, tid) >= INF_PASSABLE:
-            continue
-        u.pos = (nr, nc)
-        u.moved = True
-        return True
-    # No legal-terrain neighbour: kill the ghost so the Build can land.
-    # ``Unit.is_alive`` is a derived property of ``hp``, so zeroing HP suffices.
-    u.hp = 0
-    return True
-
-
 def _oracle_nudge_eng_occupier_off_production_build_tile(
     state: GameState,
     r: int,
@@ -1324,25 +744,10 @@ def _oracle_nudge_eng_occupier_off_production_build_tile(
     eng: int,
     before_engine_step: EngineStepHook,
 ) -> bool:
-    """Move a friendly blocker off the factory tile so an AWBW Build can land.
+    """Move a friendly unmoved blocker off the factory tile (legal orth step + WAIT).
 
-    Two cases:
-
-    1. **Unmoved blocker** — step it normally to a free orth neighbour
-       (``SELECT_UNIT`` → MOVE → ``WAIT`` / ``DIVE_HIDE``).
-    2. **Already-moved blocker** (engine drift) — AWBW must have moved this
-       unit elsewhere this turn but the engine missed the move (or killed the
-       wrong unit in a prior strike). Teleport it to a free orth neighbour
-       in-place, preserving ``moved=True`` so it cannot act again. This is
-       the *only* honest way to keep the Build envelope landing without
-       fabricating a bogus move that re-touches the unit. Skip if no orth
-       neighbour is free / on-map (the Build then fails loud — drift too
-       deep for cosmetic correction).
-
-    If the unmoved blocker is **trapped** (no reachable orth neighbour, e.g.
-    Tank surrounded by enemies + impassable mountain + map edge), fall through
-    to :func:`_oracle_drift_teleport_blocker_off_build_tile` — AWBW must have
-    moved or killed this unit this turn for the Build to be legal.
+    If the blocker already moved or is trapped (no reachable orth neighbour),
+    return ``False`` so the Build handler surfaces drift instead of teleporting.
     """
     if int(state.active_player) != eng:
         return False
@@ -1354,17 +759,6 @@ def _oracle_nudge_eng_occupier_off_production_build_tile(
     h, w = state.map_data.height, state.map_data.width
 
     if u.moved:
-        # Drift relocate: pick the first on-map empty orth neighbour. No
-        # reachability check (unit is "spent" anyway, and AWBW has it
-        # somewhere we can't reconstruct).
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < h and 0 <= nc < w):
-                continue
-            if state.get_unit_at(nr, nc) is not None:
-                continue
-            u.pos = (nr, nc)
-            return True
         return False
 
     reach = compute_reachable_costs(state, u)
@@ -1413,10 +807,7 @@ def _oracle_nudge_eng_occupier_off_production_build_tile(
             return False
         _engine_step(state, chosen, before_engine_step)
         return True
-    # Unmoved but truly trapped (e.g. surrounded + impassable). Treat as drift.
-    return _oracle_drift_teleport_blocker_off_build_tile(
-        state, r, c, before_engine_step
-    )
+    return False
 
 
 def _oracle_capt_no_path_commit_pending_move(
@@ -1720,6 +1111,39 @@ def _oracle_fire_combat_info_merged(
     return out
 
 
+def _oracle_assert_fire_damage_table_compatible(
+    state: GameState,
+    attacker: Unit,
+    defender_pos: tuple[int, int],
+) -> None:
+    """Phase 11J P-DRIFT-DEFENDER: refuse Fire when resolver picked a defender
+    the attacker has no entry for in the engine damage table.
+
+    AWBW combat involving a unit not present on the engine board causes
+    ``_oracle_fire_resolve_defender_target_pos`` to fall back to a Chebyshev-1
+    ring search and pick the *nearest* engine foe — sometimes a type the
+    attacker fundamentally cannot damage (FIGHTER vs TANK in GL 1631494,
+    ``base_damage = None``). If we let that pass, the override-bypass in
+    ``_apply_attack`` would happily apply damage derived from a different
+    AWBW unit's HP delta to the wrong engine unit. Instead we raise so the
+    audit reclassifies this row from ``engine_bug`` to ``oracle_gap`` —
+    the truthful bucket for "oracle cannot map this strike onto its current
+    engine snapshot".
+    """
+    from engine.combat import get_base_damage
+
+    defender = state.get_unit_at(*defender_pos)
+    if defender is None or not defender.is_alive:
+        return
+    if get_base_damage(attacker.unit_type, defender.unit_type) is None:
+        raise UnsupportedOracleAction(
+            f"Fire: oracle resolved defender type {defender.unit_type.name} "
+            f"at {defender_pos} but {attacker.unit_type.name} has no damage "
+            f"entry against it (AWBW combatInfo refers to a unit not present "
+            f"on the engine board; resolver-miss fallback)"
+        )
+
+
 def _oracle_set_combat_damage_override_from_combat_info(
     state: GameState,
     fire_blk: dict[str, Any],
@@ -1739,8 +1163,8 @@ def _oracle_set_combat_damage_override_from_combat_info(
 
     Without this snap, every audit run produced a different first-divergence on
     the same game (combat luck cascaded into the ``Capt`` / ``Move`` / ``Fire``
-    "no unit" drift cluster within ~3 turns). Skip silently when AWBW HPs are
-    missing or non-numeric — the engine then rolls as before. Seam attacks
+    "no unit" drift cluster within ~3 turns). When AWBW HPs are missing or
+    non-numeric, raise — do not fall back to engine RNG. Seam attacks
     (no defender unit) are not affected: this helper is only wired into the
     ``Fire`` paths.
     """
@@ -1769,12 +1193,10 @@ def _oracle_set_combat_damage_override_from_combat_info(
         counter = max(0, int(attacker.hp) - awbw_att_hp)
 
     if dmg is None and counter is None:
-        # Even if we have no override to set (no AWBW HP for either side) we
-        # still want to remember that AWBW reported the defender as dead, so
-        # later duplicate ``hp=0`` rows for the same id are recognised as
-        # post-kill no-ops in the orphan-tile check.
-        _oracle_record_defender_killed(state, def_ci if isinstance(def_ci, dict) else {})
-        return
+        raise UnsupportedOracleAction(
+            "Fire: combatInfo missing numeric attacker/defender units_hit_points; "
+            "cannot pin damage/counter to AWBW (oracle would fall back to engine RNG)"
+        )
     state._oracle_combat_damage_override = (dmg, counter)
     _oracle_record_defender_killed(state, def_ci if isinstance(def_ci, dict) else {})
 
@@ -2358,8 +1780,7 @@ def _oracle_fallback_repair_boat_and_ally(
             # ``None`` and broke ``Repair`` resolution. Deterministic (boat_id, ally_id) tie
             # break matches AWBW's stable id ordering in practice for this class of ties.
             chosen = min(tops, key=lambda t: (int(t[1].unit_id), int(t[2].unit_id)))
-        # Black Boats cover long sea legs; move-drift can leave the ally several tiles off
-        # until :func:`_oracle_snap_black_boat_toward_repair_ally` (reg. 1634889).
+        # Black Boats cover long sea legs; long-range drift vs AWBW is surfaced, not forced.
         if best_d <= 12:
             return chosen[1], chosen[2]
     return None
@@ -2945,6 +2366,12 @@ def _resolve_fire_or_seam_attacker(
     a unit that cannot strike ``target``, fall back to **any** alive unit that can
     legally ``get_attack_targets``→``target`` (same hp_hint / tie-break rules), e.g.
     1613840 stale attacker coordinates with a valid cross-seat shot.
+
+    When ``_unit_by_awbw_units_id`` finds the declared ``units_id`` on the active
+    engine seat but that unit cannot strike the resolved defender, we **do not**
+    substitute a different friendly (Phase 8 Lane I): that produced misleading
+    ``_apply_attack`` errors when AWBW pinned one unit id and another unit was
+    closer in the old tie-break.
     """
     from engine.action import _can_attack_submerged_or_hidden
     from engine.combat import get_base_damage
@@ -2955,12 +2382,17 @@ def _resolve_fire_or_seam_attacker(
     ar, ac = int(anchor_r), int(anchor_c)
 
     u_id = _unit_by_awbw_units_id(state, int(awbw_units_id))
+    pin_active = u_id is not None and int(u_id.player) == eng
+    id_pin = int(awbw_units_id)
     if u_id is not None and int(u_id.player) == eng:
         if _oracle_unit_can_attack_target_cell(state, u_id, eng, target_rc):
             return u_id
         u_grit = _oracle_unit_grit_jake_probe_for_target(state, u_id, eng, target_rc)
         if u_grit is not None:
             return u_grit
+
+    def _anchor_unit_matches_awbw_id(xu: Unit) -> bool:
+        return not pin_active or int(xu.unit_id) == id_pin
 
     x = state.get_unit_at(ar, ac)
     if x is not None and x.is_alive:
@@ -2971,11 +2403,13 @@ def _resolve_fire_or_seam_attacker(
                 break
         if cross_hit:
             if int(x.player) == eng:
-                return x
+                if _anchor_unit_matches_awbw_id(x):
+                    return x
             # Legal strike from anchor but occupant is the other engine seat (envelope lag).
             du = state.get_unit_at(tr, tc)
             if du is None or int(du.player) != int(x.player):
-                return x
+                if _anchor_unit_matches_awbw_id(x):
+                    return x
         elif int(x.player) == eng:
             u_grit = _oracle_unit_grit_jake_probe_for_target(state, x, eng, target_rc)
             if u_grit is not None:
@@ -3007,6 +2441,14 @@ def _resolve_fire_or_seam_attacker(
             if u_grit is not None:
                 cands.append(u_grit)
                 break
+    if pin_active and cands:
+        # ``u_id`` is on ``eng`` but cannot strike ``target_rc``; any ``cands`` entry
+        # must be a different engine unit (same AWBW id cannot appear twice). Picking
+        # the closest alternate caused Bucket B wrong-attacker ``_apply_attack`` noise.
+        raise UnsupportedOracleAction(
+            f"Fire: AWBW attacker units_id {awbw_units_id} not among eligible strikers "
+            f"for target ({tr},{tc}); refusing alternate unit (upstream drift)"
+        )
     if len(cands) > 1 and hp_hint is not None:
         want = int(hp_hint)
         hp_match = [c for c in cands if int(c.display_hp) == want]
@@ -3054,9 +2496,13 @@ def _resolve_fire_or_seam_attacker(
                 if not _oracle_indirect_manhattan_ring_ok(state, cand, tr, tc):
                     continue
             else:
+                # AWBW canon: direct units must be Manhattan-1 (orthogonally
+                # adjacent) to the defender — never diagonally. Phase 6 bug
+                # fix: the prior `max(abs(...))==1` (Chebyshev) admitted
+                # diagonal candidates that AWBW would never have produced.
                 ok_adj = False
                 for er, ec in _oracle_fire_attack_move_pos_candidates(state, cand):
-                    if max(abs(er - tr), abs(ec - tc)) == 1:
+                    if abs(er - tr) + abs(ec - tc) == 1:
                         ok_adj = True
                         break
                 if not ok_adj:
@@ -3068,6 +2514,14 @@ def _resolve_fire_or_seam_attacker(
             ):
                 continue
             adj_one.append(cand)
+        if pin_active and adj_one:
+            id_adj = [c for c in adj_one if int(c.unit_id) == id_pin]
+            if len(id_adj) == 1:
+                return id_adj[0]
+            raise UnsupportedOracleAction(
+                f"Fire: AWBW attacker units_id {awbw_units_id} not among eligible strikers "
+                f"for target ({tr},{tc}); refusing alternate unit (upstream drift)"
+            )
         if len(adj_one) > 1 and hp_hint is not None:
             want = int(hp_hint)
             hp_m = [c for c in adj_one if int(c.display_hp) == want]
@@ -3081,7 +2535,10 @@ def _resolve_fire_or_seam_attacker(
                 return hp_m[0]
         if len(adj_one) == 1:
             return adj_one[0]
-    return None
+    raise OracleFireSeamNoAttackerCandidate(
+        f"Fire/seam: no attacker candidate for awbw id {awbw_units_id} anchor=({anchor_r},{anchor_c}) "
+        f"target=({target_r},{target_c}) hp_hint={hp_hint!r}"
+    )
 
 
 def _resolve_attackseam_no_path_attacker(
@@ -3123,18 +2580,19 @@ def _resolve_attackseam_no_path_attacker(
         return cells
 
     for e_try in (int(eng), 1 - int(eng)) if int(eng) in (0, 1) else (int(eng),):
-        u = _resolve_fire_or_seam_attacker(
-            state,
-            engine_player=e_try,
-            awbw_units_id=int(awbw_units_id),
-            anchor_r=ar,
-            anchor_c=ac,
-            target_r=tr,
-            target_c=tc,
-            hp_hint=hp_hint,
-        )
-        if u is not None:
-            return u
+        try:
+            return _resolve_fire_or_seam_attacker(
+                state,
+                engine_player=e_try,
+                awbw_units_id=int(awbw_units_id),
+                anchor_r=ar,
+                anchor_c=ac,
+                target_r=tr,
+                target_c=tc,
+                hp_hint=hp_hint,
+            )
+        except OracleFireSeamNoAttackerCandidate:
+            continue
 
     target_cells = _seam_strike_target_cells()
     loose: list[Unit] = []
@@ -3243,7 +2701,7 @@ def _oracle_diag_target_in_any_attack_targets(
 def _oracle_fire_no_attacker_message_suffix(
     state: GameState, target_r: int, target_c: int
 ) -> str:
-    """Append to ``UnsupportedOracleAction`` when :func:`_resolve_fire_or_seam_attacker` returns None."""
+    """Append to ``UnsupportedOracleAction`` when attacker resolution fails (no unit)."""
     if _oracle_diag_target_in_any_attack_targets(state, target_r, target_c):
         return (
             " [oracle_fire: strike_possible_in_engine=1 "
@@ -3804,6 +3262,8 @@ def _guess_unmoved_mover_from_site_unit_name(
     try:
         want_type = _name_to_unit_type(str(raw))
     except UnsupportedOracleAction:
+        if raw is not None and str(raw).strip():
+            raise
         return None
     waypoints: list[tuple[int, int]] = []
     for wp in paths:
@@ -4272,141 +3732,51 @@ def _pick_singleton_join_or_load(state: GameState, legal: list[Action]) -> Optio
     return None
 
 
-_ORACLE_MOVE_SNAP_MAX_TELEPORT: int = 10
-
-
-def _oracle_snap_mover_to_awbw_path_end(
+def _oracle_path_tail_is_friendly_load_boarding(
     state: GameState,
-    unit: Unit,
-    awbw_end: tuple[int, int],
+    mover: Unit,
+    tail: tuple[int, int],
     *,
-    max_teleport: int = _ORACLE_MOVE_SNAP_MAX_TELEPORT,
+    engine_player: int,
 ) -> bool:
-    """Force engine ``unit.pos`` to AWBW path end after the Move terminator commits.
-
-    The Move resolver in :func:`_apply_move_paths_then_terminator` truncates to
-    the engine's reachable cells via :func:`_nearest_reachable_along_path`; when
-    state drift makes AWBW's intended tile unreachable in the engine (blocking
-    enemy unit shifted, terrain disagreement, fuel attrition divergence, etc.),
-    the unit ends up partway. Every subsequent envelope keying off ``unit.pos``
-    then cascades — ``oracle_fire``'s ``engine_pos_mismatch_post_move`` cluster,
-    ``oracle_move_no_unit`` rows whose path-start references the AWBW tile,
-    ``oracle_capt_no_path`` on the AWBW property tile.
-
-    Mirrors the per-envelope teleport feature in ``tools/oracle_state_sync.py``,
-    applied inline so the engine state stays synchronized after every move
-    rather than at envelope boundaries (where ``replay_state_diff.py --sync`` runs).
-
-    Skipped when:
-      * unit died in the terminator (counter-attack)
-      * unit already at the AWBW path end
-      * AWBW path end occupied by a different top-level unit (would stack)
-      * Manhattan distance from current ``unit.pos`` > ``max_teleport``
-        (suspect heavy drift; refuse silently rather than mask deeper bugs)
-      * AWBW path end off-map
-
-    Returns ``True`` when a snap actually occurred.
-    """
-    import os as _os_dbg
-    _DBG = _os_dbg.environ.get("ORACLE_SNAP_DEBUG") == "1"
-    if not unit.is_alive:
-        if _DBG:
-            print(f"[SNAP_DBG] skip: unit dead uid={unit.unit_id}")
+    """True if ``tail`` holds a friendly transport that can load ``mover`` this turn."""
+    occ = state.get_unit_at(tail[0], tail[1])
+    if occ is None or occ is mover or int(occ.player) != int(engine_player):
         return False
-    er, ec = int(awbw_end[0]), int(awbw_end[1])
-    if (er, ec) == unit.pos:
-        if _DBG:
-            print(f"[SNAP_DBG] skip: already at end {(er, ec)} uid={unit.unit_id}")
-        return False
-    h, w = state.map_data.height, state.map_data.width
-    if not (0 <= er < h and 0 <= ec < w):
-        if _DBG:
-            print(f"[SNAP_DBG] skip: off-map end {(er, ec)} uid={unit.unit_id}")
-        return False
-    occ = state.get_unit_at(er, ec)
-    if occ is not None and occ is not unit:
-        if _DBG:
-            print(
-                f"[SNAP_DBG] skip: occupied at {(er, ec)} by uid={occ.unit_id} "
-                f"player={occ.player} type={occ.unit_type.name} hp={occ.hp}; "
-                f"would have moved uid={unit.unit_id} from {unit.pos} type={unit.unit_type.name}"
-            )
-        return False
-    if abs(unit.pos[0] - er) + abs(unit.pos[1] - ec) > max_teleport:
-        if _DBG:
-            print(
-                f"[SNAP_DBG] skip: distance {abs(unit.pos[0] - er) + abs(unit.pos[1] - ec)} > {max_teleport} "
-                f"uid={unit.unit_id} from {unit.pos} to {(er, ec)}"
-            )
-        return False
-    if _DBG:
-        print(
-            f"[SNAP_DBG] DO: uid={unit.unit_id} type={unit.unit_type.name} "
-            f"player={unit.player} from {unit.pos} -> {(er, ec)}"
-        )
-    state._move_unit_forced(unit, (er, ec))
-    # If the snap fired while the engine still holds this unit in ACTION
-    # (deferred ``Unload`` after a transport ``Move``, deferred ``Capt`` /
-    # ``Fire`` etc.), ``state.selected_move_pos`` still references the
-    # engine-truncated end from the preceding ``_engine_step(SELECT_UNIT,
-    # move_pos=…)``. The next terminator the oracle drains via
-    # ``_oracle_finish_action_if_stale`` (or ``_apply_unload`` keying off its
-    # own ``move_pos``) would then call ``_move_unit(unit, stale_tile)`` from
-    # the snapped ``unit.pos`` and raise ``Illegal move … is not reachable``
-    # at ``engine/game.py`` ~L1326 (desync register: 1619108 / 1631302 /
-    # 1634717 — ``engine_bug`` triggered by AWBW ``Unload`` after a snapped
-    # transport ``Move``). Re-anchor ``selected_move_pos`` on the new
-    # ``unit.pos`` so the deferred terminator commits a no-op ``WAIT`` /
-    # legal ``UNLOAD`` from the post-snap tile instead.
-    if (
-        state.action_stage == ActionStage.ACTION
-        and state.selected_unit is unit
-        and state.selected_move_pos != unit.pos
-    ):
-        state.selected_move_pos = unit.pos
-    return True
+    cap = UNIT_STATS[occ.unit_type].carry_capacity
+    return (
+        cap > 0
+        and mover.unit_type in get_loadable_into(occ.unit_type)
+        and len(occ.loaded_units) < cap
+    )
 
 
-def _oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor(
+def _oracle_path_tail_occupant_allows_forced_snap(
     state: GameState,
+    mover: Unit,
+    tail: tuple[int, int],
     *,
-    eng: int,
-    awbw_units_id: int,
-    anchor_r: int,
-    anchor_c: int,
-    target_r: int,
-    target_c: int,
-    hp_hint: Optional[int],
+    engine_player: int,
 ) -> bool:
-    """If the AWBW anchor is empty, snap a lone adjacent Infantry/Mech onto it.
+    """True if ``_move_unit_forced(mover, tail)`` matches empty / self / JOIN *only*.
 
-    GL lane A **1625784**: ``Move: []`` Fire lists the firing tile ``(5,10)`` but the
-    engine still holds the striker on ``(5,9)`` while ``units_id`` no longer maps.
-    Restricted to **Infantry/Mech** and **exactly one** qualifying neighbour so
-    vehicle stacks do not pick the wrong mover (full-pool regression guard).
+    **LOAD** boarding is handled separately: during MOVE→ACTION the mover still
+    has ``unit.pos`` on the path (``LOAD`` uses ``unit_pos == unit.pos`` and
+    ``move_pos ==`` transport — :meth:`GameState._apply_load`), so forcing the
+    mover onto the transport hex before ``ActionType.LOAD`` would co-place and
+    break :func:`get_unit_at` for the transport.  Use
+    :func:`_oracle_path_tail_is_friendly_load_boarding` and only align
+    ``selected_move_pos`` (Phase 10B).
     """
-    if _unit_by_awbw_units_id(state, int(awbw_units_id)) is not None:
+    r, c = tail
+    occ = state.get_unit_at(r, c)
+    if occ is None or occ is mover:
+        return True
+    if int(occ.player) != int(engine_player):
         return False
-    ar, ac = int(anchor_r), int(anchor_c)
-    if state.get_unit_at(ar, ac) is not None:
-        return False
-    tr, tc = int(target_r), int(target_c)
-    tgt: tuple[int, int] = (tr, tc)
-    cands: list[Unit] = []
-    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        u = state.get_unit_at(ar + dr, ac + dc)
-        if u is None or not u.is_alive or int(u.player) != int(eng):
-            continue
-        if u.unit_type not in (UnitType.INFANTRY, UnitType.MECH):
-            continue
-        if UNIT_STATS[u.unit_type].is_indirect:
-            continue
-        if tgt not in get_attack_targets(state, u, (ar, ac)):
-            continue
-        cands.append(u)
-    if len(cands) != 1:
-        return False
-    return _oracle_snap_mover_to_awbw_path_end(state, cands[0], (ar, ac))
+    if units_can_join(mover, occ):
+        return True
+    return False
 
 
 def _apply_move_paths_then_terminator(
@@ -4536,6 +3906,8 @@ def _apply_move_paths_then_terminator(
             raw_nm = gu.get("units_name") or gu.get("units_symbol")
             want_t = _name_to_unit_type(str(raw_nm or "").strip())
         except UnsupportedOracleAction:
+            if raw_nm is not None and str(raw_nm).strip():
+                raise
             want_t = None
         if want_t is not None:
             same_type = [x for x in state.units[eng] if x.is_alive and x.unit_type == want_t]
@@ -4577,20 +3949,8 @@ def _apply_move_paths_then_terminator(
         if len(pool) == 1:
             u = pool[0]
     if u is None:
-        # Drift recovery: AWBW emits the Move with full unit identity but every
-        # engine-side scan has missed the mover (deep state drift downstream of
-        # earlier Fire / Move / damage drift). Spawn the missing unit at
-        # path-start so the rest of the action stream remains applicable —
-        # same family of recovery as ``_oracle_drift_spawn_unloaded_cargo``.
-        spawned = _oracle_drift_spawn_mover_from_global(
-            state, eng, gu, declared_mover_type, sr, sc, er, ec
-        )
-        if spawned is not None:
-            u = spawned
-    if u is None:
         raise UnsupportedOracleAction(
-            f"Move: no unit for engine P{eng} (awbw id {uid}) at path ({sr},{sc}) "
-            f"or global ({ur},{uc})"
+            "Move: mover not found in engine; refusing drift spawn from global"
         )
     mover_eng = int(u.player)
     if mover_eng != eng:
@@ -4628,8 +3988,13 @@ def _apply_move_paths_then_terminator(
     if start not in path_anchors:
         if state.get_unit_at(sr, sc) is u:
             start = (sr, sc)
-    end = (er, ec)
+    json_path_end = (er, ec)
     reach = compute_reachable_costs(state, u)
+    # Snapshot whether the ZIP tail was ever reachable — used for post-move snap
+    # (Join/Load/Capt terminators and nested ``Fire``), including ``AttackSeam``
+    # envelopes where :func:`_furthest_reachable_path_stop_for_seam_attack` picks a
+    # different commit tile than ``_nearest_reachable_along_path`` would (Phase 10B).
+    json_path_was_unreachable = json_path_end not in reach
     if seam_attack_target is not None:
         end = _furthest_reachable_path_stop_for_seam_attack(
             state,
@@ -4637,11 +4002,15 @@ def _apply_move_paths_then_terminator(
             paths,
             reach,
             seam_attack_target,
-            json_path_end=end,
+            json_path_end=json_path_end,
             start_fallback=start,
         )
     else:
-        end = _nearest_reachable_along_path(paths, reach, end, start)
+        # When the ZIP tail is absent from ``reach`` (terrain/occupancy drift vs
+        # live AWBW), ``_nearest_reachable_along_path`` stops short — same family
+        # as Phase 8 Lane G Fire ``fire_pos`` / ``_move_unit_forced``. Replay
+        # truth still lists the mover on the path end; reconcile before terminators.
+        end = _nearest_reachable_along_path(paths, reach, json_path_end, start)
     su_id = int(u.unit_id) if u is not None else None
     _engine_step(
         state,
@@ -4662,17 +4031,30 @@ def _apply_move_paths_then_terminator(
         ),
         before_engine_step,
     )
+    # Reconcile **before** JOIN/CAPTURE/WAIT so ``selected_move_pos`` and terminators
+    # see the ZIP tail. Join path ends on a partner tile: ``compute_reachable_costs``
+    # can omit that hex (friendly occupant), yet AWBW still records the full walk
+    # (GL 1607045 — ``Join`` nested ``Move``). **LOAD** uses the same JSON tail as
+    # the transport hex — only fix ``selected_move_pos``, never
+    # ``_move_unit_forced`` onto the APC/Lander tile (would co-place before LOAD).
+    if u is not None and u.is_alive:
+        pr, pc = int(u.pos[0]), int(u.pos[1])
+        if (pr, pc) != json_path_end:
+            if json_path_was_unreachable:
+                if _oracle_path_tail_is_friendly_load_boarding(
+                    state, u, json_path_end, engine_player=eng
+                ):
+                    state.selected_move_pos = json_path_end
+                elif _oracle_path_tail_occupant_allows_forced_snap(
+                    state, u, json_path_end, engine_player=eng
+                ):
+                    state._move_unit_forced(u, json_path_end)
+                    state.selected_move_pos = json_path_end
     after_move()
-    # State-drift snap: realign the engine mover with AWBW's intended path end
-    # whenever the engine truncated short (blocking ally, mismatched terrain).
-    # See :func:`_oracle_snap_mover_to_awbw_path_end` docstring — eliminates the
-    # ``engine_pos_mismatch_post_move`` cascade where every subsequent envelope
-    # keys off ``unit.pos`` and the wrong tile poisons Fire / Move / Capt
-    # resolvers downstream. Skipped automatically when unit died, when the AWBW
-    # tile is already occupied by a different unit, or when the gap exceeds
-    # ``_ORACLE_MOVE_SNAP_MAX_TELEPORT``.
-    if u is not None:
-        _oracle_snap_mover_to_awbw_path_end(state, u, (er, ec))
+    if u is not None and u.is_alive and (int(u.pos[0]), int(u.pos[1])) != (er, ec):
+        raise UnsupportedOracleAction(
+            "Move: engine truncated path vs AWBW path end; upstream drift"
+        )
     return
 
 
@@ -4904,88 +4286,6 @@ def _repair_boat_awbw_id(repair_block: dict[str, Any]) -> int:
     raise UnsupportedOracleAction(f"Repair: cannot parse boat id from unit={u!r}")
 
 
-def _oracle_snap_black_boat_toward_repair_ally(
-    state: GameState,
-    boat: Unit,
-    repair_block: dict[str, Any],
-    *,
-    envelope_awbw_player_id: Optional[int] = None,
-) -> None:
-    """Replay-only: slide a Black Boat toward ``repaired`` when drift leaves it >1 away.
-
-    ``Repair`` with ``Move:[]`` pairs with :func:`_ensure_unit_committed_at_tile`; the
-    boat may still sit multiple sea tiles from the ally PHP names (GL 1634030).
-    Uses :meth:`GameState._move_unit_forced` — same escape hatch as other oracle
-    geometry repair paths.
-    """
-    if boat.unit_type != UnitType.BLACK_BOAT or not boat.is_alive:
-        return
-    rep_gl = _repair_repaired_global_dict(
-        repair_block, envelope_awbw_player_id=envelope_awbw_player_id
-    )
-    tid_snap = _oracle_awbw_scalar_int_optional(rep_gl.get("units_id"))
-    if tid_snap is None:
-        return
-    tgt = _unit_by_awbw_units_id(state, tid_snap)
-    if tgt is not None and int(tgt.player) == int(boat.player):
-        tr, tc = int(tgt.pos[0]), int(tgt.pos[1])
-    else:
-        hp_key = _oracle_awbw_scalar_int_optional(rep_gl.get("units_hit_points"))
-        fb = _oracle_fallback_nearest_allied_repair_target_pos(
-            state, int(boat.player), hp_key=hp_key, acting_boat=boat
-        )
-        if fb is None:
-            return
-        tr, tc = int(fb[0]), int(fb[1])
-    guard = 0
-    while boat.is_alive and abs(int(boat.pos[0]) - tr) + abs(int(boat.pos[1]) - tc) > 1:
-        guard += 1
-        if guard > 32:
-            break
-        br, bc = int(boat.pos[0]), int(boat.pos[1])
-        d0 = abs(br - tr) + abs(bc - tc)
-        best: Optional[tuple[int, int]] = None
-        best_d = 10**9
-        for nr, nc in (
-            (br + 1, bc),
-            (br - 1, bc),
-            (br, bc + 1),
-            (br, bc - 1),
-        ):
-            if not (0 <= nr < state.map_data.height and 0 <= nc < state.map_data.width):
-                continue
-            occ = state.get_unit_at(nr, nc)
-            if occ is not None and occ is not boat:
-                continue
-            d1 = abs(nr - tr) + abs(nc - tc)
-            if d1 < d0 and d1 < best_d:
-                best_d = d1
-                best = (nr, nc)
-        if best is None and d0 == 2:
-            mids: list[tuple[int, int]] = []
-            if br == tr and abs(bc - tc) == 2:
-                mids.append((br, (bc + tc) // 2))
-            elif bc == tc and abs(br - tr) == 2:
-                mids.append(((br + tr) // 2, bc))
-            elif abs(br - tr) == 1 and abs(bc - tc) == 1:
-                mids.extend([(tr, bc), (br, tc)])
-            for mid in mids:
-                mr, mc = int(mid[0]), int(mid[1])
-                if not (0 <= mr < state.map_data.height and 0 <= mc < state.map_data.width):
-                    continue
-                if state.get_unit_at(mr, mc) is not None:
-                    continue
-                if abs(mr - tr) + abs(mc - tc) != 1:
-                    continue
-                best = (mr, mc)
-                break
-        if best is None:
-            break
-        state._move_unit_forced(boat, best)
-        if state.selected_unit is boat:
-            state.selected_move_pos = (int(boat.pos[0]), int(boat.pos[1]))
-
-
 def _ensure_unit_committed_at_tile(
     state: GameState,
     u: Unit,
@@ -5085,120 +4385,6 @@ def _finish_repair_after_boat_ready(
     if not rep_gl or _oracle_awbw_scalar_int_optional(rep_gl.get("units_id")) is None:
         raise UnsupportedOracleAction("Repair: missing repaired.global.units_id")
 
-    def _force_adjacent_repair() -> bool:
-        """When legal mask omits REPAIR (eligibility stricter than site), step anyway."""
-        boat = state.selected_unit
-        mp = state.selected_move_pos
-        if boat is None or mp is None or boat.unit_type != UnitType.BLACK_BOAT:
-            return False
-
-        def _ortho_allies(br: int, bc: int) -> list[Unit]:
-            out: list[Unit] = []
-            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                adj = state.get_unit_at(br + dr, bc + dc)
-                if adj is None or int(adj.player) != int(boat.player):
-                    continue
-                if int(adj.unit_id) == int(boat.unit_id):
-                    continue
-                out.append(adj)
-            return out
-
-        def _filter_allies(allies: list[Unit]) -> list[Unit]:
-            hp_key_inner = _oracle_awbw_scalar_int_optional(rep_gl.get("units_hit_points"))
-            if hp_key_inner is not None:
-                want = hp_key_inner
-                strict_a = [a for a in allies if a.display_hp == want]
-                relaxed_a = [
-                    a for a in allies if _repair_display_hp_matches_hint(a.display_hp, want)
-                ]
-                allies = strict_a if strict_a else relaxed_a
-            tid_raw = rep_gl.get("units_id")
-            tid_inner = _oracle_awbw_scalar_int_optional(tid_raw)
-            if tid_inner is not None:
-                u_hit = _unit_by_awbw_units_id(state, tid_inner)
-                if u_hit is not None and u_hit in allies:
-                    allies = [u_hit]
-            if len(allies) > 1:
-                allies = sorted(allies, key=lambda a: (int(a.unit_id), a.pos[0], a.pos[1]))[
-                    :1
-                ]
-            return allies
-
-        br, bc = _black_boat_oracle_action_tile(state, boat)
-        allies = _filter_allies(_ortho_allies(br, bc))
-        if len(allies) != 1:
-            tid_raw = rep_gl.get("units_id")
-            tid_inner2 = _oracle_awbw_scalar_int_optional(tid_raw)
-            if tid_inner2 is not None:
-                tgt = _unit_by_awbw_units_id(state, tid_inner2)
-                if tgt is not None and int(tgt.player) == int(boat.player):
-                    tr, tc = int(tgt.pos[0]), int(tgt.pos[1])
-                    if abs(br - tr) + abs(bc - tc) == 2:
-                        mids: list[tuple[int, int]] = []
-                        if br == tr and abs(bc - tc) == 2:
-                            mids.append((br, (bc + tc) // 2))
-                        elif bc == tc and abs(br - tr) == 2:
-                            mids.append(((br + tr) // 2, bc))
-                        elif abs(br - tr) == 1 and abs(bc - tc) == 1:
-                            mids.extend([(tr, bc), (br, tc)])
-                        for mid in mids:
-                            mr, mc = int(mid[0]), int(mid[1])
-                            if not (
-                                0 <= mr < state.map_data.height and 0 <= mc < state.map_data.width
-                            ):
-                                continue
-                            if state.get_unit_at(mr, mc) is not None:
-                                continue
-                            if abs(mr - tr) + abs(mc - tc) != 1:
-                                continue
-                            state._move_unit_forced(boat, (mr, mc))
-                            if state.selected_unit is boat:
-                                state.selected_move_pos = (
-                                    int(boat.pos[0]),
-                                    int(boat.pos[1]),
-                                )
-                            br, bc = _black_boat_oracle_action_tile(state, boat)
-                            allies = _filter_allies(_ortho_allies(br, bc))
-                            break
-            if len(allies) != 1:
-                fb_pair = _oracle_fallback_repair_boat_and_ally(
-                    state,
-                    int(boat.player),
-                    hp_key=_oracle_awbw_scalar_int_optional(rep_gl.get("units_hit_points")),
-                    acting_boat=boat,
-                )
-                if fb_pair is not None:
-                    _, ally_u = fb_pair
-                    _engine_step(
-                        state,
-                        Action(
-                            ActionType.REPAIR,
-                            unit_pos=boat.pos,
-                            move_pos=(
-                                _black_boat_oracle_action_tile(state, boat)[0],
-                                _black_boat_oracle_action_tile(state, boat)[1],
-                            ),
-                            target_pos=ally_u.pos,
-                        ),
-                        before_engine_step,
-                    )
-                    return True
-        if len(allies) != 1:
-            return False
-        br_c, bc_c = _black_boat_oracle_action_tile(state, boat)
-        mcommit = (br_c, bc_c)
-        _engine_step(
-            state,
-            Action(
-                ActionType.REPAIR,
-                unit_pos=boat.pos,
-                move_pos=mcommit,
-                target_pos=allies[0].pos,
-            ),
-            before_engine_step,
-        )
-        return True
-
     def _pick(cands: list[Action]) -> None:
         if len(cands) == 1:
             _engine_step(state, cands[0], before_engine_step)
@@ -5256,8 +4442,10 @@ def _finish_repair_after_boat_ready(
         _engine_step(state, legal_rep[0], before_engine_step)
         return
 
-    if not legal_rep and _force_adjacent_repair():
-        return
+    if not legal_rep:
+        raise UnsupportedOracleAction(
+            "Repair: no REPAIR in legal actions with synchronized ACTION state"
+        )
 
     eng = int(state.active_player)
     boat_hint = (
@@ -5544,23 +4732,8 @@ def _apply_oracle_action_json_body(
             raise UnsupportedOracleAction(
                 f"Build for player {eng} but active_player={state.active_player}"
             )
-        from engine.action import _build_cost
-
-        cost = _build_cost(ut, state, eng, (r, c))
-        trusted = _oracle_site_trusted_build_envelope(
-            obj, awbw_to_engine, envelope_awbw_player_id, pid
-        )
-        _oracle_optional_apply_build_funds_hint(state, obj, eng, min_funds=cost)
         funds_before = int(state.funds[eng])
         alive_before = sum(1 for u in state.units[eng] if u.is_alive)
-        _oracle_snap_neutral_production_owner_for_build(state, r, c, eng, ut)
-        if trusted:
-            _oracle_snap_wrong_owner_production_for_trusted_site_build(
-                state, r, c, eng, ut
-            )
-        # Friendly unmoved blocker on the factory (site still emits ``Build``): nudge
-        # is safe (SELECT + orth step + WAIT) and is **not** gated on ``discovered``
-        # (GL zips often omit the two-seat ``discovered`` shape ``_oracle_site_trusted_build_envelope`` needs).
         _oracle_nudge_eng_occupier_off_production_build_tile(
             state, r, c, eng, before_engine_step
         )
@@ -5569,80 +4742,26 @@ def _apply_oracle_action_json_body(
             Action(ActionType.BUILD, move_pos=(r, c), unit_type=ut),
             before_engine_step,
         )
-        # ``GameState._apply_build`` no-ops (wrong owner, unaffordable, occupied
-        # factory, etc.) without raising — surface drift for oracle replay.
-        strict = os.environ.get("ORACLE_STRICT_BUILD", "1").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
-        if strict:
-            funds_after = int(state.funds[eng])
-            alive_after = sum(1 for u in state.units[eng] if u.is_alive)
-            if funds_after == funds_before and alive_after == alive_before:
-                detail = _oracle_diagnose_build_refusal(state, r, c, eng, ut)
-                if detail.startswith("insufficient funds"):
-                    need = int(_build_cost(ut, state, eng, (r, c)))
-                    state.funds[eng] = max(int(state.funds[eng]), need)
-                    _engine_step(
-                        state,
-                        Action(ActionType.BUILD, move_pos=(r, c), unit_type=ut),
-                        before_engine_step,
-                    )
-                    funds_after = int(state.funds[eng])
-                    alive_after = sum(1 for u in state.units[eng] if u.is_alive)
-                elif detail.startswith("property owner is"):
-                    # AWBW emitted Build for ``eng`` at this tile, so AWBW
-                    # already treats ``eng`` as the owner. Engine missed an
-                    # earlier capture (drift). The trusted-snap path requires
-                    # a two-seat ``discovered`` block GL zips often omit; we
-                    # honour ``envelope_awbw_player_id == pid`` (already
-                    # enforced above by ``_oracle_ensure_envelope_seat`` +
-                    # active_player check) as the ownership signal here.
-                    if state.get_unit_at(r, c) is not None:
-                        # Snap is gated by "tile empty" (mirrors _apply_build).
-                        # Clear an enemy/friendly drift ghost first.
-                        _oracle_drift_teleport_blocker_off_build_tile(
-                            state, r, c, before_engine_step
-                        )
-                    _oracle_snap_wrong_owner_production_for_trusted_site_build(
-                        state, r, c, eng, ut
-                    )
-                    _engine_step(
-                        state,
-                        Action(ActionType.BUILD, move_pos=(r, c), unit_type=ut),
-                        before_engine_step,
-                    )
-                    funds_after = int(state.funds[eng])
-                    alive_after = sum(1 for u in state.units[eng] if u.is_alive)
-                elif detail == "tile occupied":
-                    # Engine has a unit on the AWBW factory tile (friendly
-                    # nudge already failed earlier — either enemy ghost or
-                    # trapped friendly). Same envelope-trust signal applies.
-                    _oracle_drift_teleport_blocker_off_build_tile(
-                        state, r, c, before_engine_step
-                    )
-                    _engine_step(
-                        state,
-                        Action(ActionType.BUILD, move_pos=(r, c), unit_type=ut),
-                        before_engine_step,
-                    )
-                    funds_after = int(state.funds[eng])
-                    alive_after = sum(1 for u in state.units[eng] if u.is_alive)
-                if funds_after == funds_before and alive_after == alive_before:
-                    detail2 = _oracle_diagnose_build_refusal(state, r, c, eng, ut)
-                    raise UnsupportedOracleAction(
-                        f"Build no-op at tile ({r},{c}) unit={ut.name} for engine P{eng}: "
-                        f"engine refused BUILD ({detail2}; funds_after={funds_after}$)"
-                    )
+        funds_after = int(state.funds[eng])
+        alive_after = sum(1 for u in state.units[eng] if u.is_alive)
+        if funds_after == funds_before and alive_after == alive_before:
+            detail2 = _oracle_diagnose_build_refusal(state, r, c, eng, ut)
+            raise UnsupportedOracleAction(
+                f"Build no-op at tile ({r},{c}) unit={ut.name} for engine P{eng}: "
+                f"engine refused BUILD ({detail2}; funds_after={funds_after}$)"
+            )
         return
 
     if kind == "Power":
         raw_pid = obj.get("playerID")
         if raw_pid is None:
             raise UnsupportedOracleAction("Power without playerID")
-        pid = int(raw_pid)
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError) as e:
+            raise UnsupportedOracleAction(
+                f"Power: playerID not int-convertible: {raw_pid!r}"
+            ) from e
         eng = awbw_to_engine[pid]
         # Generic envelope pass above may not clear ACTION when the seat already
         # matches this ``p:`` line — finish explicitly before COP/SCOP resolution.
@@ -5726,8 +4845,10 @@ def _apply_oracle_action_json_body(
                 eid = int(envelope_awbw_player_id)
                 if eid in awbw_to_engine:
                     eng_hint = int(awbw_to_engine[eid])
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                raise UnsupportedOracleAction(
+                    f"Supply: envelope_awbw_player_id not int-convertible: {envelope_awbw_player_id!r}"
+                ) from e
 
         u_sup: Optional[Unit] = None
         sr_sup = sc_sup = 0
@@ -5926,26 +5047,19 @@ def _apply_oracle_action_json_body(
             if boat is None:
                 from engine.action import _black_boat_repair_eligible
 
-                tr_tc: Optional[tuple[int, int]] = None
-                last_boat_err: Optional[UnsupportedOracleAction] = None
-                for eng_try in (eng, 1 - eng) if eng in (0, 1) else (eng,):
-                    try:
-                        tr_tc = _resolve_repair_target_tile(
-                            state,
-                            repair_block,
-                            eng=int(eng_try),
-                            boat_hint=None,
-                            envelope_awbw_player_id=envelope_awbw_player_id,
-                        )
-                        eng = int(eng_try)
-                        break
-                    except UnsupportedOracleAction as exc:
-                        last_boat_err = exc
-                        continue
-                if tr_tc is None:
-                    raise last_boat_err if last_boat_err is not None else UnsupportedOracleAction(
-                        "Repair (no path): could not resolve repair target tile"
+                try:
+                    tr_tc = _resolve_repair_target_tile(
+                        state,
+                        repair_block,
+                        eng=eng,
+                        boat_hint=None,
+                        envelope_awbw_player_id=envelope_awbw_player_id,
                     )
+                except UnsupportedOracleAction as exc:
+                    raise UnsupportedOracleAction(
+                        "Repair: no Black Boat resolves under strict seat attribution; "
+                        "refusing dual-seat fallback"
+                    ) from exc
                 tr, tc = tr_tc
 
                 def _boat_orth_to_target(b: Unit) -> bool:
@@ -5968,8 +5082,7 @@ def _apply_oracle_action_json_body(
                 else:
                     # AWBW may record REPAIR when the ally is full HP/fuel/ammo (no engine
                     # eligibility) but the site still emitted the line; resolve boat by
-                    # tile only, then ``_finish_repair_after_boat_ready`` uses
-                    # ``_force_adjacent_repair`` when the legal mask omits REPAIR.
+                    # tile only.
                     boats_loose: list[Unit] = []
                     for b in state.units[eng]:
                         if not b.is_alive or b.unit_type != UnitType.BLACK_BOAT:
@@ -6015,16 +5128,11 @@ def _apply_oracle_action_json_body(
                 raise UnsupportedOracleAction(
                     f"Repair (no path): expected Black Boat, got {boat.unit_type.name}"
                 )
-            # ``eng`` from the ``eng_try`` loop matches ``boat.player``, but ``active_player``
-            # was never advanced — sync before ``_ensure_unit_committed_at_tile``.
             _oracle_snap_active_player_to_engine(
                 state, int(boat.player), awbw_to_engine, before_engine_step
             )
             _ensure_unit_committed_at_tile(
                 state, boat, before_engine_step, label="Repair no-path"
-            )
-            _oracle_snap_black_boat_toward_repair_ally(
-                state, boat, repair_block, envelope_awbw_player_id=envelope_awbw_player_id
             )
             _finish_repair_after_boat_ready(
                 state,
@@ -6064,19 +5172,66 @@ def _apply_oracle_action_json_body(
             # Half-turn before geometry: mapped ``buildings_players_id`` beats raw ``p:`` —
             # with two orth capturers, a wrong envelope would keep only the wrong seat in
             # ``pool = [... if player == ap]`` and never reach the ``or orth_all`` fallback.
+            #
+            # Phase 11J-F2-KOAL-FU-ORACLE: contested-capture short-circuit.
+            # PHP semantics for the Capt building reference are dual:
+            #   * On a **neutral** property, ``buildings_players_id`` /
+            #     ``buildings_team`` name the **new capturer** — useful when the
+            #     ``p:`` envelope drifted and disambiguating two orth capturers
+            #     (test_buildings_players_id_seat_overrides_envelope_when_both_orth).
+            #   * On a **contested** property (already owned at capture-start),
+            #     the same fields name the **defender** (previous owner). Passing
+            #     that to ``_oracle_ensure_envelope_seat`` flips the engine to the
+            #     opponent's seat via ``_oracle_advance_turn_until_player`` →
+            #     ``END_TURN`` → ``_end_turn``, which clears mid-envelope
+            #     ``cop_active`` / ``scop_active`` on the *capturer's* CO. That
+            #     destroys e.g. Koal COP +1 movement before the subsequent
+            #     ``Load`` reachability check, leaving the loader stranded
+            #     (gid 1630794, env 37: ``Infantry (2,7) → (1,10)`` unreachable).
+            # Discriminator: if the bpid/btid maps to the property's *current*
+            # owner (the defender), and the engine's active seat already matches
+            # the envelope's ``p:`` line, trust the envelope and skip the flip.
+            # The capturer pool below still gates by ``ap`` and the
+            # orth/diag/outer fallbacks remain intact.
+            prop_pre = state.get_property_at(er, ec)
+            prop_owner_pre: Optional[int] = (
+                prop_pre.owner if prop_pre is not None else None
+            )
+
+            def _maps_to_property_defender(awbw_id: Optional[int]) -> bool:
+                if awbw_id is None or awbw_id not in awbw_to_engine:
+                    return False
+                if prop_owner_pre is None:
+                    return False
+                return int(awbw_to_engine[awbw_id]) == int(prop_owner_pre)
+
             seat_awbw: Optional[int] = None
+            envelope_already_aligned = False
             bpid = _capt_building_optional_players_awbw_id(bi)
-            if bpid is not None and bpid in awbw_to_engine:
+            btid = _capt_building_optional_team_awbw_id(bi)
+
+            ep_i: Optional[int] = None
+            if envelope_awbw_player_id is not None:
+                try:
+                    ep_i = int(envelope_awbw_player_id)
+                except (TypeError, ValueError):
+                    ep_i = None
+            if (
+                ep_i is not None
+                and ep_i in awbw_to_engine
+                and int(awbw_to_engine[ep_i]) == int(state.active_player)
+                and (_maps_to_property_defender(bpid)
+                     or _maps_to_property_defender(btid))
+            ):
+                seat_awbw = ep_i
+                envelope_already_aligned = True
+            if seat_awbw is None and bpid is not None and bpid in awbw_to_engine:
                 seat_awbw = int(bpid)
-            if seat_awbw is None:
-                btid = _capt_building_optional_team_awbw_id(bi)
-                if btid is not None and btid in awbw_to_engine:
-                    seat_awbw = int(btid)
-            if seat_awbw is None and envelope_awbw_player_id is not None:
-                ep = int(envelope_awbw_player_id)
-                if ep in awbw_to_engine:
-                    seat_awbw = ep
-            if seat_awbw is not None:
+            if seat_awbw is None and btid is not None and btid in awbw_to_engine:
+                seat_awbw = int(btid)
+            if seat_awbw is None and ep_i is not None and ep_i in awbw_to_engine:
+                seat_awbw = ep_i
+            if seat_awbw is not None and not envelope_already_aligned:
                 _oracle_ensure_envelope_seat(
                     state, seat_awbw, awbw_to_engine, before_engine_step
                 )
@@ -6168,19 +5323,13 @@ def _apply_oracle_action_json_body(
                     and ph is not None
                     and get_terrain(prop_tid).is_property
                 ):
-                    # Engine has no capturer that can reach this tile today, but AWBW
-                    # still advanced the building capture clock (GL 1625844 corner drift).
-                    ph.capture_points = int(cpv)
-                    return
+                    raise UnsupportedOracleAction(
+                        "Capt no-path: no engine capturer bound; refuse to copy capture_points from PHP snapshot"
+                    )
             if u is None and get_terrain(prop_tid).is_property:
-                # Drift recovery: zero capturers anywhere on the active seat
-                # near this property (deep state drift). AWBW says the capture
-                # progressed; spawn a default Infantry on the property tile so
-                # the standard CAPTURE step runs and downstream envelopes
-                # (income, capture completion) remain applicable. Sister of
-                # ``_oracle_drift_spawn_mover_from_global`` and
-                # ``_oracle_drift_spawn_unloaded_cargo``.
-                u = _oracle_drift_spawn_capturer_for_property(state, ap, er, ec)
+                raise UnsupportedOracleAction(
+                    "Capt no-path: drift spawn capturer disabled; no reachable capturer for property"
+                )
             if u is None:
                 geom = _oracle_capt_no_path_geom_capturer_union(orth_all, outer, diag_all)
                 _oracle_capt_no_path_raise_geom_unreachable(state, er, ec, geom)
@@ -6463,7 +5612,10 @@ def _apply_oracle_action_json_body(
             if not isinstance(att, dict):
                 att = {}
             if not att:
-                raise UnsupportedOracleAction("Fire without Move.paths.global")
+                raise UnsupportedOracleAction(
+                    "Fire (no path): attacker in combatInfo but missing Move.paths.global; "
+                    f"attacker_keys={sorted(att.keys()) if isinstance(att, dict) else type(att).__name__!r}"
+                )
             sr, sc = int(att["units_y"]), int(att["units_x"])
             uid = int(att["units_id"])
             hp_hint: Optional[int] = None
@@ -6547,30 +5699,10 @@ def _apply_oracle_action_json_body(
                 state, defender, sr, sc, dr, dc
             ):
                 return
-            _oracle_fire_no_path_snap_foot_unit_neighbor_to_empty_awbw_anchor(
-                state,
-                eng=eng,
-                awbw_units_id=uid,
-                anchor_r=sr,
-                anchor_c=sc,
-                target_r=dr,
-                target_c=dc,
-                hp_hint=hp_hint,
-            )
-            u = _resolve_fire_or_seam_attacker(
-                state,
-                engine_player=eng,
-                awbw_units_id=uid,
-                anchor_r=sr,
-                anchor_c=sc,
-                target_r=dr,
-                target_c=dc,
-                hp_hint=hp_hint,
-            )
-            if u is None and eng in (0, 1):
+            try:
                 u = _resolve_fire_or_seam_attacker(
                     state,
-                    engine_player=1 - int(eng),
+                    engine_player=eng,
                     awbw_units_id=uid,
                     anchor_r=sr,
                     anchor_c=sc,
@@ -6578,6 +5710,22 @@ def _apply_oracle_action_json_body(
                     target_c=dc,
                     hp_hint=hp_hint,
                 )
+            except OracleFireSeamNoAttackerCandidate:
+                u = None
+            if u is None and eng in (0, 1):
+                try:
+                    u = _resolve_fire_or_seam_attacker(
+                        state,
+                        engine_player=1 - int(eng),
+                        awbw_units_id=uid,
+                        anchor_r=sr,
+                        anchor_c=sc,
+                        target_r=dr,
+                        target_c=dc,
+                        hp_hint=hp_hint,
+                    )
+                except OracleFireSeamNoAttackerCandidate:
+                    u = None
             if u is None:
                 # GL 1631943: batched ``Move: []`` / no-path ``Fire`` rows in one
                 # envelope — earlier counters can remove the attacker from the JSON
@@ -6636,6 +5784,7 @@ def _apply_oracle_action_json_body(
             _oracle_sync_selection_for_endpoint(
                 state, u, fr, fc, fr, fc, before_engine_step
             )
+            _oracle_assert_fire_damage_table_compatible(state, u, (dr, dc))
             _oracle_set_combat_damage_override_from_combat_info(
                 state, fire_blk, envelope_awbw_player_id, u, (dr, dc)
             )
@@ -6686,19 +5835,34 @@ def _apply_oracle_action_json_body(
                 ):
                     mover_pk = cand_pk
             if mover_pk is not None and mover_pk.is_alive:
-                _oracle_snap_mover_to_awbw_path_end(state, mover_pk, (er, ec))
+                if (int(mover_pk.pos[0]), int(mover_pk.pos[1])) != (er, ec):
+                    rpk = compute_reachable_costs(state, mover_pk)
+                    tail_pk = (er, ec)
+                    if tail_pk not in rpk and not UNIT_STATS[mover_pk.unit_type].is_indirect:
+                        if not _oracle_fire_stance_would_stack_on_transport(
+                            state, mover_pk, tail_pk
+                        ):
+                            if _oracle_path_tail_is_friendly_load_boarding(
+                                state, mover_pk, tail_pk, engine_player=eng
+                            ):
+                                state.selected_move_pos = tail_pk
+                            elif _oracle_path_tail_occupant_allows_forced_snap(
+                                state, mover_pk, tail_pk, engine_player=eng
+                            ):
+                                state._move_unit_forced(mover_pk, tail_pk)
+                if (int(mover_pk.pos[0]), int(mover_pk.pos[1])) != (er, ec):
+                    raise UnsupportedOracleAction(
+                        "Move: engine truncated path vs AWBW path end; upstream drift"
+                    )
             return
         dr, dc = _oracle_fire_resolve_defender_target_pos(
             state, defender, attacker_eng=eng
         )
         uid = int(gu["units_id"])
         declared_mover_type: Optional[UnitType] = None
-        try:
-            raw_nm_mv = gu.get("units_name") or gu.get("units_symbol")
-            if raw_nm_mv is not None and str(raw_nm_mv).strip() != "":
-                declared_mover_type = _name_to_unit_type(str(raw_nm_mv).strip())
-        except UnsupportedOracleAction:
-            declared_mover_type = None
+        raw_nm_mv = gu.get("units_name") or gu.get("units_symbol")
+        if raw_nm_mv is not None and str(raw_nm_mv).strip() != "":
+            declared_mover_type = _name_to_unit_type(str(raw_nm_mv).strip())
 
         def _fire_move_mover_ok(x: Unit) -> bool:
             if not x.is_alive or int(x.player) != eng:
@@ -6761,27 +5925,33 @@ def _apply_oracle_action_json_body(
                     hp2 = int(att_g["units_hit_points"])
                 except (TypeError, ValueError):
                     hp2 = None
-            u = _resolve_fire_or_seam_attacker(
-                state,
-                engine_player=eng,
-                awbw_units_id=uid,
-                anchor_r=er,
-                anchor_c=ec,
-                target_r=dr,
-                target_c=dc,
-                hp_hint=hp2,
-            )
+            try:
+                u = _resolve_fire_or_seam_attacker(
+                    state,
+                    engine_player=eng,
+                    awbw_units_id=uid,
+                    anchor_r=er,
+                    anchor_c=ec,
+                    target_r=dr,
+                    target_c=dc,
+                    hp_hint=hp2,
+                )
+            except OracleFireSeamNoAttackerCandidate:
+                u = None
         if u is None and eng in (0, 1):
-            u = _resolve_fire_or_seam_attacker(
-                state,
-                engine_player=1 - int(eng),
-                awbw_units_id=uid,
-                anchor_r=er,
-                anchor_c=ec,
-                target_r=dr,
-                target_c=dc,
-                hp_hint=hp2,
-            )
+            try:
+                u = _resolve_fire_or_seam_attacker(
+                    state,
+                    engine_player=1 - int(eng),
+                    awbw_units_id=uid,
+                    anchor_r=er,
+                    anchor_c=ec,
+                    target_r=dr,
+                    target_c=dc,
+                    hp_hint=hp2,
+                )
+            except OracleFireSeamNoAttackerCandidate:
+                u = None
         if u is None:
             raise UnsupportedOracleAction(
                 f"Fire: no attacker for engine P{eng} (awbw id {uid}) "
@@ -6804,9 +5974,34 @@ def _apply_oracle_action_json_body(
                 raise UnsupportedOracleAction(
                     f"Fire: resolved striker on engine P{strike_eng} but active_player={eng}"
                 )
+        # Snapshot reachability to the JSON path tail **before** SELECT/move/attack:
+        # after the strike, AWBW still records the mover on ``paths.global``[-1]; when
+        # that tail was never in ``compute_reachable_costs`` here (drift vs live site),
+        # ``u.pos`` can remain short of ``(er, ec)`` — reconcile like plain ``Move``
+        # (Phase 9 Lane L; complements Lane G pre-attack ``fire_pos`` work).
+        reach_at_fire_open = compute_reachable_costs(state, u)
+        json_fire_path_end = (er, ec)
+        json_fire_path_was_unreachable = json_fire_path_end not in reach_at_fire_open
         # Always select the live unit at its true tile (path start, firing tile, or drift).
-        start = u.pos
         fire_pos = _oracle_resolve_fire_move_pos(state, u, paths, (er, ec), (dr, dc))
+        # When the resolver snaps to a waypoint that cannot strike but the JSON path
+        # end can (Manhattan direct-fire), prefer the ZIP tail — same class as GL 1618770.
+        if (dr, dc) not in get_attack_targets(state, u, fire_pos):
+            if (
+                (dr, dc) in get_attack_targets(state, u, (er, ec))
+                and not _oracle_fire_stance_would_stack_on_transport(state, u, (er, ec))
+            ):
+                fire_pos = (er, ec)
+        costs_fire = compute_reachable_costs(state, u)
+        if fire_pos not in costs_fire:
+            if (
+                (dr, dc) in get_attack_targets(state, u, fire_pos)
+                and not _oracle_fire_stance_would_stack_on_transport(state, u, fire_pos)
+            ):
+                # ZIP path end / chosen stance: engine reachability omits that hex but
+                # AWBW recorded the strike — snap for replay (Phase 8 Bucket A).
+                state._move_unit_forced(u, fire_pos)
+        start = u.pos
         su_id = int(u.unit_id)
         _engine_step(
             state,
@@ -6829,6 +6024,7 @@ def _apply_oracle_action_json_body(
         )
         # Must match ``get_legal_actions`` / ``_apply_attack``: unit is still on
         # ``start`` until the attack step runs; ``move_pos`` is the firing tile.
+        _oracle_assert_fire_damage_table_compatible(state, u, (dr, dc))
         _oracle_set_combat_damage_override_from_combat_info(
             state, fire_blk, envelope_awbw_player_id, u, (dr, dc)
         )
@@ -6842,16 +6038,31 @@ def _apply_oracle_action_json_body(
             ),
             before_engine_step,
         )
-        # State-drift snap (Fire variant): the attacker may have ``fire_pos`` truncated
-        # by ``_oracle_resolve_fire_move_pos`` when the AWBW path end is unreachable
-        # (chained drift from earlier moves blocking the engine state). Without this
-        # snap the attacker stays on the truncated tile and every subsequent envelope
-        # keying off ``unit.pos`` cascades — same ``engine_pos_mismatch_post_move``
-        # pattern handled in :func:`_apply_move_paths_then_terminator`. Skipped when
-        # the attacker died in the counter, target tile is occupied, or distance
-        # exceeds ``_ORACLE_MOVE_SNAP_MAX_TELEPORT``.
-        if u is not None:
-            _oracle_snap_mover_to_awbw_path_end(state, u, (er, ec))
+        if u is not None and u.is_alive:
+            pr, pc = int(u.pos[0]), int(u.pos[1])
+            if (pr, pc) != json_fire_path_end:
+                st_mv = UNIT_STATS[u.unit_type]
+                if (
+                    not st_mv.is_indirect
+                    and json_fire_path_was_unreachable
+                    and not _oracle_fire_stance_would_stack_on_transport(
+                        state, u, json_fire_path_end
+                    )
+                ):
+                    if _oracle_path_tail_is_friendly_load_boarding(
+                        state, u, json_fire_path_end, engine_player=eng
+                    ):
+                        state.selected_move_pos = json_fire_path_end
+                    elif _oracle_path_tail_occupant_allows_forced_snap(
+                        state, u, json_fire_path_end, engine_player=eng
+                    ):
+                        state._move_unit_forced(u, json_fire_path_end)
+                        state.selected_move_pos = json_fire_path_end
+            pr, pc = int(u.pos[0]), int(u.pos[1])
+            if (pr, pc) != (er, ec):
+                raise UnsupportedOracleAction(
+                    "Move: engine truncated path vs AWBW path end; upstream drift"
+                )
         return
 
     if kind == "AttackSeam":
@@ -6901,7 +6112,13 @@ def _apply_oracle_action_json_body(
                     gu = _global_unit(uwrap) if isinstance(uwrap, dict) else {}
             ci = gu.get("combatInfo") if isinstance(gu, dict) else {}
             if not isinstance(ci, dict) or not ci:
-                raise UnsupportedOracleAction("AttackSeam without Move.paths.global or combatInfo")
+                raise UnsupportedOracleAction(
+                    "AttackSeam (no path): need combatInfo on resolved unit payload when "
+                    "Move.paths.global is empty; "
+                    f"gu_keys={sorted(gu.keys()) if isinstance(gu, dict) else type(gu).__name__!r}; "
+                    f"unit_wrap_keys={sorted(uwrap.keys()) if isinstance(uwrap, dict) else 'n/a'}; "
+                    f"AttackSeam_keys={sorted(aseam.keys()) if isinstance(aseam, dict) else type(aseam).__name__!r}"
+                )
             sr, sc = int(ci["units_y"]), int(ci["units_x"])
             uid = int(ci["units_id"])
             hp_hint_as: Optional[int] = None
@@ -6996,7 +6213,12 @@ def _apply_oracle_action_json_body(
         raw_tid = obj.get("transportID")
         if raw_tid is None:
             raise UnsupportedOracleAction("Unload without transportID")
-        tid = int(raw_tid)
+        try:
+            tid = int(raw_tid)
+        except (TypeError, ValueError) as e:
+            raise UnsupportedOracleAction(
+                f"Unload: transportID not int-convertible: {raw_tid!r}"
+            ) from e
         gu = _oracle_unload_unit_global_for_envelope(obj, envelope_awbw_player_id)
         gu_flat = _global_unit(obj)
         if isinstance(gu_flat, dict) and gu_flat:
@@ -7007,8 +6229,14 @@ def _apply_oracle_action_json_body(
         elif not gu:
             gu = gu_flat if isinstance(gu_flat, dict) else {}
         if not isinstance(gu, dict) or gu.get("units_players_id") is None:
+            uwrap_u = obj.get("unit") or {}
             raise UnsupportedOracleAction(
-                "Unload: could not resolve cargo snapshot (unit.global or per-seat unit)"
+                "Unload: could not resolve cargo snapshot (need unit.global or per-seat unit "
+                "with units_players_id); "
+                f"unit_wrap_type={type(uwrap_u).__name__!r}; "
+                f"unit_wrap_keys={sorted(uwrap_u.keys()) if isinstance(uwrap_u, dict) else 'n/a'}; "
+                f"merged_gu_keys={sorted(gu.keys()) if isinstance(gu, dict) else type(gu).__name__!r}; "
+                f"flat_global_keys={sorted(gu_flat.keys()) if isinstance(gu_flat, dict) else type(gu_flat).__name__!r}"
             )
         target = (int(gu["units_y"]), int(gu["units_x"]))
         cargo_ut = _name_to_unit_type(str(gu["units_name"]))
@@ -7033,18 +6261,11 @@ def _apply_oracle_action_json_body(
                 state, tid, cargo_ut, target, eng, cargo_awbw_units_id=cargo_uid
             )
         except UnsupportedOracleAction as resolve_exc:
-            # Drift recovery: AWBW unloads cargo whose carrier the engine has
-            # empty (engine missed an earlier ``Load`` envelope). Spawn the
-            # cargo on the unload tile directly when an empty friendly carrier
-            # of the right ``carry_classes`` sits orth to ``target`` — that
-            # signal mirrors AWBW's emission.
             if "no transport adjacent" not in str(resolve_exc):
                 raise
-            if _oracle_drift_spawn_unloaded_cargo(
-                state, eng, cargo_ut, target, gu, cargo_uid
-            ):
-                return
-            raise
+            raise UnsupportedOracleAction(
+                "Unload: drift recovery disabled; transport/target/loaded cargo do not support UNLOAD"
+            ) from resolve_exc
         su_tr = int(transport.unit_id)
         if state.action_stage == ActionStage.SELECT:
             _engine_step(
@@ -7163,23 +6384,8 @@ def _apply_oracle_action_json_body(
                 )
                 chosen_u = unload_same[0]
         if chosen_u is None:
-            # The carrier engine-side does not have a legal UNLOAD to ``target``
-            # (carrier wrong tile, target stacked, etc.). Try the same drift
-            # recovery used when the resolver could not find a carrier — but
-            # only when the carrier is mid-ACTION; otherwise the engine has
-            # already advanced past the half-turn we would corrupt.
-            if state.action_stage in (ActionStage.SELECT, ActionStage.ACTION):
-                # Cancel the half-finished selection so drift spawn does not
-                # collide with the still-selected transport.
-                if state.action_stage == ActionStage.ACTION:
-                    _oracle_finish_action_if_stale(state, before_engine_step)
-                if _oracle_drift_spawn_unloaded_cargo(
-                    state, eng, cargo_ut, target, gu, cargo_uid
-                ):
-                    return
             raise UnsupportedOracleAction(
-                f"Unload: no UNLOAD to {target} for {cargo_ut.name}; "
-                f"legal={[x.action_type.name for x in legal]}"
+                "Unload: drift recovery disabled; transport/target/loaded cargo do not support UNLOAD"
             )
         _engine_step(state, chosen_u, before_engine_step)
         return

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from engine.action import ActionStage, get_attack_targets
 from engine.game import make_initial_state
@@ -11,6 +12,7 @@ from engine.unit import UNIT_STATS, Unit, UnitType
 
 from server.play_human import MAPS_DIR, POOL_PATH
 from tools.oracle_zip_replay import (
+    UnsupportedOracleAction,
     _oracle_fire_attack_move_pos_candidates,
     _oracle_fire_no_attacker_message_suffix,
     _oracle_fire_resolve_defender_target_pos,
@@ -360,8 +362,17 @@ class TestOracleFireResolve(unittest.TestCase):
         self.assertIn("strike_possible_in_engine=0", suf)
         self.assertIn("drift_range_los_or_unmapped_co", suf)
 
+    @unittest.expectedFailure  # Phase 6: scenario violates AWBW canon (Tank @ (5,5) → (4,4) is diagonal). Reconstruct from real GL coords in Phase 7.
     def test_direct_fire_move_pos_candidates_gl_bucket(self) -> None:
-        """Direct strike legal from ``unit.pos`` while ``selected_move_pos`` is one step off."""
+        """Direct strike legal from ``unit.pos`` while ``selected_move_pos`` is one step off.
+
+        Phase 6 NOTE: this synthetic scenario places the defender diagonally
+        from the attacker (Tank @ (5,5) vs Tank @ (4,4) — Manhattan 2,
+        Chebyshev 1). AWBW direct units fire orthogonally only; this
+        envelope would never have been emitted. Test was passing under the
+        Chebyshev-1 engine bug fixed in Phase 6. Mark xfail until the test
+        is rewritten using a real GL replay's actual coordinates.
+        """
         m = load_map(77060, POOL_PATH, MAPS_DIR)
         s = make_initial_state(m, 1, 1, tier_name="T3", starting_funds=0)
         s.units[0] = []
@@ -390,11 +401,62 @@ class TestOracleFireResolve(unittest.TestCase):
         assert u is not None
         self.assertIs(u, atk)
 
+    def test_fire_move_pos_prefers_zip_path_end_when_snap_cannot_strike_gl_1618770(self) -> None:
+        """GL 1618770 / Phase 8 Bucket A: penultimate waypoint can be reachable while the ZIP tail is the only legal Manhattan-1 firing stance.
+
+        When ``compute_reachable_costs`` omits the path end (blocked in-engine) but
+        includes an earlier waypoint on ``paths.global``, the old resolver returned
+        that waypoint as ``move_pos`` even when it could not strike the defender,
+        causing a misleading ``_apply_attack`` range error. Prefer the JSON path end
+        when its range math matches AWBW (last-resort branch in
+        ``_oracle_resolve_fire_move_pos``).
+        """
+        m = load_map(77060, POOL_PATH, MAPS_DIR)
+        s = make_initial_state(m, 1, 1, tier_name="T3", starting_funds=0)
+        s.units[0] = []
+        s.units[1] = []
+        atk = _tank(0, (17, 18), hp=100, uid=191416233)
+        s.units[0].append(atk)
+        s.units[1].append(_tank(1, (14, 15), hp=1, uid=191411592))
+        paths = [
+            {"y": 17, "x": 18},
+            {"y": 17, "x": 16},
+            {"y": 16, "x": 16},
+            {"y": 15, "x": 16},
+            {"y": 14, "x": 16},
+        ]
+        path_end = (14, 16)
+        target = (14, 15)
+
+        def fake_costs(_st: object, _u: object) -> dict[tuple[int, int], int]:
+            # Path end reachable; penultimate tile also reachable (nearest-path snap
+            # could pick (15,16) when only range mattered — reversed walk must prefer
+            # the path tail when it can strike).
+            return {(17, 18): 0, (15, 16): 4, (14, 16): 6}
+
+        def fake_gat(_st: object, _u: object, move_pos: tuple[int, int]) -> list[tuple[int, int]]:
+            if move_pos == (14, 16):
+                return [target]
+            return []
+
+        with (
+            patch("tools.oracle_zip_replay.compute_reachable_costs", fake_costs),
+            patch("tools.oracle_zip_replay.get_attack_targets", fake_gat),
+        ):
+            fire_pos = _oracle_resolve_fire_move_pos(s, atk, paths, path_end, target)
+        self.assertEqual(fire_pos, path_end)
+
+    @unittest.expectedFailure  # Phase 6: scenario violates AWBW canon (Infantry @ (11,11) → Tank @ (12,12) is diagonal). Reconstruct from real GL 1624281 coords in Phase 7.
     def test_fire_move_pos_skips_transport_hex_gl_1624281(self) -> None:
         """Reachability marks a friendly transport as a walk end for boarding; ``ATTACK`` must not use that hex as ``move_pos``.
 
         :meth:`GameState._move_unit` does not auto-board — using the APC cell as
         ``move_pos`` stacks infantry and APC on one tile (GL 1624281).
+
+        Phase 6 NOTE: synthetic layout places defender diagonally from
+        attacker; AWBW canon forbids that envelope. Test was passing under
+        the Chebyshev-1 bug. Reconstruct with real GL 1624281 coordinates
+        in Phase 7 follow-up.
         """
         m = load_map(77060, POOL_PATH, MAPS_DIR)
         s = make_initial_state(m, 1, 8, tier_name="T3", starting_funds=0)
@@ -486,15 +548,15 @@ class TestOracleFireResolve(unittest.TestCase):
                         "combatInfo": {
                             "attacker": {
                                 "units_id": 99001,
-                                "units_y": 2,
-                                "units_x": 1,
+                                "units_y": 1,
+                                "units_x": 2,
                                 "units_hit_points": 9,
                                 "units_players_id": 90001,
                             },
                             "defender": {
                                 "units_id": 99002,
-                                "units_y": 3,
-                                "units_x": 1,
+                                "units_y": 1,
+                                "units_x": 3,
                                 "units_hit_points": 0,
                             },
                         }
@@ -504,6 +566,82 @@ class TestOracleFireResolve(unittest.TestCase):
         }
         apply_oracle_action_json(s, obj, {90001: 0}, envelope_awbw_player_id=90001)
         self.assertIsNone(s.get_unit_at(1, 3))
+
+    def test_resolve_raises_when_pinned_awbw_units_id_cannot_strike_but_alternate_can_bucket_b(
+        self,
+    ) -> None:
+        """Phase 8 Lane I: AWBW units_id maps to a unit that cannot reach the defender while another friendly can.
+
+        Without an id pin the resolver tie-broke to the alternate striker and produced a
+        misleading ``_apply_attack`` range error (GL 1628198 / 1633184 shape).
+        """
+        m = load_map(77060, POOL_PATH, MAPS_DIR)
+        s = make_initial_state(m, 1, 1, tier_name="T3", starting_funds=0)
+        s.units[0] = []
+        s.units[1] = []
+        nt = UNIT_STATS[UnitType.NEO_TANK]
+        tk = UNIT_STATS[UnitType.TANK]
+        ist = UNIT_STATS[UnitType.INFANTRY]
+        s.units[0].append(
+            Unit(
+                UnitType.NEO_TANK,
+                0,
+                100,
+                nt.max_ammo,
+                nt.max_fuel,
+                (12, 9),
+                False,
+                [],
+                False,
+                20,
+                7001,
+            )
+        )
+        s.units[0].append(
+            Unit(
+                UnitType.TANK,
+                0,
+                100,
+                tk.max_ammo,
+                tk.max_fuel,
+                (11, 7),
+                False,
+                [],
+                False,
+                20,
+                7002,
+            )
+        )
+        s.units[1].append(
+            Unit(
+                UnitType.INFANTRY,
+                1,
+                100,
+                ist.max_ammo,
+                ist.max_fuel,
+                (11, 6),
+                False,
+                [],
+                False,
+                20,
+                8001,
+            )
+        )
+        s.active_player = 0
+        s.action_stage = ActionStage.SELECT
+        with self.assertRaises(UnsupportedOracleAction) as ctx:
+            _resolve_fire_or_seam_attacker(
+                s,
+                engine_player=0,
+                awbw_units_id=7001,
+                anchor_r=12,
+                anchor_c=8,
+                target_r=11,
+                target_c=6,
+                hp_hint=10,
+            )
+        self.assertIn("7001", str(ctx.exception))
+        self.assertIn("upstream drift", str(ctx.exception))
 
 
 if __name__ == "__main__":

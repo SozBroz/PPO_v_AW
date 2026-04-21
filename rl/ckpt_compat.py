@@ -15,7 +15,11 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import gymnasium as gym
+import numpy as np
 import torch
+
+from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS
 
 # Legacy layout: 28 unit + 1 HP + 15 terrain + 15 property + 3 capture = 62
 # Current:      28 unit + 2 HP + 15 terrain + 15 property + 3 capture = 63
@@ -128,6 +132,80 @@ def materialize_sb3_zip_with_spatial_compat(ckpt_path: Path) -> tuple[Path, bool
     return out_path, True
 
 
+def _current_awbw_observation_space() -> gym.spaces.Dict:
+    """Dict space matching ``AWBWEnv`` / ``encode_state`` (63 spatial channels)."""
+    return gym.spaces.Dict(
+        {
+            "spatial": gym.spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=(GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS),
+                dtype=np.float32,
+            ),
+            "scalars": gym.spaces.Box(
+                low=-1.0,
+                high=10.0,
+                shape=(N_SCALARS,),
+                dtype=np.float32,
+            ),
+        }
+    )
+
+
+def _sync_loaded_model_observation_space(model) -> None:
+    """
+    Legacy zips still deserialize ``observation_space`` with 62 spatial channels.
+    After stem weights are expanded to 63, align SB3's space so ``predict`` accepts
+    env observations.
+    """
+    obs_sp = getattr(model, "observation_space", None)
+    if not isinstance(obs_sp, gym.spaces.Dict):
+        return
+    sp = obs_sp.spaces.get("spatial")
+    if not isinstance(sp, gym.spaces.Box):
+        return
+    if sp.shape != (GRID_SIZE, GRID_SIZE, 62):
+        return
+    fixed = _current_awbw_observation_space()
+    model.observation_space = fixed
+    pol = getattr(model, "policy", None)
+    if pol is not None and hasattr(pol, "observation_space"):
+        pol.observation_space = fixed
+
+
+def _register_numpy2_unpickle_shim() -> None:
+    """
+    SB3 zips pickled on NumPy 2 reference ``numpy._core.numeric`` (etc.).
+    NumPy 1.26 ships a stub ``numpy/_core`` package **without** those modules.
+    Pre-seed ``sys.modules`` so ``cloudpickle`` and plain imports resolve them
+    to the real ``numpy.core.*`` implementations.
+    """
+    import importlib
+    import sys
+
+    if getattr(_register_numpy2_unpickle_shim, "_done", False):
+        return
+
+    # NumPy 1.26 exposes ``np._core`` as a lazy alias even though
+    # ``numpy._core.numeric`` is not importable — do not use ``hasattr(np, "_core")``.
+    try:
+        importlib.import_module("numpy._core.numeric")
+        setattr(_register_numpy2_unpickle_shim, "_done", True)
+        return
+    except ModuleNotFoundError:
+        pass
+
+    setattr(_register_numpy2_unpickle_shim, "_done", True)
+    importlib.import_module("numpy._core")
+    import numpy.core.multiarray as _multiarray
+    import numpy.core.numeric as _numeric
+    import numpy.core.umath as _umath
+
+    sys.modules["numpy._core.multiarray"] = _multiarray
+    sys.modules["numpy._core.numeric"] = _numeric
+    sys.modules["numpy._core.umath"] = _umath
+
+
 def load_maskable_ppo_compat(path: str | Path, **kwargs):
     """
     ``MaskablePPO.load`` with automatic 62→63 spatial stem migration when needed.
@@ -135,12 +213,15 @@ def load_maskable_ppo_compat(path: str | Path, **kwargs):
     Writes a temp zip under ``<repo>/.tmp/`` when patching; removes it after
     load (best effort on Windows).
     """
+    _register_numpy2_unpickle_shim()
     from sb3_contrib import MaskablePPO  # type: ignore[import]
 
     p = Path(path)
     use_path, is_temp = materialize_sb3_zip_with_spatial_compat(p)
     try:
-        return MaskablePPO.load(str(use_path), **kwargs)
+        model = MaskablePPO.load(str(use_path), **kwargs)
+        _sync_loaded_model_observation_space(model)
+        return model
     finally:
         if is_temp:
             gc.collect()

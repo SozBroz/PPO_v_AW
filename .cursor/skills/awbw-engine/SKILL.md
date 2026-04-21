@@ -9,6 +9,8 @@ A Python re-implementation of Advance Wars by Web with an RL training loop and a
 
 Read this file first. Read `reference.md` only when you need exact field-by-field details (PHP serialization layout, action JSON shapes, full unit table, CO id list).
 
+Informal **player 1 / player 2** (first vs second human) vs engine **P0/P1** (seats 0/1): see `.cursor/skills/awbw-seat-vocabulary/SKILL.md`.
+
 ## Repository layout
 
 ```

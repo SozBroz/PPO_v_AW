@@ -200,6 +200,24 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
         if stats.unit_class == "vehicle":
             move_range += 2
 
+    # Andy SCOP (Hyper Upgrade): +1 movement for all units (AWBW Power envelope
+    # ``global.units_movement_points``; COP is heal-only — no movement bonus).
+    if co.co_id == 1 and co.scop_active:
+        move_range += 1
+
+    # Koal COP (Forced March): +1 movement to all own units globally. The wiki
+    # text "+1 on road tiles" is misleading; live AWBW Power envelopes for Koal
+    # COP carry ``global.units_movement_points: 1`` and unit snapshots show
+    # ``movement_points = base + 1`` regardless of starting tile (Phase 11D-F2
+    # recon, gids 1605367 and 1630794, both with no roads on the failing path).
+    # The road -1 cost discount is applied separately in
+    # ``engine/weather.py::effective_move_cost`` and stacks with this bonus.
+    # SCOP "Trail of Woe" is intentionally NOT bumped here: weather.py already
+    # applies -2 cost per road tile, which is sufficient for the SCOP's road
+    # behavior; a global +2 has not been confirmed by replay evidence.
+    if co.co_id == 21 and co.cop_active:
+        move_range += 1
+
     # Fuel hard-caps movement: a unit cannot spend more MP than it has fuel.
     move_range = min(move_range, unit.fuel)
 
@@ -300,20 +318,16 @@ def get_attack_targets(
 
     for dr in range(-max_r, max_r + 1):
         for dc in range(-max_r, max_r + 1):
-            # Indirect: Manhattan ring (AWBW artillery / rockets). Non-indirect with
-            # range 1–1: Chebyshev 1 = eight adjacent tiles (includes diagonals).
-            if stats.is_indirect:
-                dist = abs(dr) + abs(dc)
-                if dist < min_r or dist > max_r:
-                    continue
-            elif min_r == 1 and max_r == 1:
-                cheb = max(abs(dr), abs(dc))
-                if cheb != 1:
-                    continue
-            else:
-                dist = abs(dr) + abs(dc)
-                if dist < min_r or dist > max_r:
-                    continue
+            # AWBW canon: attack range is **Manhattan** distance for ALL units.
+            # Direct (min=max=1) hits the four orthogonal neighbours only —
+            # NEVER diagonals. Indirects use the standard min..max Manhattan
+            # ring. Verified against AWBW Wiki (Units / Overview), Carnaghi
+            # 2022 ("on axis not diagonally"), and 936 GL std-tier replays
+            # (62,614 direct-r1 Fire envelopes, zero diagonals). The prior
+            # Chebyshev-1 special case for direct r1 was the Phase 6 bug.
+            dist = abs(dr) + abs(dc)
+            if dist < min_r or dist > max_r:
+                continue
             tr, tc = mr + dr, mc + dc
             if not (0 <= tr < state.map_data.height and 0 <= tc < state.map_data.width):
                 continue
@@ -413,6 +427,8 @@ def get_legal_actions(state: GameState) -> list[Action]:
 def _get_select_actions(state: GameState, player: int) -> list[Action]:
     actions: list[Action] = []
 
+    # COP/SCOP: emit only when meter/threshold and exclusivity rules allow
+    # (mirrors ``COState.can_activate_cop`` / ``can_activate_scop``).
     co = state.co_states[player]
     if co.can_activate_cop():
         actions.append(Action(ActionType.ACTIVATE_COP))
@@ -428,9 +444,9 @@ def _get_select_actions(state: GameState, player: int) -> list[Action]:
             if not carve_out:
                 has_unmoved = True
 
-    # END_TURN is only legal once every friendly unit has acted (or if there
-    # are no units at all). This forces the agent to move every unit each turn;
-    # choosing a no-op is still possible via SELECT_UNIT → WAIT on the same tile.
+    # END_TURN: only when no unmoved unit blocks (loaded-transport carve-out
+    # above). Crafted ``step(END_TURN)`` while unmoved units exist is rejected
+    # by Phase 3 STEP-GATE in ``GameState.step``, not here.
     #
     # Loaded transports (carry_capacity > 0) with cargo aboard do not block
     # END_TURN: loaded transports are tactically optional — see
@@ -547,6 +563,8 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
     dest_tid  = state.map_data.terrain[move_pos[0]][move_pos[1]]
     dest_info = get_terrain(dest_tid)
 
+    # CAPTURE: only foot units (``UNIT_STATS.can_capture``) on an opponent or
+    # neutral income property (excludes owned tiles).
     if dest_info.is_property and stats.can_capture:
         prop = state.get_property_at(*move_pos)
         if prop is not None and prop.owner != player:
@@ -690,15 +708,23 @@ def _black_boat_repair_eligible(state: GameState, ally: Unit) -> bool:
 
 
 def _build_cost(ut: UnitType, state: GameState, player: int, pos: tuple[int, int]) -> int:
-    """Adjusted build cost after CO modifiers."""
+    """Adjusted build cost after CO modifiers.
+
+    Source: AWBW CO Chart https://awbw.amarriner.com/co.php
+      * Kanbei  (3)  — units cost +20% more  → ×1.20
+      * Colin   (15) — units cost  20% less  → ×0.80
+      * Hachi   (17) — units cost  10% less  → ×0.90 (D2D, **all build sites**,
+        not just bases). Phase 10T section 3 flagged the previous "50% on
+        ``terrain.is_base`` only" heuristic as a HIGH-priority canon gap; the
+        chart line is "Units cost 10% less". See
+        ``docs/oracle_exception_audit/phase11a_kindle_hachi_canon.md``.
+    """
     cost = UNIT_STATS[ut].cost
     co   = state.co_states[player]
     if co.co_id == 3:            # Kanbei: 120% cost
         cost = int(cost * 1.2)
-    elif co.co_id == 15:        # Colin: 80% cost
+    elif co.co_id == 15:         # Colin: 80% cost
         cost = int(cost * 0.8)
-    elif co.co_id == 17:        # Hachi: 50% from cities (bases in AWBW context)
-        terrain = get_terrain(state.map_data.terrain[pos[0]][pos[1]])
-        if terrain.is_base:
-            cost = cost // 2
+    elif co.co_id == 17:         # Hachi: 90% cost on every build (CO Chart "Units cost 10% less")
+        cost = int(cost * 0.9)
     return cost

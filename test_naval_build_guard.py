@@ -12,7 +12,7 @@ import unittest
 
 from engine.action import Action, ActionType, ActionStage, get_producible_units
 from engine.co import make_co_state_safe
-from engine.game import GameState
+from engine.game import GameState, IllegalActionError
 from engine.map_loader import MapData, PropertyState
 from engine.terrain import get_terrain
 from engine.unit import UnitType
@@ -98,12 +98,13 @@ class TestNavalBuildTerrain(unittest.TestCase):
         self.assertIn(UnitType.LANDER, produced)
 
     def test_crafted_black_boat_on_base_rejected(self) -> None:
-        """Bypass the legal-action filter: engine's _apply_build must still reject."""
+        """Phase 10M: crafted illegal naval BUILD hits STEP-GATE before `_apply_build`."""
         state = _state_with_factory(terrain_id=35, is_base=True, is_airport=False, is_port=False)
         funds_before = state.funds[0]
         action = Action(ActionType.BUILD, move_pos=(0, 1), unit_type=UnitType.BLACK_BOAT)
 
-        state.step(action)
+        with self.assertRaises(IllegalActionError):
+            state.step(action)
 
         self.assertEqual(len(state.units[0]), 0, "Black Boat must not materialize on a base")
         self.assertEqual(state.funds[0], funds_before, "funds must not be debited on rejection")

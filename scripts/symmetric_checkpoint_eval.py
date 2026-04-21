@@ -27,9 +27,9 @@ if str(ROOT) not in sys.path:
 
 def _worker_game(payload: dict) -> tuple[int, int, bool]:
     """Return (game_index, winner, truncated_flag)."""
-    from sb3_contrib import MaskablePPO
     from sb3_contrib.common.wrappers import ActionMasker
 
+    from rl.ckpt_compat import load_maskable_ppo_compat
     from rl.env import AWBWEnv
 
     game_i = int(payload["game_i"])
@@ -50,7 +50,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool]:
 
         def __call__(self, obs, mask):
             if self._m is None:
-                self._m = MaskablePPO.load(str(df), device="cpu")
+                self._m = load_maskable_ppo_compat(str(df), device="cpu")
             a, _ = self._m.predict(obs, action_masks=mask, deterministic=deterministic)
             return int(a)
 
@@ -71,7 +71,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool]:
         AWBWEnv(**env_kw),
         lambda e: e.action_masks(),
     )
-    p0 = MaskablePPO.load(str(ch), device="cpu")
+    p0 = load_maskable_ppo_compat(str(ch), device="cpu")
     obs, _ = env.reset(seed=seed)
     done = False
     last_trunc = False

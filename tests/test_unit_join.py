@@ -101,5 +101,8 @@ def test_illegal_wait_on_join_tile():
     s, mover, partner = _empty_two_seat_state()
     s.step(Action(ActionType.SELECT_UNIT, unit_pos=mover.pos))
     s.step(Action(ActionType.SELECT_UNIT, unit_pos=mover.pos, move_pos=partner.pos))
-    with pytest.raises(ValueError, match="JOIN"):
+    # STEP-GATE (Phase 3) rejects this WAIT before ``_apply_wait`` reaches
+    # its JOIN-specific ValueError; either error path is an acceptable
+    # rejection of the illegal move.
+    with pytest.raises(ValueError, match="JOIN|get_legal_actions"):
         s.step(Action(ActionType.WAIT, unit_pos=mover.pos, move_pos=partner.pos))
