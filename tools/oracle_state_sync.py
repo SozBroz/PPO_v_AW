@@ -54,6 +54,24 @@ MAX_PLAUSIBLE_HP_SWING_PER_ENVELOPE = 100
 MAX_TELEPORT_DISTANCE = 10
 
 
+def _php_snapshot_name_canonical(php_name: str) -> str:
+    """Map AWBW snapshot short names to :data:`UNIT_STATS` ``name`` strings.
+
+    Keep aligned with ``tools.replay_snapshot_compare.compare_units`` aliases.
+    Bipartite sync buckets must use the same canonical form as ``eng_buckets``
+    (``UNIT_STATS[...].name``); otherwise PHP ``Md.Tank`` rows never pair
+    with engine ``Medium Tank`` units and drift reconciliation wrongly
+    kills the engine unit as ``engine_only`` while flagging the PHP tile as
+    ``php_only``.
+    """
+    s = str(php_name).strip()
+    aliases = {
+        "Md.Tank": "Medium Tank",
+        "Md. Tank": "Medium Tank",
+    }
+    return aliases.get(s, s)
+
+
 def _php_internal_hp(php_hit_points: Any) -> int:
     """PHP ``hit_points = internal_hp / 10`` (float). Recover internal HP.
 
@@ -231,7 +249,7 @@ def sync_state_to_snapshot(
             # at this tile (move-into-just-vacated) — resurrecting would be
             # wrong; keep it as a structural divergence to triage.
             dead = eng_by_tile_dead.get(key)
-            php_name = str(php_unit.get("name", "")).strip()
+            php_name = _php_snapshot_name_canonical(str(php_unit.get("name", "")))
             if dead is not None and UNIT_STATS[dead.unit_type].name == php_name:
                 report.deltas.append(
                     UnitSyncDelta(
@@ -286,7 +304,10 @@ def sync_state_to_snapshot(
 
     php_buckets: dict[tuple[int, str], list[tuple[int, int, int]]] = {}
     for k in leftover_php_only:
-        ts = (k[0], str(php_by_tile[k].get("name", "")).strip())
+        ts = (
+            k[0],
+            _php_snapshot_name_canonical(str(php_by_tile[k].get("name", ""))),
+        )
         php_buckets.setdefault(ts, []).append(k)
     eng_buckets: dict[tuple[int, str], list[tuple[int, int, int]]] = {}
     for k in leftover_engine_only:

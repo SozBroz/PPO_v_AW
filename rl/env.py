@@ -60,12 +60,6 @@ TIME_COST_ENV = "AWBW_TIME_COST"
 INCOME_TERM_COEF_ENV = "AWBW_INCOME_TERM_COEF"
 # When ``1``, zero all BUILD action-mask entries except ``INFANTRY`` (narrow bootstrap).
 BUILD_MASK_INFANTRY_ONLY_ENV = "AWBW_BUILD_MASK_INFANTRY_ONLY"
-# When ``1``, at SELECT stage mask END_TURN whenever the active player still
-# has at least one infantry/mech with moved=False AND at least one capturable
-# property exists on the map. Prevents the "do nothing, end turn" pessimal
-# policy from being a reachable local minimum during early training. See plan
-# p0-capture-architecture-fix Tier 4.
-END_TURN_GATE_ENV = "AWBW_END_TURN_GATE"
 # Probability that the learner's chosen action is overridden by the same
 # capture-greedy heuristic that bootstraps the opponent. DAGGER-lite teacher
 # mixing — gives P0 the same scaffold P1 has had silently. Read once per
@@ -260,48 +254,6 @@ def _strip_non_infantry_builds(mask: np.ndarray, state: GameState) -> None:
             idx = _action_to_flat(action)
             if 0 <= idx < ACTION_SPACE_SIZE:
                 mask[idx] = False
-
-
-def _has_capturable_property(state: GameState) -> bool:
-    """True iff a non-comm-tower / non-lab property is neutral or enemy-owned."""
-    me = state.active_player
-    for prop in state.properties:
-        if prop.is_comm_tower or prop.is_lab:
-            continue
-        if prop.owner is None or prop.owner != me:
-            return True
-    return False
-
-
-def _has_unmoved_capturer(state: GameState) -> bool:
-    """True iff active player has an alive infantry/mech with moved=False."""
-    me = state.active_player
-    for u in state.units.get(me, []):
-        if not u.is_alive or u.moved:
-            continue
-        if u.unit_type in (UnitType.INFANTRY, UnitType.MECH):
-            return True
-    return False
-
-
-def _maybe_gate_end_turn(mask: np.ndarray, state: GameState) -> None:
-    """In-place: clear END_TURN at SELECT stage when a capture chain is still possible.
-
-    Prevents the trivial "select nothing, end turn" pessimal policy from being
-    a reachable local minimum during early training. Only fires at SELECT
-    stage; mid-chain SELECT_UNIT/MOVE/ACTION stages are untouched. END_TURN is
-    always allowed if no capturer is ready or no capturable property exists,
-    so the gate cannot deadlock the agent.
-    """
-    from engine.action import ActionStage
-
-    if state.action_stage != ActionStage.SELECT:
-        return
-    if not _has_unmoved_capturer(state):
-        return
-    if not _has_capturable_property(state):
-        return
-    mask[0] = False  # END_TURN flat index is 0 (see _action_to_flat).
 
 
 class AWBWEnv(gym.Env):
@@ -735,9 +687,6 @@ class AWBWEnv(gym.Env):
         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
         if flag in ("1", "true", "yes", "on"):
             _strip_non_infantry_builds(mask, self.state)
-        gate = os.environ.get(END_TURN_GATE_ENV, "").strip().lower()
-        if gate in ("1", "true", "yes", "on"):
-            _maybe_gate_end_turn(mask, self.state)
         return mask
 
     def render(self) -> str | None:
@@ -1074,15 +1023,12 @@ class AWBWEnv(gym.Env):
             "approx_engine_actions_per_p0_step": approx_engine_actions_per_p0_step,
             "opponent_checkpoint_reload_count": opponent_checkpoint_reload_count,
 
-            # Tier 1/4 (plan p0-capture-architecture-fix): visibility into
-            # the teacher-mix / END_TURN-gate interventions so we can verify
-            # they are firing and slice metrics by mix value.
+            # Tier 1 (plan p0-capture-architecture-fix): visibility into
+            # teacher-mix so we can verify it is firing and slice metrics by mix value.
             "learner_greedy_mix": float(getattr(self, "_learner_greedy_mix", 0.0)),
             "learner_teacher_overrides": int(getattr(self, "_learner_teacher_overrides", 0)),
-            "end_turn_gate_active": (
-                os.environ.get(END_TURN_GATE_ENV, "").strip().lower()
-                in ("1", "true", "yes", "on")
-            ),
+            # Deprecated: env-side END_TURN gate removed; engine/action.py:_get_select_actions enforces the rule. Field retained for log schema continuity.
+            "end_turn_gate_active": False,
 
             # Timestamps
             "timestamp": timestamp,

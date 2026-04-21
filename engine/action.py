@@ -23,6 +23,14 @@ from engine.unit import UnitType, UNIT_STATS, Unit
 from engine.terrain import get_terrain, get_move_cost, INF_PASSABLE
 from engine.weather import effective_move_cost
 
+import os as _os
+
+# Opt-in RL training: when set (see _get_move_actions), infantry/mech MOVE
+# masks are restricted to capturable enemy/neutral property tiles when any
+# exist in range. Default OFF — replays call step() directly and never hit
+# get_legal_actions, so they are unaffected.
+_CAPTURE_MOVE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -414,12 +422,20 @@ def _get_select_actions(state: GameState, player: int) -> list[Action]:
     has_unmoved = False
     for unit in state.units[player]:
         if not unit.moved:
-            has_unmoved = True
             actions.append(Action(ActionType.SELECT_UNIT, unit_pos=unit.pos))
+            stats = UNIT_STATS[unit.unit_type]
+            carve_out = stats.carry_capacity > 0 and len(unit.loaded_units) > 0
+            if not carve_out:
+                has_unmoved = True
 
     # END_TURN is only legal once every friendly unit has acted (or if there
     # are no units at all). This forces the agent to move every unit each turn;
     # choosing a no-op is still possible via SELECT_UNIT → WAIT on the same tile.
+    #
+    # Loaded transports (carry_capacity > 0) with cargo aboard do not block
+    # END_TURN: loaded transports are tactically optional — see
+    # _get_select_actions carve-out. SELECT_UNIT is still emitted so the agent
+    # may act on the transport if desired.
     if not has_unmoved:
         actions.append(Action(ActionType.END_TURN))
 
@@ -451,6 +467,31 @@ def _get_move_actions(state: GameState, player: int) -> list[Action]:
     if unit is None:
         return []
     reachable = get_reachable_tiles(state, unit)
+    # --- AWBW_CAPTURE_MOVE_GATE (RL / get_legal_actions only; default OFF) ---
+    # When the env var is "1"/"true"/"yes"/"on", capturers with at least one
+    # reachable capturable tile (enemy/neutral property; not comm tower / lab;
+    # same notion as rl/env._has_capturable_property per-tile) may only MOVE
+    # onto those property tiles — closing the "sidestep to grass then WAIT"
+    # loophole. If the filtered set would be empty, we keep the full reachable
+    # set (defensive). Unset env → identical behaviour to pre-gate engine.
+    gate_raw = _os.environ.get(_CAPTURE_MOVE_GATE_ENV, "").strip().lower()
+    if (
+        gate_raw in ("1", "true", "yes", "on")
+        and UNIT_STATS[unit.unit_type].can_capture
+    ):
+        capturable: set[tuple[int, int]] = set()
+        for pos in reachable:
+            tid = state.map_data.terrain[pos[0]][pos[1]]
+            if not get_terrain(tid).is_property:
+                continue
+            prop = state.get_property_at(*pos)
+            if prop is None or prop.is_comm_tower or prop.is_lab:
+                continue
+            if prop.owner is not None and prop.owner == player:
+                continue
+            capturable.add(pos)
+        if capturable:
+            reachable = capturable
     return [
         Action(ActionType.SELECT_UNIT, unit_pos=unit.pos, move_pos=pos)
         for pos in reachable

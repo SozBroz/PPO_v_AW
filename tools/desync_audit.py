@@ -181,6 +181,61 @@ def _load_catalog(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _merge_catalog_files(paths: list[Path]) -> dict[str, Any]:
+    """
+    Load each catalog path in order and merge ``games`` by ``games_id``; the
+    last file wins when the same ``games_id`` appears in more than one catalog.
+    """
+    by_gid: dict[int, dict[str, Any]] = {}
+    for path in paths:
+        raw = _load_catalog(path)
+        games = raw.get("games") or {}
+        for _k, g in games.items():
+            if isinstance(g, dict) and "games_id" in g:
+                by_gid[int(g["games_id"])] = g
+    return {"games": {str(gid): by_gid[gid] for gid in sorted(by_gid)}}
+
+
+def _count_zip_filter_stats(
+    *,
+    zips_dir: Path,
+    catalog: dict[str, Any],
+    games_ids: Optional[set[int]],
+    std_map_ids: set[int],
+) -> tuple[int, int]:
+    """
+    Walk ``zips_dir`` (same stem/games_ids rules as ``_iter_zip_targets``).
+    For zips that have a catalog row, count how many are excluded only by the
+    std map pool vs how many pass the pool but lack both CO ids (CO completeness).
+    """
+    games = catalog.get("games") or {}
+    by_id: dict[int, dict[str, Any]] = {}
+    for _k, g in games.items():
+        if isinstance(g, dict) and "games_id" in g:
+            by_id[int(g["games_id"])] = g
+    filtered_map_pool = 0
+    filtered_co = 0
+    if not zips_dir.is_dir():
+        return 0, 0
+    for p in sorted(zips_dir.glob("*.zip")):
+        stem = p.stem
+        if not stem.isdigit():
+            continue
+        gid = int(stem)
+        if games_ids is not None and gid not in games_ids:
+            continue
+        meta = by_id.get(gid)
+        if meta is None:
+            continue
+        mid = _meta_int(meta, "map_id", -1)
+        if mid not in std_map_ids:
+            filtered_map_pool += 1
+            continue
+        if not catalog_row_has_both_cos(meta):
+            filtered_co += 1
+    return filtered_map_pool, filtered_co
+
+
 def _iter_zip_targets(
     *,
     zips_dir: Path,
@@ -417,7 +472,17 @@ def _audit_one(
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--catalog", type=Path, default=CATALOG_DEFAULT)
+    ap.add_argument(
+        "--catalog",
+        type=Path,
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Catalog JSON (repeatable). Merges ``games`` in order; duplicate "
+            f"games_id rows use the last file. Default: {CATALOG_DEFAULT}."
+        ),
+    )
     ap.add_argument("--zips-dir", type=Path, default=ZIPS_DEFAULT)
     ap.add_argument("--map-pool", type=Path, default=MAP_POOL_DEFAULT)
     ap.add_argument("--maps-dir", type=Path, default=MAPS_DIR_DEFAULT)
@@ -449,9 +514,13 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not args.catalog.is_file():
-        print(f"[desync_audit] missing catalog: {args.catalog}", file=sys.stderr)
-        return 1
+    catalog_paths: list[Path] = (
+        list(args.catalog) if args.catalog is not None else [CATALOG_DEFAULT]
+    )
+    for cp in catalog_paths:
+        if not cp.is_file():
+            print(f"[desync_audit] missing catalog: {cp}", file=sys.stderr)
+            return 1
     if not args.zips_dir.is_dir():
         print(f"[desync_audit] missing zips dir: {args.zips_dir}", file=sys.stderr)
         return 1
@@ -459,7 +528,23 @@ def main() -> int:
         print(f"[desync_audit] missing map pool: {args.map_pool}", file=sys.stderr)
         return 1
 
-    catalog = _load_catalog(args.catalog)
+    # Single path: use the raw JSON parse so default runs match the historical
+    # ``_load_catalog`` behavior byte-for-byte in ``--register`` output.
+    if len(catalog_paths) == 1:
+        catalog = _load_catalog(catalog_paths[0])
+    else:
+        catalog = _merge_catalog_files(catalog_paths)
+    games_block = catalog.get("games") or {}
+    total_games = sum(
+        1
+        for _k, g in games_block.items()
+        if isinstance(g, dict) and "games_id" in g
+    )
+    paths_display = " ".join(str(p) for p in catalog_paths)
+    print(
+        f"[desync_audit] catalogs: {paths_display} total_games={total_games}",
+        file=sys.stderr,
+    )
     std_map_ids = gl_std_map_ids(args.map_pool)
     gid_set = set(args.games_id) if args.games_id else None
     if args.from_bottom and args.max_games is None:
@@ -467,6 +552,12 @@ def main() -> int:
             "[desync_audit] --from-bottom without --max-games has no effect (auditing all matches)",
             file=sys.stderr,
         )
+    filtered_map_pool, filtered_co = _count_zip_filter_stats(
+        zips_dir=args.zips_dir,
+        catalog=catalog,
+        games_ids=gid_set,
+        std_map_ids=std_map_ids,
+    )
     targets = list(_iter_zip_targets(
         zips_dir=args.zips_dir,
         catalog=catalog,
@@ -475,6 +566,12 @@ def main() -> int:
         from_bottom=args.from_bottom,
         std_map_ids=std_map_ids,
     ))
+    print(
+        f"[desync_audit] zips_matched={len(targets)} "
+        f"filtered_out_by_map_pool={filtered_map_pool} "
+        f"filtered_out_by_co={filtered_co}",
+        file=sys.stderr,
+    )
     if not targets:
         print("[desync_audit] no zips matched (catalog + zips_dir intersection empty)")
         return 0

@@ -9,7 +9,7 @@ Designed first for zips **produced by this repo** (``write_awbw_replay_from_trac
 where Move/Build/Fire/End shapes match ``tools/export_awbw_replay_actions.py``.
 Live-site oracle zips may include extra action kinds; unmapped ones raise
 ``UnsupportedOracleAction``. Standalone ``Load`` / ``Unload`` / ``Supply`` / ``Repair`` /
-``AttackSeam`` / ``Hide`` (Sub dive / Stealth hide → ``DIVE_HIDE``) / ``Power`` are mapped;
+``AttackSeam`` / ``Hide`` / ``Unhide`` (Sub dive / surface & Stealth hide / unhide → ``DIVE_HIDE`` toggle) / ``Power`` are mapped;
 ``Load`` uses a nested ``Move`` like ``Move`` then JOIN/LOAD/CAPTURE/WAIT.
 ``Unload`` uses ``transportID`` + unloaded unit tile / type (``transportID``
 may match the **carrier** or the **cargo** drawable id). ``unit.global`` is
@@ -1648,6 +1648,46 @@ def _oracle_resolve_move_paths(
     return _oracle_move_paths_for_envelope(move, envelope_awbw_player_id)
 
 
+def _oracle_resolve_nested_hide_unhide_units_id(
+    nested: dict[str, Any],
+    envelope_awbw_player_id: Optional[int],
+) -> Optional[int]:
+    """Resolve ``units_id`` from nested ``Hide`` / ``Unhide`` when ``Move`` is absent or ``[]``.
+
+    AWBW may omit a movement segment when the unit already sits on the dive/hide tile.
+    The nested block can carry full ``unit.global`` / per-seat dicts (via
+    :func:`_oracle_resolve_move_global_unit`) or a compact vision map
+    ``{ awbw_player_id: units_id, ... }`` with scalar values.
+    """
+    umap = nested.get("unit")
+    if not isinstance(umap, dict):
+        return None
+    syn: dict[str, Any] = {"unit": umap}
+    gu = _oracle_resolve_move_global_unit(syn, envelope_awbw_player_id)
+    uid_raw = gu.get("units_id")
+    if uid_raw is not None:
+        try:
+            return int(uid_raw)
+        except (TypeError, ValueError):
+            pass
+    if envelope_awbw_player_id is not None:
+        pid = int(envelope_awbw_player_id)
+        raw = umap.get(str(pid), umap.get(pid))
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            return int(raw)
+    for _k, v in umap.items():
+        if _k == "global":
+            continue
+        if isinstance(v, int) and not isinstance(v, bool):
+            return int(v)
+        if isinstance(v, dict) and v.get("units_id") is not None:
+            try:
+                return int(v["units_id"])
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def _oracle_fire_combat_info_merged(
     fire_blk: dict[str, Any],
     envelope_awbw_player_id: Optional[int],
@@ -2617,6 +2657,25 @@ def _unit_by_awbw_units_id(state: GameState, units_id: int) -> Optional[Unit]:
         for u in pl:
             if int(u.unit_id) == int(units_id) and u.is_alive:
                 return u
+    return None
+
+
+def _oracle_sole_dive_hide_actor_for_player(state: GameState, eng: int) -> Optional[Unit]:
+    """Fallback when AWBW ``units_id`` does not match engine ``unit_id`` (predeploy uses
+    monotonic ids) and the compact ``Move: []`` envelope carries no tile mirror.
+
+    If exactly one alive dive/hide-capable unit (``UNIT_STATS.*.can_dive``) exists
+    for ``eng``, it is the unique candidate for ``DIVE_HIDE`` / hide in place.
+    """
+    hits: list[Unit] = []
+    for u in state.units[eng]:
+        if not u.is_alive:
+            continue
+        if not UNIT_STATS[u.unit_type].can_dive:
+            continue
+        hits.append(u)
+    if len(hits) == 1:
+        return hits[0]
     return None
 
 
@@ -5306,7 +5365,7 @@ def _oracle_auto_wait_if_switching_unit(
     move_dict: Optional[dict[str, Any]] = None
     if kind == "Move":
         move_dict = obj
-    elif kind in ("Capt", "Load", "Join", "Supply", "Hide", "Repair"):
+    elif kind in ("Capt", "Load", "Join", "Supply", "Hide", "Unhide", "Repair"):
         m = obj.get("Move")
         move_dict = m if isinstance(m, dict) else None
     elif kind == "Fire":
@@ -5712,14 +5771,73 @@ def _apply_oracle_action_json_body(
         )
         return
 
-    if kind == "Hide":
-        # AWBW ``Hide`` follows a nested ``Move`` (path) then Sub dive / Stealth hide.
+    if kind in ("Hide", "Unhide"):
+        # AWBW ``Hide`` / ``Unhide``: nested ``Move`` then ``DIVE_HIDE`` (Sub dive/surface, Stealth hide/unhide).
+        # ``Move`` may be ``[]`` or omitted when the unit does not travel (hide/dive in place).
+        label = str(kind)
+        nest_key = "Unhide" if kind == "Unhide" else "Hide"
         move = obj.get("Move")
+
+        def _complete_dive_hide_no_path(
+            eng: int,
+            uid: int,
+            sr_hint: Optional[int],
+            sc_hint: Optional[int],
+        ) -> None:
+            """Finish stale action, advance to ``eng``, resolve unit, emit ``DIVE_HIDE``/``WAIT``."""
+            _oracle_finish_action_if_stale(state, before_engine_step)
+            _oracle_advance_turn_until_player(state, eng, before_engine_step)
+            if int(state.active_player) != eng:
+                raise UnsupportedOracleAction(
+                    f"{label} (no path) for engine P{eng} but active_player={state.active_player}"
+                )
+            u = _unit_by_awbw_units_id(state, uid)
+            if u is None and sr_hint is not None and sc_hint is not None:
+                u = state.get_unit_at(sr_hint, sc_hint)
+            if u is None:
+                sole = _oracle_sole_dive_hide_actor_for_player(state, eng)
+                if sole is not None:
+                    u = sole
+            if u is None:
+                if sr_hint is not None and sc_hint is not None:
+                    miss = (
+                        f"{label} (no path): no unit at ({sr_hint},{sc_hint}) "
+                        f"for awbw id {uid}"
+                    )
+                else:
+                    miss = f"{label} (no path): no unit for awbw id {uid}"
+                raise UnsupportedOracleAction(miss)
+            sr, sc = int(u.pos[0]), int(u.pos[1])
+            if int(u.player) != eng:
+                raise UnsupportedOracleAction(
+                    f"{label} no-path unit owner P{u.player} != active_player={eng}"
+                )
+            _oracle_sync_selection_for_endpoint(
+                state, u, sr, sc, sr, sc, before_engine_step
+            )
+            legal = get_legal_actions(state)
+            chosen_h: Optional[Action] = None
+            for a in legal:
+                if a.action_type == ActionType.DIVE_HIDE and a.move_pos == (sr, sc):
+                    chosen_h = a
+                    break
+            if chosen_h is None:
+                for a in legal:
+                    if a.action_type == ActionType.WAIT and a.move_pos == (sr, sc):
+                        chosen_h = a
+                        break
+            if chosen_h is None:
+                raise UnsupportedOracleAction(
+                    f"{label} (no path): no DIVE_HIDE/WAIT at ({sr},{sc}); "
+                    f"legal={[x.action_type.name for x in legal]}"
+                )
+            _engine_step(state, chosen_h, before_engine_step)
+
         if isinstance(move, dict):
             paths = _oracle_resolve_move_paths(move, envelope_awbw_player_id)
             if paths:
 
-                def _after_hide_move() -> None:
+                def _after_dive_hide_move() -> None:
                     path_end = _path_end_rc(paths)
                     legal = get_legal_actions(state)
                     if not legal:
@@ -5738,7 +5856,7 @@ def _apply_oracle_action_json_body(
                                 break
                     if chosen is None:
                         raise UnsupportedOracleAction(
-                            f"Hide: no DIVE_HIDE/WAIT at {end}; "
+                            f"{label}: no DIVE_HIDE/WAIT at {end}; "
                             f"legal={[x.action_type.name for x in legal]}"
                         )
                     _engine_step(state, chosen, before_engine_step)
@@ -5748,7 +5866,7 @@ def _apply_oracle_action_json_body(
                     move,
                     awbw_to_engine,
                     before_engine_step,
-                    after_move=_after_hide_move,
+                    after_move=_after_dive_hide_move,
                     envelope_awbw_player_id=envelope_awbw_player_id,
                 )
                 return
@@ -5758,43 +5876,43 @@ def _apply_oracle_action_json_body(
                 uid = int(gu["units_id"])
                 pid = int(gu["units_players_id"])
                 eng = awbw_to_engine[pid]
-                _oracle_finish_action_if_stale(state, before_engine_step)
-                _oracle_advance_turn_until_player(state, eng, before_engine_step)
-                if int(state.active_player) != eng:
-                    raise UnsupportedOracleAction(
-                        f"Hide (no path) for engine P{eng} but active_player={state.active_player}"
-                    )
-                u = _unit_by_awbw_units_id(state, uid) or state.get_unit_at(sr, sc)
-                if u is None:
-                    raise UnsupportedOracleAction(
-                        f"Hide (no path): no unit at ({sr},{sc}) for awbw id {uid}"
-                    )
-                if int(u.player) != eng:
-                    raise UnsupportedOracleAction(
-                        f"Hide no-path unit owner P{u.player} != active_player={eng}"
-                    )
-                _oracle_sync_selection_for_endpoint(
-                    state, u, sr, sc, sr, sc, before_engine_step
-                )
-                legal = get_legal_actions(state)
-                chosen_h: Optional[Action] = None
-                for a in legal:
-                    if a.action_type == ActionType.DIVE_HIDE and a.move_pos == (sr, sc):
-                        chosen_h = a
-                        break
-                if chosen_h is None:
-                    for a in legal:
-                        if a.action_type == ActionType.WAIT and a.move_pos == (sr, sc):
-                            chosen_h = a
-                            break
-                if chosen_h is None:
-                    raise UnsupportedOracleAction(
-                        f"Hide (no path): no DIVE_HIDE/WAIT at ({sr},{sc}); "
-                        f"legal={[x.action_type.name for x in legal]}"
-                    )
-                _engine_step(state, chosen_h, before_engine_step)
+                _complete_dive_hide_no_path(eng, uid, sr, sc)
                 return
-        raise UnsupportedOracleAction("Hide without nested Move dict")
+            nested_blk = obj.get(nest_key)
+            if isinstance(nested_blk, dict):
+                uid_in = _oracle_resolve_nested_hide_unhide_units_id(
+                    nested_blk, envelope_awbw_player_id
+                )
+                if uid_in is not None:
+                    if envelope_awbw_player_id is None:
+                        raise UnsupportedOracleAction(
+                            f"{label} in place: missing envelope player id for turn advance"
+                        )
+                    eng_in = awbw_to_engine[int(envelope_awbw_player_id)]
+                    _complete_dive_hide_no_path(eng_in, uid_in, None, None)
+                    return
+            raise UnsupportedOracleAction(f"{label} without nested Move dict")
+
+        if move is None or (isinstance(move, list) and len(move) == 0):
+            nested_blk = obj.get(nest_key)
+            if not isinstance(nested_blk, dict):
+                raise UnsupportedOracleAction(f"{label} without nested Move dict")
+            uid_e = _oracle_resolve_nested_hide_unhide_units_id(
+                nested_blk, envelope_awbw_player_id
+            )
+            if uid_e is None:
+                raise UnsupportedOracleAction(
+                    f"{label} in place: could not resolve units_id from nested block"
+                )
+            if envelope_awbw_player_id is None:
+                raise UnsupportedOracleAction(
+                    f"{label} in place: missing envelope player id for turn advance"
+                )
+            eng_e = awbw_to_engine[int(envelope_awbw_player_id)]
+            _complete_dive_hide_no_path(eng_e, uid_e, None, None)
+            return
+
+        raise UnsupportedOracleAction(f"{label} without nested Move dict")
 
     if kind == "Repair":
         repair_block = obj.get("Repair")
@@ -6461,6 +6579,37 @@ def _apply_oracle_action_json_body(
                     hp_hint=hp_hint,
                 )
             if u is None:
+                # GL 1631943: batched ``Move: []`` / no-path ``Fire`` rows in one
+                # envelope — earlier counters can remove the attacker from the JSON
+                # anchor before a later row applies. When the declared tile is empty
+                # *and* no engine unit can strike the resolved defender tile anymore,
+                # skip like other obsolete combat rows; the trailing snapshot sync
+                # realigns. Do not use when anyone can still hit ``(dr, dc)`` (then
+                # this is a resolver/seat bug, not batch ordering).
+                if (
+                    state.get_unit_at(sr, sc) is None
+                    and not _oracle_diag_target_in_any_attack_targets(state, dr, dc)
+                ):
+                    return
+                # GL **1635658** (extras): duplicate ``Move: []`` / no-path ``Fire`` after
+                # the real strike was applied in a prior envelope. PHP lists defender
+                # ``units_hit_points <= 0``; sync replaced the dead defender tile with
+                # another live unit; the JSON anchor still shows the nominal attacker,
+                # but ``get_attack_targets`` cannot reach the tile (e.g. B-Copter vs
+                # naval — ``get_base_damage`` null). ``compC`` handled only empty-anchor
+                # batch orphans; treat the same closure when no engine unit can strike
+                # ``(dr, dc)`` and the row is already post-kill in AWBW's combat log.
+                dhp_raw = defender.get("units_hit_points")
+                def_postkill_json = False
+                if dhp_raw is not None:
+                    try:
+                        def_postkill_json = int(dhp_raw) <= 0
+                    except (TypeError, ValueError):
+                        def_postkill_json = False
+                if def_postkill_json and not _oracle_diag_target_in_any_attack_targets(
+                    state, dr, dc
+                ):
+                    return
                 raise UnsupportedOracleAction(
                     f"Fire (no path): no attacker P{eng} (awbw id {uid}) at ({sr},{sc})"
                     f"{_oracle_fire_no_attacker_message_suffix(state, dr, dc)}"

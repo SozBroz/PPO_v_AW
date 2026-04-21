@@ -197,14 +197,6 @@ def main() -> None:
             "Sets AWBW_LEARNER_GREEDY_MIX env var; SubprocVecEnv workers inherit."
         ),
     )
-    parser.add_argument(
-        "--end-turn-gate", action="store_true",
-        help=(
-            "At SELECT stage, mask END_TURN whenever the active player has an "
-            "unmoved infantry/mech AND a capturable property exists. Sets "
-            "AWBW_END_TURN_GATE=1; SubprocVecEnv workers inherit."
-        ),
-    )
     args = parser.parse_args()
 
     # ── Resolve device ────────────────────────────────────────────────────────
@@ -256,8 +248,6 @@ def main() -> None:
 
     if args.learner_greedy_mix and args.learner_greedy_mix > 0.0:
         os.environ["AWBW_LEARNER_GREEDY_MIX"] = str(float(args.learner_greedy_mix))
-    if args.end_turn_gate:
-        os.environ["AWBW_END_TURN_GATE"] = "1"
 
     _env_flags = [
         ("AWBW_TIME_COST", os.environ.get("AWBW_TIME_COST")),
@@ -265,7 +255,6 @@ def main() -> None:
         ("AWBW_BUILD_MASK_INFANTRY_ONLY", os.environ.get("AWBW_BUILD_MASK_INFANTRY_ONLY")),
         ("AWBW_LOG_REPLAY_FRAMES", os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
         ("AWBW_LEARNER_GREEDY_MIX", os.environ.get("AWBW_LEARNER_GREEDY_MIX")),
-        ("AWBW_END_TURN_GATE", os.environ.get("AWBW_END_TURN_GATE")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
     if _active:
