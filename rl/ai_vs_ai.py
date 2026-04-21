@@ -4,21 +4,20 @@ AI vs AI self-play runner.
 Usage
 -----
   python -m rl.ai_vs_ai                         # mirror a running train.py (map/tier/COs + ckpt)
-  python -m rl.ai_vs_ai --map-id 98             # specific map
+  python -m rl.ai_vs_ai --map-id 98             # train defaults, but force this map
   python -m rl.ai_vs_ai --ckpt checkpoints/latest.zip
   python -m rl.ai_vs_ai --co0 1 --co1 7        # CO IDs
   python -m rl.ai_vs_ai --random                # force random vs random
   python -m rl.ai_vs_ai --no-open               # don't open replay output folder
-  python -m rl.ai_vs_ai --no-follow-train       # ignore train.py; use defaults below
+  python -m rl.ai_vs_ai --no-follow-train       # never read train.py from memory
 
-With **no arguments** after the module name, this process scans for another local
-process whose command line contains ``train.py`` in training mode (not
-``--watch-only`` / ``--rank`` / ``--features``), parses its CLI with the same
-rules as ``train.py``, and samples one episode from the same distribution as
-``AWBWEnv`` (including ``--curriculum-broad-prob``). The checkpoint is resolved
-like ``SelfPlayTrainer`` startup: ``--checkpoint-dir``, ``--load-promoted`` vs
-``latest.zip``. If the trainer uses ``--capture-move-gate``, the same
-``AWBW_CAPTURE_MOVE_GATE`` behavior is applied.
+Unless ``--no-follow-train`` is set, this process scans for a **training**
+``train.py`` process, parses its CLI, and uses that as the **base** run (same
+idea as ``SelfPlayTrainer`` / ``AWBWEnv``). **Any** ``--map-id``, ``--tier``,
+``--co0`` / ``--co1``, ``--ckpt``, or ``--capture-move-gate`` you add on the
+``ai_vs_ai`` command line **overrides** only those fields; everything else still
+comes from the live trainer (checkpoint dir, promoted load, curriculum
+broad prob, capture gate when not overridden, etc.).
 
 After export, the **AWBW Replay Player** desktop app is started with the new
 ``.zip`` (see ``AWBW_REPLAY_PLAYER_EXE`` and ``third_party/AWBW-Replay-Player``).
@@ -255,6 +254,30 @@ def _sample_from_train_ns(train_ns: Any, rng: random.Random) -> tuple[int, str, 
         rng=rng,
     )
     return mid, tier, c0, c1
+
+
+def _merge_train_ns_with_explicit_ai_args(
+    train_ns: Any,
+    args: argparse.Namespace,
+) -> Any:
+    """Shallow copy of ``train_ns`` with only CLI fields present on ``args`` applied."""
+    merged = copy.copy(train_ns)
+    if hasattr(args, "map_id"):
+        merged.map_id = args.map_id
+    if hasattr(args, "co0"):
+        merged.co_p0 = args.co0
+    if hasattr(args, "co1"):
+        merged.co_p1 = args.co1
+    if hasattr(args, "tier"):
+        merged.tier = args.tier
+    return merged
+
+
+def _capture_move_gate_effective(train_ns: Any, user: list[str]) -> bool:
+    """True if ``--capture-move-gate`` was passed on the ai_vs_ai CLI, else train's flag."""
+    if "--capture-move-gate" in user:
+        return True
+    return bool(getattr(train_ns, "capture_move_gate", False))
 
 
 # ---------------------------------------------------------------------------
@@ -989,17 +1012,43 @@ def main() -> None:
         "--no-follow-train",
         action="store_true",
         help=(
-            "With no other ai_vs_ai flags, do not scan for a running train.py — "
-            "use random Std map, tier T2, and checkpoints/latest.zip."
+            "Do not read a running train.py process — use only ai_vs_ai flags "
+            f"and defaults (e.g. tier T2, random Std map, {_CKPT_DEFAULT.name})."
         ),
     )
-    parser.add_argument("--map-id",   type=int,  default=None,
-                        help="AWBW map ID to play on (default: random from pool)")
-    parser.add_argument("--ckpt",     type=Path, default=None,
-                        help=f"Checkpoint path (default: {_CKPT_DEFAULT})")
-    parser.add_argument("--co0",      type=int,  default=None, help="P0 CO id")
-    parser.add_argument("--co1",      type=int,  default=None, help="P1 CO id")
-    parser.add_argument("--tier",     type=str,  default="T2", help="Tier name (default: T2)")
+    parser.add_argument(
+        "--map-id",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="AWBW map ID (when following train: overrides trainer's --map-id for sampling)",
+    )
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help=(
+            f"Checkpoint zip (when following train: overrides trainer checkpoint "
+            f"resolution; default alone: {_CKPT_DEFAULT})"
+        ),
+    )
+    parser.add_argument(
+        "--co0",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="P0 CO id (when following train: overrides trainer --co-p0)",
+    )
+    parser.add_argument(
+        "--co1",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="P1 CO id (when following train: overrides trainer --co-p1)",
+    )
+    parser.add_argument(
+        "--tier",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Tier name (when following train: overrides trainer --tier)",
+    )
     parser.add_argument("--seed",     type=int,  default=None, help="RNG seed")
     parser.add_argument("--max-turns",type=int,  default=100,  help="Turn limit (default: 100)")
     parser.add_argument("--random",   action="store_true",
@@ -1037,7 +1086,7 @@ def main() -> None:
     )
     args = parser.parse_args(user)
 
-    want_follow = len(user) == 0 and not args.no_follow_train
+    want_follow = not args.no_follow_train
     if want_follow:
         picked = _pick_training_train_argv()
         if picked is not None:
@@ -1048,20 +1097,36 @@ def main() -> None:
             train_ns, unk = tparser.parse_known_args(tail)
             if unk:
                 _log(f"follow-train: pid={pid} ignored unknown train.py args: {unk}")
+            merged = _merge_train_ns_with_explicit_ai_args(train_ns, args)
+            override_bits = [
+                n
+                for n in ("map_id", "ckpt", "co0", "co1", "tier")
+                if hasattr(args, n)
+            ]
+            if "--capture-move-gate" in user:
+                override_bits.append("capture-move-gate")
+            if override_bits:
+                _log(
+                    "follow-train: CLI overrides on top of train.py: "
+                    + ", ".join(override_bits)
+                )
             _log(
                 f"follow-train: matched train.py pid={pid} "
-                f"(map_id={train_ns.map_id} tier={train_ns.tier!r} "
-                f"co_p0={train_ns.co_p0} co_p1={train_ns.co_p1} "
-                f"broad_prob={train_ns.curriculum_broad_prob} "
-                f"capture_move_gate={getattr(train_ns, 'capture_move_gate', False)})"
+                f"(map_id={merged.map_id} tier={merged.tier!r} "
+                f"co_p0={merged.co_p0} co_p1={merged.co_p1} "
+                f"broad_prob={merged.curriculum_broad_prob} "
+                f"capture_move_gate={_capture_move_gate_effective(train_ns, user)})"
             )
             rng = random.Random(args.seed) if args.seed is not None else random.Random()
             try:
-                map_id, tier, co0, co1 = _sample_from_train_ns(train_ns, rng)
+                map_id, tier, co0, co1 = _sample_from_train_ns(merged, rng)
             except ValueError as exc:
                 _log(f"follow-train: matchup sampling failed ({exc}); using legacy defaults")
             else:
-                ckpt_path = _resolve_ckpt_from_train_ns(train_ns)
+                if hasattr(args, "ckpt"):
+                    ckpt_path = Path(args.ckpt)
+                else:
+                    ckpt_path = _resolve_ckpt_from_train_ns(merged)
                 _log(f"follow-train: sampled map_id={map_id} tier={tier} co0={co0} co1={co1}")
                 _log(f"follow-train: checkpoint -> {ckpt_path}")
                 run_game(
@@ -1078,23 +1143,21 @@ def main() -> None:
                     game_id=args.game_id,
                     max_total_actions=args.max_total_actions,
                     max_actions_per_active_turn=args.max_actions_per_active_turn,
-                    capture_move_gate=(
-                        args.capture_move_gate
-                        or getattr(train_ns, "capture_move_gate", False)
-                    ),
+                    capture_move_gate=_capture_move_gate_effective(train_ns, user),
                 )
                 return
-        _log(
-            "follow-train: no training train.py process found "
-            "(or none parseable); using legacy defaults (Std map, T2, latest.zip)"
-        )
+        else:
+            _log(
+                "follow-train: no training train.py process found "
+                "(or none parseable); using legacy defaults (Std map, T2, latest.zip)"
+            )
 
     run_game(
-        map_id=args.map_id,
-        ckpt_path=args.ckpt,
-        co0=args.co0,
-        co1=args.co1,
-        tier=args.tier,
+        map_id=getattr(args, "map_id", None),
+        ckpt_path=getattr(args, "ckpt", None),
+        co0=getattr(args, "co0", None),
+        co1=getattr(args, "co1", None),
+        tier=getattr(args, "tier", "T2"),
         seed=args.seed,
         max_turns=args.max_turns,
         force_random=args.random,
