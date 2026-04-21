@@ -3,16 +3,33 @@ AI vs AI self-play runner.
 
 Usage
 -----
-  python -m rl.ai_vs_ai                         # default map, latest checkpoint
+  python -m rl.ai_vs_ai                         # mirror a running train.py (map/tier/COs + ckpt)
   python -m rl.ai_vs_ai --map-id 98             # specific map
   python -m rl.ai_vs_ai --ckpt checkpoints/latest.zip
   python -m rl.ai_vs_ai --co0 1 --co1 7        # CO IDs
   python -m rl.ai_vs_ai --random                # force random vs random
   python -m rl.ai_vs_ai --no-open               # don't open replay output folder
+  python -m rl.ai_vs_ai --no-follow-train       # ignore train.py; use defaults below
+
+With **no arguments** after the module name, this process scans for another local
+process whose command line contains ``train.py`` in training mode (not
+``--watch-only`` / ``--rank`` / ``--features``), parses its CLI with the same
+rules as ``train.py``, and samples one episode from the same distribution as
+``AWBWEnv`` (including ``--curriculum-broad-prob``). The checkpoint is resolved
+like ``SelfPlayTrainer`` startup: ``--checkpoint-dir``, ``--load-promoted`` vs
+``latest.zip``. If the trainer uses ``--capture-move-gate``, the same
+``AWBW_CAPTURE_MOVE_GATE`` behavior is applied.
+
+After export, the **AWBW Replay Player** desktop app is started with the new
+``.zip`` (see ``AWBW_REPLAY_PLAYER_EXE`` and ``third_party/AWBW-Replay-Player``).
+If the exe is missing, the replay folder is opened in the file manager.
+
+If no suitable ``train.py`` process is found, falls back to the legacy defaults
+(random Std map, tier T2, ``checkpoints/latest.zip``).
 
 Decision rule
 -------------
-1. Load checkpoints/latest.zip (or --ckpt path) as a MaskablePPO for BOTH players.
+1. Load the resolved checkpoint as a MaskablePPO for BOTH players.
 2. If loading fails: fall back to uniform-random legal actions for both sides.
 """
 from __future__ import annotations
@@ -22,13 +39,15 @@ import copy
 import json
 import os
 import random
+import re
+import shlex
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Ensure repo root is on sys.path so we can import engine/rl modules
@@ -40,7 +59,7 @@ if str(_REPO) not in sys.path:
 from engine.action import Action, ActionType, get_legal_actions
 from engine.game import GameState, make_initial_state
 from engine.map_loader import load_map
-from rl.env import _action_to_flat, _flat_to_action, _get_action_mask
+from rl.env import _action_to_flat, _flat_to_action, _get_action_mask, sample_training_matchup
 from rl.encoder import encode_state
 
 _MAP_POOL_PATH = _REPO / "data" / "gl_map_pool.json"
@@ -48,9 +67,266 @@ _MAPS_DIR      = _REPO / "data" / "maps"
 _CKPT_DEFAULT  = _REPO / "checkpoints" / "latest.zip"
 _REPLAY_OUT    = _REPO / "replays"
 
+_TRAIN_PY_TAIL = re.compile(r"train\.py[\"']?$", re.IGNORECASE)
+
+
+def _log(msg: str) -> None:
+    """UTC wall-clock timestamp on every line (ISO-8601 with ms)."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    print(f"[ai_vs_ai] {ts} | {msg}", flush=True)
+
+
+def _argv_for_this_module() -> list[str]:
+    """Arguments after ``python -m rl.ai_vs_ai`` or ``python .../ai_vs_ai.py``."""
+    a = sys.argv[1:]
+    if len(a) >= 2 and a[0] == "-m":
+        return a[2:]
+    if a:
+        return a[1:]
+    return []
+
+
+def _split_argv_after_train_py(argv: list[str]) -> list[str]:
+    """Return CLI tokens that belong to ``train.py`` (after the script path)."""
+    for i, p in enumerate(argv):
+        norm = p.strip().strip('"').strip("'").replace("\\", "/")
+        if norm.endswith("/train.py") or norm.endswith("train.py") or _TRAIN_PY_TAIL.search(p):
+            return argv[i + 1 :]
+    return []
+
+
+def _argv_contains_train_py(parts: list[str]) -> bool:
+    for p in parts:
+        n = p.strip().strip('"').strip("'").replace("\\", "/")
+        if n.endswith("train.py"):
+            return True
+    return False
+
+
+def _list_train_py_argv_processes() -> list[tuple[int, list[str]]]:
+    """``(pid, argv)`` for local processes whose command line runs ``train.py``."""
+    me = os.getpid()
+    out: list[tuple[int, list[str]]] = []
+    if sys.platform == "win32":
+        ps_cmd = (
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "$_.CommandLine -and ($_.CommandLine -match 'train\\.py') "
+            "} | ForEach-Object { "
+            "$_.ProcessId.ToString() + [char]9 + $_.CommandLine "
+            "}"
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log(f"follow-train: PowerShell process scan failed: {exc}")
+            return out
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line or "\t" not in line:
+                continue
+            pid_s, cmd = line.split("\t", 1)
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            if pid == me:
+                continue
+            parts = _parse_cmdline_to_argv_windows(cmd)
+            out.append((pid, parts))
+        return out
+
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return out
+    for name in os.listdir(proc_root):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == me:
+            continue
+        cmdline_path = proc_root / name / "cmdline"
+        try:
+            raw = cmdline_path.read_bytes()
+        except OSError:
+            continue
+        parts = [x.decode("utf-8", errors="replace") for x in raw.split(b"\0") if x]
+        if not _argv_contains_train_py(parts):
+            continue
+        out.append((pid, parts))
+    return out
+
+
+def _parse_cmdline_to_argv_windows(cmd: str) -> list[str]:
+    """Best-effort argv split for a WMI ``CommandLine`` string."""
+    s = cmd.strip()
+    if not s:
+        return []
+    try:
+        return shlex.split(s, posix=False)
+    except ValueError:
+        return s.split()
+
+
+def _pick_training_train_argv() -> tuple[list[str], int] | None:
+    """
+    Find a ``train.py`` process in **training** mode and return ``(argv_tail, pid)``.
+    If several match, prefer the highest PID (typically most recently started).
+    """
+    from train import build_train_argument_parser
+
+    parser = build_train_argument_parser()
+    candidates: list[tuple[int, list[str], int]] = []
+    for pid, parts in _list_train_py_argv_processes():
+        if not _argv_contains_train_py(parts):
+            continue
+        tail = _split_argv_after_train_py(parts)
+        candidates.append((pid, tail, pid))
+
+    if not candidates:
+        return None
+
+    training: list[tuple[int, list[str], int]] = []
+    for pid, tail, sort_key in candidates:
+        try:
+            ns, unknown = parser.parse_known_args(tail)
+        except SystemExit:
+            continue
+        if unknown:
+            _log(f"follow-train: pid={pid} ignored unknown args: {unknown}")
+        if ns.watch_only or ns.rank or ns.features:
+            continue
+        training.append((pid, tail, sort_key))
+
+    if not training:
+        return None
+
+    training.sort(key=lambda x: x[2])
+    pid, tail, _ = training[-1]
+    return tail, pid
+
+
+def _resolve_ckpt_from_train_ns(train_ns: Any) -> Path:
+    """
+    Match ``SelfPlayTrainer`` resume checkpoint selection (``latest.zip`` vs
+    ``promoted/best.zip`` when ``--load-promoted``).
+
+    Uses only ``train_ns`` + ``resolve_checkpoint_dir`` — no fleet env validation,
+    because ``train.py`` may run in another process with different
+    ``AWBW_MACHINE_*`` than this shell.
+    """
+    from rl.fleet_env import REPO_ROOT, resolve_checkpoint_dir
+
+    checkpoint_dir = resolve_checkpoint_dir(REPO_ROOT, train_ns.checkpoint_dir, None)
+    latest_path = checkpoint_dir / "latest.zip"
+    promoted_path = checkpoint_dir / "promoted" / "best.zip"
+    resume_path = latest_path
+    if train_ns.load_promoted and promoted_path.is_file():
+        if not latest_path.is_file():
+            resume_path = promoted_path
+        elif promoted_path.stat().st_mtime > latest_path.stat().st_mtime:
+            resume_path = promoted_path
+    return resume_path
+
+
+def _sample_from_train_ns(train_ns: Any, rng: random.Random) -> tuple[int, str, int, int]:
+    """One ``(map_id, tier, co0, co1)`` matching the running trainer's env distribution."""
+    with open(_MAP_POOL_PATH, encoding="utf-8") as f:
+        pool: list[dict] = json.load(f)
+    map_pool = pool
+    if train_ns.map_id is not None:
+        map_pool = [m for m in pool if m["map_id"] == train_ns.map_id]
+        if not map_pool:
+            raise ValueError(f"follow-train: no map with map_id={train_ns.map_id}")
+    _std = [m for m in map_pool if m.get("type") == "std"]
+    sample_map_pool = _std if _std else map_pool
+    mid, tier, c0, c1, _name = sample_training_matchup(
+        sample_map_pool,
+        co_p0=train_ns.co_p0,
+        co_p1=train_ns.co_p1,
+        tier_name=train_ns.tier,
+        curriculum_broad_prob=train_ns.curriculum_broad_prob,
+        rng=rng,
+    )
+    return mid, tier, c0, c1
+
+
 # ---------------------------------------------------------------------------
-# Replay export UX: reveal output folder; JSONL games use in-repo /replay/
+# Replay export UX: AWBW Replay Player (desktop) + folder fallback
 # ---------------------------------------------------------------------------
+
+_CAPTURE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
+_REPLAY_PLAYER_EXE_ENV = "AWBW_REPLAY_PLAYER_EXE"
+
+
+def _log_capture_move_gate_status() -> None:
+    """Mirror train.py: log when legal-action mask uses capture move gate."""
+    raw = os.environ.get(_CAPTURE_GATE_ENV, "").strip().lower()
+    if raw not in ("", "0", "false", "no"):
+        _log(f"env: {_CAPTURE_GATE_ENV}={raw!r} (infantry/mech MOVE mask active)")
+
+
+def _resolve_awbw_replay_player_exe(repo: Path) -> Path | None:
+    """
+    Locate the desktop AWBW Replay Player (see ``desync-triage-viewer`` §4a).
+
+    Order: ``AWBW_REPLAY_PLAYER_EXE``, then Release/Debug ``net*`` folders under
+    ``third_party/AWBW-Replay-Player/AWBWApp.Desktop/bin/``.
+    """
+    env = os.environ.get(_REPLAY_PLAYER_EXE_ENV, "").strip()
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p.resolve()
+    base = repo / "third_party" / "AWBW-Replay-Player" / "AWBWApp.Desktop" / "bin"
+    for cfg in ("Release", "Debug"):
+        for tfm in ("net8.0", "net7.0", "net6.0"):
+            cand = base / cfg / tfm / "AWBW Replay Player.exe"
+            if cand.is_file():
+                return cand.resolve()
+    for cfg in ("Release", "Debug"):
+        d = base / cfg
+        if not d.is_dir():
+            continue
+        for sub in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
+            if sub.is_dir() and sub.name.startswith("net"):
+                exe = sub / "AWBW Replay Player.exe"
+                if exe.is_file():
+                    return exe.resolve()
+    return None
+
+
+def _open_replay_in_desktop_viewer(replay_zip: Path) -> None:
+    """
+    Start the AWBW Replay Player with the given ``.zip`` (argv: exe + absolute zip).
+    Falls back to opening the containing folder if the exe is missing or spawn fails.
+    """
+    zp = replay_zip.resolve()
+    exe = _resolve_awbw_replay_player_exe(_REPO)
+    if exe is None:
+        _log(
+            f"viewer: AWBW Replay Player.exe not found — set {_REPLAY_PLAYER_EXE_ENV} "
+            "or build third_party/AWBW-Replay-Player (see README / desync-triage-viewer §4a)"
+        )
+        _open_replay_output_folder(replay_zip)
+        return
+    try:
+        subprocess.Popen(
+            [str(exe), str(zp)],
+            cwd=str(exe.parent),
+            close_fds=sys.platform != "win32",
+        )
+        _log(f"viewer: AWBW Replay Player — {exe.name} loaded {zp}")
+    except OSError as exc:
+        _log(f"viewer: could not start {exe}: {exc}")
+        _open_replay_output_folder(replay_zip)
+
 
 # Progress: log every N actions during play (verbose but bounded).
 _ACTION_PROGRESS_INTERVAL = 500
@@ -73,16 +349,10 @@ _FUSE_PER_TURN_MSG   = "Action fuse tripped -- max-actions-per-active-turn excee
 _FUSE_MESSAGES       = (_FUSE_TOTAL_MSG, _FUSE_PER_TURN_MSG)
 
 
-def _log(msg: str) -> None:
-    """UTC wall-clock timestamp on every line (ISO-8601 with ms)."""
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    print(f"[ai_vs_ai] {ts} | {msg}", flush=True)
-
-
 def _open_replay_output_folder(replay_zip: Path) -> None:
     """Open the folder holding the exported zip/trace; hint at in-repo web replay."""
     folder = replay_zip.resolve().parent
-    _log(f"viewer: outputs in {folder}")
+    _log(f"viewer: (fallback) folder {folder}")
     _log(
         "viewer: training games logged to logs/game_log.jsonl — run `python -m server.app` "
         "and open http://127.0.0.1:5000/replay/"
@@ -105,8 +375,9 @@ def _open_replay_output_folder(replay_zip: Path) -> None:
 def _load_model(ckpt_path: Path):
     """Load a MaskablePPO checkpoint. Returns None on failure."""
     try:
-        from sb3_contrib import MaskablePPO  # type: ignore[import]
-        model = MaskablePPO.load(str(ckpt_path), device="cpu")
+        from rl.ckpt_compat import load_maskable_ppo_compat
+
+        model = load_maskable_ppo_compat(ckpt_path, device="cpu")
         _log(f"checkpoint: loaded MaskablePPO from {ckpt_path}")
         return model
     except Exception as exc:
@@ -193,10 +464,16 @@ def run_game(
     game_id: Optional[int] = None,
     max_total_actions: int = _DEFAULT_MAX_TOTAL_ACTIONS,
     max_actions_per_active_turn: int = _DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN,
+    capture_move_gate: bool = False,
 ) -> Path:
     """
     Run one AI vs AI game and export an AWBW Replay Player–compatible zip.
     Returns the path to the created .zip file.
+
+    Legal actions honor ``AWBW_CAPTURE_MOVE_GATE`` (see ``engine.action``): set the
+    environment variable before running, or pass ``capture_move_gate=True`` (same
+    effect as ``train.py --capture-move-gate``). Follow-train copies a running
+    trainer's ``--capture-move-gate`` into the environment.
 
     Turn / day semantics
     --------------------
@@ -210,6 +487,10 @@ def run_game(
     hundreds of actions is a signal that the per-turn fuse should trip.
     """
     rng = random.Random(seed)
+
+    if capture_move_gate:
+        os.environ[_CAPTURE_GATE_ENV] = "1"
+    _log_capture_move_gate_status()
 
     _log(
         f"session: start  seed={seed!r}  max_turns={max_turns}  "
@@ -373,6 +654,10 @@ def run_game(
             tier=tier,
             map_name=map_data.name,
         )
+        if open_viewer:
+            pz = Path(out_dir) / f"{gid}.partial.zip"
+            if pz.is_file():
+                _open_replay_in_desktop_viewer(pz)
         raise
 
     elapsed = time.monotonic() - t_start
@@ -461,10 +746,10 @@ def run_game(
 
     _log(f"session: replay + trace ready  path={out_path}")
 
-    # ---- Open viewer ----
+    # ---- Open viewer (desktop AWBW Replay Player loads the zip) ----
     if open_viewer:
-        _log(f"viewer: reveal folder (game_id={gid})")
-        _open_replay_output_folder(out_path)
+        _log(f"viewer: opening replay (game_id={gid})")
+        _open_replay_in_desktop_viewer(out_path)
     else:
         _log("viewer: skipped (--no-open)")
 
@@ -693,11 +978,20 @@ def _save_trace(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    user = _argv_for_this_module()
     parser = argparse.ArgumentParser(
         description=(
             "Run one AI vs AI game and export a replay zip + trace "
             "(AWBW-compatible zip format for external tooling)."
         )
+    )
+    parser.add_argument(
+        "--no-follow-train",
+        action="store_true",
+        help=(
+            "With no other ai_vs_ai flags, do not scan for a running train.py — "
+            "use random Std map, tier T2, and checkpoints/latest.zip."
+        ),
     )
     parser.add_argument("--map-id",   type=int,  default=None,
                         help="AWBW map ID to play on (default: random from pool)")
@@ -711,7 +1005,15 @@ def main() -> None:
     parser.add_argument("--random",   action="store_true",
                         help="Force random-vs-random (ignore checkpoint)")
     parser.add_argument("--no-open",  action="store_true",
-                        help="Do not open the replay output folder after export")
+                        help="Do not launch AWBW Replay Player (or folder fallback) after export")
+    parser.add_argument(
+        "--capture-move-gate",
+        action="store_true",
+        help=(
+            "Set AWBW_CAPTURE_MOVE_GATE=1 for this run (same legal-action mask as "
+            "train.py --capture-move-gate; infantry/mech MOVE restricted when capture tiles reachable)."
+        ),
+    )
     parser.add_argument("--out-dir",  type=Path, default=None,
                         help=f"Directory for output files (default: {_REPLAY_OUT})")
     parser.add_argument("--game-id",  type=int,  default=None,
@@ -733,7 +1035,59 @@ def main() -> None:
             f"(default: {_DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN})."
         ),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(user)
+
+    want_follow = len(user) == 0 and not args.no_follow_train
+    if want_follow:
+        picked = _pick_training_train_argv()
+        if picked is not None:
+            tail, pid = picked
+            from train import build_train_argument_parser
+
+            tparser = build_train_argument_parser()
+            train_ns, unk = tparser.parse_known_args(tail)
+            if unk:
+                _log(f"follow-train: pid={pid} ignored unknown train.py args: {unk}")
+            _log(
+                f"follow-train: matched train.py pid={pid} "
+                f"(map_id={train_ns.map_id} tier={train_ns.tier!r} "
+                f"co_p0={train_ns.co_p0} co_p1={train_ns.co_p1} "
+                f"broad_prob={train_ns.curriculum_broad_prob} "
+                f"capture_move_gate={getattr(train_ns, 'capture_move_gate', False)})"
+            )
+            rng = random.Random(args.seed) if args.seed is not None else random.Random()
+            try:
+                map_id, tier, co0, co1 = _sample_from_train_ns(train_ns, rng)
+            except ValueError as exc:
+                _log(f"follow-train: matchup sampling failed ({exc}); using legacy defaults")
+            else:
+                ckpt_path = _resolve_ckpt_from_train_ns(train_ns)
+                _log(f"follow-train: sampled map_id={map_id} tier={tier} co0={co0} co1={co1}")
+                _log(f"follow-train: checkpoint -> {ckpt_path}")
+                run_game(
+                    map_id=map_id,
+                    ckpt_path=ckpt_path,
+                    co0=co0,
+                    co1=co1,
+                    tier=tier,
+                    seed=args.seed,
+                    max_turns=args.max_turns,
+                    force_random=args.random,
+                    open_viewer=not args.no_open,
+                    output_dir=args.out_dir,
+                    game_id=args.game_id,
+                    max_total_actions=args.max_total_actions,
+                    max_actions_per_active_turn=args.max_actions_per_active_turn,
+                    capture_move_gate=(
+                        args.capture_move_gate
+                        or getattr(train_ns, "capture_move_gate", False)
+                    ),
+                )
+                return
+        _log(
+            "follow-train: no training train.py process found "
+            "(or none parseable); using legacy defaults (Std map, T2, latest.zip)"
+        )
 
     run_game(
         map_id=args.map_id,
@@ -749,6 +1103,7 @@ def main() -> None:
         game_id=args.game_id,
         max_total_actions=args.max_total_actions,
         max_actions_per_active_turn=args.max_actions_per_active_turn,
+        capture_move_gate=args.capture_move_gate,
     )
 
 

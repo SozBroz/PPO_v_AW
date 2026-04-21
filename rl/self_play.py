@@ -302,14 +302,19 @@ class _CheckpointOpponent:
             return
         path = random.choice(ckpts)
         try:
-            from sb3_contrib import MaskablePPO as _PPO  # type: ignore[import]
+            from rl.ckpt_compat import load_maskable_ppo_compat
+
             # Load with minimal buffer dims so _setup_model() allocates a tiny
             # rollout buffer (~KB) rather than replicating the learner's full
             # n_steps × n_envs × obs_shape tensor (~GB). Policy weights are
             # preserved; only inference (predict) is used from this model.
-            self._model = _PPO.load(
-                path, device="cpu", verbose=0,
-                n_envs=1, n_steps=1, batch_size=1,
+            self._model = load_maskable_ppo_compat(
+                path,
+                device="cpu",
+                verbose=0,
+                n_envs=1,
+                n_steps=1,
+                batch_size=1,
             )
             self.reload_count += 1
         except MemoryError as exc:
@@ -630,8 +635,9 @@ class SelfPlayTrainer:
 
         ckpt_path = random.choice(self.checkpoints)
         try:
-            from sb3_contrib import MaskablePPO  # type: ignore[import]
-            model = MaskablePPO.load(ckpt_path, device=self.device)
+            from rl.ckpt_compat import load_maskable_ppo_compat
+
+            model = load_maskable_ppo_compat(ckpt_path, device=self.device)
 
             def _policy(obs: dict, mask: np.ndarray) -> int:
                 action, _ = model.predict(obs, action_masks=mask, deterministic=False)
@@ -755,7 +761,9 @@ class SelfPlayTrainer:
 
         if resume_path.exists():
             print(f"[self_play] Resuming from {resume_path}")
-            model = MaskablePPO.load(
+            from rl.ckpt_compat import load_maskable_ppo_compat
+
+            model = load_maskable_ppo_compat(
                 resume_path,
                 env=vec_env,
                 device=self.device,
@@ -763,7 +771,9 @@ class SelfPlayTrainer:
             )
         elif self.bc_init is not None and self.bc_init.is_file():
             print(f"[self_play] Fresh run: warm-start from {self.bc_init}")
-            model = MaskablePPO.load(
+            from rl.ckpt_compat import load_maskable_ppo_compat
+
+            model = load_maskable_ppo_compat(
                 self.bc_init,
                 env=vec_env,
                 device=self.device,

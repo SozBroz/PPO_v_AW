@@ -36,21 +36,8 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = val
 
 
-def _install_sigint_first_only() -> None:
-    """
-    First Ctrl+C stops training; ignore further SIGINT so shutdown (e.g. checkpoint save)
-    is not torn down by accidental extra keypresses.
-    """
-
-    def _handler(signum: int, frame) -> None:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, _handler)
-
-
-def main() -> None:
-    _load_dotenv(ROOT / ".env")
+def build_train_argument_parser() -> argparse.ArgumentParser:
+    """CLI parser for ``train.py`` (also used by ``rl.ai_vs_ai`` to mirror a live run)."""
     parser = argparse.ArgumentParser(description="AWBW DRL Bot")
     parser.add_argument(
         "--iters", type=int, default=None,
@@ -93,7 +80,7 @@ def main() -> None:
             "VRAM is consumed by the policy network + optimizer + rollout buffer "
             "(scales with n_steps * n_envs * obs_shape). "
             "If VRAM is tight, reduce --batch-size first (smallest impact on sample efficiency), "
-            "then --n-steps; reducing --n-envs also helps but lowers throughput."
+            "then --n-steps; reducing --n_envs also helps but lowers throughput."
         ),
     )
     parser.add_argument(
@@ -197,6 +184,35 @@ def main() -> None:
             "Sets AWBW_LEARNER_GREEDY_MIX env var; SubprocVecEnv workers inherit."
         ),
     )
+    parser.add_argument(
+        "--capture-move-gate", action="store_true",
+        help=(
+            "Restrict infantry/mech MOVE choices to capturable enemy/neutral "
+            "property tiles whenever any are reachable. Closes the "
+            "SELECT-MOVE-WAIT-in-place loophole. Sets AWBW_CAPTURE_MOVE_GATE=1; "
+            "SubprocVecEnv workers inherit. Engine step() bypasses the mask, "
+            "so replays are unaffected."
+        ),
+    )
+    return parser
+
+
+def _install_sigint_first_only() -> None:
+    """
+    First Ctrl+C stops training; ignore further SIGINT so shutdown (e.g. checkpoint save)
+    is not torn down by accidental extra keypresses.
+    """
+
+    def _handler(signum: int, frame) -> None:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handler)
+
+
+def main() -> None:
+    _load_dotenv(ROOT / ".env")
+    parser = build_train_argument_parser()
     args = parser.parse_args()
 
     # ── Resolve device ────────────────────────────────────────────────────────
@@ -249,12 +265,16 @@ def main() -> None:
     if args.learner_greedy_mix and args.learner_greedy_mix > 0.0:
         os.environ["AWBW_LEARNER_GREEDY_MIX"] = str(float(args.learner_greedy_mix))
 
+    if args.capture_move_gate:
+        os.environ["AWBW_CAPTURE_MOVE_GATE"] = "1"
+
     _env_flags = [
         ("AWBW_TIME_COST", os.environ.get("AWBW_TIME_COST")),
         ("AWBW_INCOME_TERM_COEF", os.environ.get("AWBW_INCOME_TERM_COEF")),
         ("AWBW_BUILD_MASK_INFANTRY_ONLY", os.environ.get("AWBW_BUILD_MASK_INFANTRY_ONLY")),
         ("AWBW_LOG_REPLAY_FRAMES", os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
         ("AWBW_LEARNER_GREEDY_MIX", os.environ.get("AWBW_LEARNER_GREEDY_MIX")),
+        ("AWBW_CAPTURE_MOVE_GATE", os.environ.get("AWBW_CAPTURE_MOVE_GATE")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
     if _active:

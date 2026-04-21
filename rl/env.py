@@ -17,7 +17,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 from threading import Lock
 
 import numpy as np
@@ -256,6 +256,113 @@ def _strip_non_infantry_builds(mask: np.ndarray, state: GameState) -> None:
                 mask[idx] = False
 
 
+def sample_training_matchup(
+    sample_map_pool: list[dict],
+    *,
+    co_p0: int | None = None,
+    co_p1: int | None = None,
+    tier_name: str | None = None,
+    curriculum_broad_prob: float = 0.0,
+    rng: random.Random | None = None,
+) -> tuple[int, str, int, int, str]:
+    """
+    One sample of ``(map_id, tier_name, p0_co, p1_co, map_name)``.
+
+    Mirrors :meth:`AWBWEnv._sample_config` (same distribution as training
+    for the given curriculum knobs). When ``rng`` is ``None``, uses the
+    global ``random`` module like the env does on each ``reset``.
+    """
+    def _choice(seq: Sequence[Any]) -> Any:
+        if rng is None:
+            return random.choice(seq)
+        return rng.choice(seq)
+
+    def _randf() -> float:
+        if rng is None:
+            return random.random()
+        return rng.random()
+
+    def _full_random() -> tuple[int, str, int, int, str]:
+        meta = _choice(sample_map_pool)
+        enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
+        tier = _choice(enabled) if enabled else meta["tiers"][0]
+        co_ids: list[int] = tier["co_ids"]
+        p0_co = _choice(co_ids)
+        p1_co = _choice(co_ids)
+        return (
+            meta["map_id"],
+            tier["tier_name"],
+            p0_co,
+            p1_co,
+            str(meta.get("name", "")),
+        )
+
+    def _pick_tier_for_fixed_cos(meta: dict) -> dict:
+        enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
+        need = [c for c in (co_p0, co_p1) if c is not None]
+        if not need:
+            return _choice(enabled) if enabled else meta["tiers"][0]
+        candidates = [t for t in enabled if all(c in t["co_ids"] for c in need)]
+        if not candidates:
+            raise ValueError(
+                f"Map {meta.get('name', meta['map_id'])}: no enabled tier contains "
+                f"CO id(s) {need}"
+            )
+        return _choice(candidates)
+
+    if curriculum_broad_prob > 0.0 and _randf() < curriculum_broad_prob:
+        return _full_random()
+
+    meta = _choice(sample_map_pool)
+
+    if tier_name is not None:
+        tier = next(
+            (t for t in meta["tiers"] if t.get("tier_name") == tier_name),
+            None,
+        )
+        if tier is None or not tier.get("enabled") or not tier.get("co_ids"):
+            raise ValueError(
+                f"Map {meta.get('name', meta['map_id'])}: no enabled tier "
+                f"{tier_name!r}"
+            )
+    elif co_p0 is not None or co_p1 is not None:
+        tier = _pick_tier_for_fixed_cos(meta)
+    else:
+        enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
+        tier = _choice(enabled) if enabled else meta["tiers"][0]
+
+    co_ids: list[int] = tier["co_ids"]
+    tname = tier["tier_name"]
+
+    if co_p0 is not None:
+        if co_p0 not in co_ids:
+            raise ValueError(
+                f"CO {co_p0} not in tier {tname} for map "
+                f"{meta.get('name', meta['map_id'])}"
+            )
+        p0_co = co_p0
+    else:
+        p0_co = _choice(co_ids)
+
+    if co_p1 is not None:
+        if co_p1 not in co_ids:
+            raise ValueError(
+                f"CO {co_p1} not in tier {tname} for map "
+                f"{meta.get('name', meta['map_id'])}"
+            )
+        p1_co = co_p1
+    else:
+        p1_co = _choice(co_ids)
+
+    return (
+        meta["map_id"],
+        tname,
+        p0_co,
+        p1_co,
+        str(meta.get("name", "")),
+    )
+
+
 class AWBWEnv(gym.Env):
     """
     AWBW Gymnasium environment for single-agent (vs opponent) training.
@@ -387,41 +494,6 @@ class AWBWEnv(gym.Env):
             self._map_cache[map_id] = load_map(map_id, POOL_PATH, MAPS_DIR)
         return self._map_cache[map_id]
 
-    def _sample_config_full_random(self) -> tuple[int, str, int, int, str]:
-        """
-        Full-distribution sampling: random Std map, random enabled tier, random COs.
-
-        Phase C: Equal CO exploration with configurable mirror policy.
-        Maps are drawn from ``_sample_map_pool`` (Std GL maps when available).
-        """
-        meta = random.choice(self._sample_map_pool)
-        enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
-        tier = random.choice(enabled) if enabled else meta["tiers"][0]
-        co_ids: list[int] = tier["co_ids"]
-        p0_co = random.choice(co_ids)
-        p1_co = random.choice(co_ids)
-        return (
-            meta["map_id"],
-            tier["tier_name"],
-            p0_co,
-            p1_co,
-            str(meta.get("name", "")),
-        )
-
-    def _pick_tier_for_fixed_cos(self, meta: dict) -> dict:
-        """Choose an enabled tier that contains any fixed CO ids."""
-        enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
-        need = [c for c in (self.co_p0, self.co_p1) if c is not None]
-        if not need:
-            return random.choice(enabled) if enabled else meta["tiers"][0]
-        candidates = [t for t in enabled if all(c in t["co_ids"] for c in need)]
-        if not candidates:
-            raise ValueError(
-                f"Map {meta.get('name', meta['map_id'])}: no enabled tier contains "
-                f"CO id(s) {need}"
-            )
-        return random.choice(candidates)
-
     def _sample_config(self) -> tuple[int, str, int, int, str]:
         """
         Return (map_id, tier_name, p0_co_id, p1_co_id, map_name).
@@ -430,56 +502,13 @@ class AWBWEnv(gym.Env):
         sampling for mixture training. Fixed ``tier_name`` / ``co_p0`` / ``co_p1``
         implement narrow curriculum when broad sampling is not taken.
         """
-        if self.curriculum_broad_prob > 0.0 and random.random() < self.curriculum_broad_prob:
-            return self._sample_config_full_random()
-
-        meta = random.choice(self._sample_map_pool)
-
-        if self.tier_name is not None:
-            tier = next(
-                (t for t in meta["tiers"] if t.get("tier_name") == self.tier_name),
-                None,
-            )
-            if tier is None or not tier.get("enabled") or not tier.get("co_ids"):
-                raise ValueError(
-                    f"Map {meta.get('name', meta['map_id'])}: no enabled tier "
-                    f"{self.tier_name!r}"
-                )
-        elif self.co_p0 is not None or self.co_p1 is not None:
-            tier = self._pick_tier_for_fixed_cos(meta)
-        else:
-            enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
-            tier = random.choice(enabled) if enabled else meta["tiers"][0]
-
-        co_ids: list[int] = tier["co_ids"]
-        tier_name = tier["tier_name"]
-
-        if self.co_p0 is not None:
-            if self.co_p0 not in co_ids:
-                raise ValueError(
-                    f"CO {self.co_p0} not in tier {tier_name} for map "
-                    f"{meta.get('name', meta['map_id'])}"
-                )
-            p0_co = self.co_p0
-        else:
-            p0_co = random.choice(co_ids)
-
-        if self.co_p1 is not None:
-            if self.co_p1 not in co_ids:
-                raise ValueError(
-                    f"CO {self.co_p1} not in tier {tier_name} for map "
-                    f"{meta.get('name', meta['map_id'])}"
-                )
-            p1_co = self.co_p1
-        else:
-            p1_co = random.choice(co_ids)
-
-        return (
-            meta["map_id"],
-            tier_name,
-            p0_co,
-            p1_co,
-            str(meta.get("name", "")),
+        return sample_training_matchup(
+            self._sample_map_pool,
+            co_p0=self.co_p0,
+            co_p1=self.co_p1,
+            tier_name=self.tier_name,
+            curriculum_broad_prob=self.curriculum_broad_prob,
+            rng=None,
         )
 
     # ── Gymnasium API ─────────────────────────────────────────────────────────

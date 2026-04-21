@@ -42,9 +42,10 @@ for enemy units when a belief overlay is provided.
   channels collapse to ``unit.hp / 100`` — identical values in both
   channels, equivalent to the pre-belief single-HP layout.
 
-**Checkpoint compatibility:** any weights trained with 62×30×30 spatial
-(single HP channel) are **incompatible** with this encoder — retrain from
-scratch after this bump. See ``docs/hp_belief.md`` for the retirement note.
+**Checkpoint compatibility:** legacy 62-channel zips (single HP) load via
+``rl.ckpt_compat.load_maskable_ppo_compat`` — stem weights and Adam moments
+are expanded to 63 channels by duplicating the old HP channel into
+``hp_lo`` / ``hp_hi``. See ``docs/hp_belief.md`` for the observation change.
 """
 import numpy as np
 from engine.game import GameState, MAX_TURNS

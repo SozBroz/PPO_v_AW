@@ -87,9 +87,9 @@ def ensure_model_loaded(checkpoint_dir: Path) -> tuple[Optional[Any], Optional[s
             # No weights: play UI uses a masked-random legal bot (see _run_bot_turn).
             return None, None
         try:
-            from sb3_contrib import MaskablePPO  # type: ignore[import]
+            from rl.ckpt_compat import load_maskable_ppo_compat
 
-            _model = MaskablePPO.load(str(path), device="cpu")
+            _model = load_maskable_ppo_compat(path, device="cpu")
         except Exception as exc:  # pragma: no cover - env-specific
             _model_load_error = f"Failed to load {path}: {exc}"
             return None, _model_load_error
