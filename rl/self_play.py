@@ -112,11 +112,16 @@ def _atomic_model_save(model, dest_no_ext: str | os.PathLike) -> None:
     mounts, an opponent process (`_CheckpointOpponent`) can race a partial
     write and load a truncated zip. We write to ``<dest>.tmp.zip`` first, then
     ``os.replace`` it onto the final filename — atomic on the same volume.
+
+    Do **not** use ``Path(..., \"x.tmp\").with_suffix(\".zip\")`` for the
+    temp zip: that replaces the ``.tmp`` *suffix* with ``.zip`` (dropping
+    ``.tmp`` from the basename), so it names the *final* path while SB3
+    actually created ``<dest>.tmp.zip``.
     """
     dest = Path(dest_no_ext)
-    final_zip = dest.with_suffix(".zip")
-    tmp_no_ext = dest.with_name(dest.name + ".tmp")
-    tmp_zip = tmp_no_ext.with_suffix(".zip")
+    final_zip = dest.parent / f"{dest.name}.zip"
+    tmp_no_ext = dest.parent / f"{dest.name}.tmp"  # SB3 -> "<name>.tmp.zip"
+    tmp_zip = dest.parent / f"{dest.name}.tmp.zip"
     try:
         if tmp_zip.exists():
             try:
