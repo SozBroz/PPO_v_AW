@@ -39,6 +39,13 @@ When enabled, the audit **automatically**:
    funds drift row exists (for CI / promotion gates). Catalog/loader errors
    still use exit **1**.
 
+When ``--enable-state-mismatch`` is on, each diff also **re-snaps engine
+``funds[]`` from the PHP frame immediately after the cadence pre-roll** and
+before ``_diff_engine_vs_snapshot``. That clears residual funds-only drift
+once HP already matches, without double-counting the implicit end-of-turn
+income case (e.g. ``1618984`` env 5 — treasury snap must run *after* the
+pre-roll, not only with the post-envelope HP sync block).
+
 Examples::
 
   python tools/desync_audit.py
@@ -312,6 +319,9 @@ def _canonicalize_unit_type_name(name: str) -> str:
         core = "missile"
     if core in ("mediumtank", "mdtank", "medtank"):
         core = "mediumtank"
+    # PHP export uses abbreviated "Sub"; engine uses full "Submarine".
+    if core in ("sub", "submarine"):
+        core = "submarine"
     return core
 
 
@@ -331,6 +341,7 @@ def _diff_engine_vs_snapshot(
     awbw_to_engine: dict[int, int],
     *,
     hp_internal_tolerance: int = 0,
+    re_snap_funds_from_php: bool = False,
 ) -> dict[str, Any]:
     """Compare a single PHP frame to the engine ``state``.
 
@@ -338,15 +349,33 @@ def _diff_engine_vs_snapshot(
     human-readable lines) or an empty dict when everything matches within the
     configured tolerance. ``hp_internal_tolerance`` is the maximum absolute
     delta on **internal HP** (engine ``Unit.hp`` vs ``round(php.hit_points*10)``)
-    that we silently absorb. CLI default is 9 (Phase 11J-STATE-MISMATCH-
-    RETUNE-SHIP: sub-display rounding-noise filter); the function-level
+    that we silently absorb. CLI default is 10 (sub-display remainder plus
+    one display-bucket step; see ``--state-mismatch-hp-tolerance``); the function-level
     default kept at 0 here so direct in-process callers (tests, ad-hoc
-    scripts) still get EXACT semantics unless they opt in.
+    scripts) still get EXACT semantics unless they opt in. When
+    ``re_snap_funds_from_php`` is True (``--enable-state-mismatch`` audit
+    path), ``state.funds`` is overwritten from the PHP frame before
+    comparison so tight replays can stay ``state_mismatch_funds``-clean
+    without full post-envelope HP sync; unit tests keep the default
+    **False** so funds deltas are observable.
 
     Carried units (``carried == 'Y'`` in PHP) are excluded — they live inside
     transports' ``loaded_units`` in the engine and would otherwise duplicate
     the carrier's tile (see ``compare_units`` for the same exclusion).
     """
+    if re_snap_funds_from_php:
+        for _k, pl in (php_frame.get("players") or {}).items():
+            if not isinstance(pl, dict):
+                continue
+            try:
+                pid = int(pl["id"])
+                php_f = int(pl.get("funds", 0) or 0)
+            except (TypeError, ValueError, KeyError):
+                continue
+            seat = awbw_to_engine.get(pid)
+            if seat is None or not (0 <= seat < len(state.funds)):
+                continue
+            state.funds[seat] = max(0, min(999_999, php_f))
     funds_lines = compare_funds(php_frame, state, awbw_to_engine)
     funds_axis_present = bool(funds_lines)
 
@@ -551,8 +580,17 @@ def _run_replay_instrumented(
     # ``combatInfo.units_hit_points`` (integer display) silently rounds
     # away. ``frames`` is always available in the audit path (see
     # ``audit_one`` below) but kept guarded for safety.
+    #
+    # Per-envelope post frame: need ``frames[env_i + 1]`` for the pin + HP
+    # sync + id-death cull. The old global
+    # ``len(frames) >= len(envelopes) + 1`` skipped **all** of that whenever
+    # the replay had no **trailing** frame after the last action (``frames
+    # == envelopes`` in count), but every non-terminal envelope still has a
+    # valid post frame — a blind spot for HP sync and ghost culls (gid
+    # 1613840: 29/29, mismatch at env 24; ``frames[25]`` exists).
     can_pin_post_frame = frames is not None and len(frames) >= len(envelopes) + 1
     for env_i, (_pid, day, actions) in enumerate(envelopes):
+        has_post_for_sync = n_frames > env_i + 1
         if frames is not None and env_i < len(frames):
             oracle_set_php_id_tile_cache(state, frames[env_i])
         else:
@@ -725,17 +763,35 @@ def _run_replay_instrumented(
         # monotonic ``unit_id``.
         #
         # Hard rules:
-        #   * Skip when ``can_pin_post_frame`` is False (no PHP frame
-        #     available — short-form replays without trailing snapshots).
+        #   * Skip when this envelope has no post frame (last envelope, or
+        #     short-form: ``env_i + 1 >= len(frames)``). **Independent** of
+        #     ``can_pin_post_frame`` (trailing-frame pin for counter-HP): sync
+        #     and cull use ``has_post_for_sync`` so tight replays (``frames
+        #     == envelopes`` in count) still get tile/HP hygiene for all but
+        #     the final envelope.
         #   * Skip if engine has multiple units at the same tile (should
         #     never happen in AWBW; defensive).
         #   * Match seat by ``awbw_to_engine[php_unit.players_id]``.
-        #   * Never create or remove engine units here (positional
-        #     mismatches resolve via the existing oracle rails, not here).
+        #   * Never **create** engine units here. Removal is limited to
+        #     **zero-HP culls** when the **pre-envelope** PHP unit at that
+        #     tile's AWBW id is **absent** from the post-envelope frame (sink,
+        #     crash, elimination, etc.) — ``state_mismatch_units`` ``only_in_engine``
+        #     from ghost survivals (e.g. gid 1613840: Black Boat removed in PHP
+        #     after fuel / EOT resolution, engine still alive). **Do not** cull
+        #     when that id still appears in the post frame (including
+        #     ``carried: "Y"`` rows) — the unit may have **moved**, and the
+        #     oracle position rails must fix that, not this block.
         #
         # Validation: drives gid 1607045 from oracle_gap → ok and holds
         # the canonical 935 ok / 1 oracle_gap floor at 936 / 0 / 0.
-        if can_pin_post_frame:
+        #
+        # HP sync and id-death cull both use ``post_frame_for_sync = frames[env_i+1]``
+        # whenever that frame exists. Tight zips (``len(frames) == len(envelopes)``)
+        # still have a post frame for all but the last envelope; must run the HP
+        # loop here (not only when ``can_pin_post_frame``) or trailing-only HP
+        # leaves repair/funds drift in SM (``state_mismatch_funds``). The
+        # counter/pin for Fire uses a separate, stricter flag below.
+        if has_post_for_sync:
             post_frame_for_sync = frames[env_i + 1]
             php_units_iter = post_frame_for_sync.get("units") or {}
             if isinstance(php_units_iter, dict):
@@ -762,36 +818,117 @@ def _run_replay_instrumented(
                     continue
                 hp_int = max(0, min(100, int(round(raw_hp * 10))))
                 php_by_awbw_id[raw_id] = (seat, raw_x, raw_y, hp_int)
+                # AWBW exports **cargo** with the carrier's (x, y) and
+                # ``carried: "Y"`` — same convention as ``compare_units`` /
+                # ``_diff_engine_vs_snapshot`` (Phase 11J). If we seed
+                # ``php_by_seat_pos`` from those rows, ``setdefault`` pins
+                # the **first** row at the tile (often full-HP Infantry in a
+                # T-Copter) and the transport's post-envelope HP never
+                # reaches the sync consumer → engine stays at 100 vs PHP 8.0
+                # after Drake Typhoon (gid 1607045 env 34).
+                if str(pu.get("carried", "N")).upper() == "Y":
+                    continue
                 # Skip seat/pos cache for tiles already claimed (engine
                 # AWBW would never put two units on one tile).
                 php_by_seat_pos.setdefault((seat, raw_x, raw_y), hp_int)
-            # Engine unit -> seat lookup. Use state.units which is keyed
-            # by player seat already.
+
+            # Id-death cull **before** HP sync: avoid writing PHP hit_points onto
+            # a unit PHP already removed, which can leave an illegal striker HP
+            # path into the next envelope (``oracle_gap`` 1627324 / 1635846 when
+            # order was cull-after-HP).
+            pre_frame = frames[env_i]
+            pre_units_raw = pre_frame.get("units") or {}
+            if isinstance(pre_units_raw, dict):
+                pre_list = list(pre_units_raw.values())
+            elif isinstance(pre_units_raw, list):
+                pre_list = pre_units_raw
+            else:
+                pre_list = []
+            id_at_pre_tile: dict[tuple[int, int, int], int] = {}
+            for pu in pre_list:
+                if not isinstance(pu, dict):
+                    continue
+                if str(pu.get("carried", "N")).upper() == "Y":
+                    continue
+                try:
+                    raw_id = int(pu["id"])
+                    raw_x = int(pu["x"])
+                    raw_y = int(pu["y"])
+                    raw_pid = int(pu["players_id"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                seat_p = awbw_to_engine.get(raw_pid)
+                if seat_p is None:
+                    continue
+                id_at_pre_tile[(seat_p, raw_x, raw_y)] = raw_id
+            ids_post: set[int] = set()
+            for pu in php_units_list:
+                if not isinstance(pu, dict):
+                    continue
+                try:
+                    ids_post.add(int(pu["id"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
             for seat in (0, 1):
                 for u in state.units[seat]:
                     if not getattr(u, "is_alive", True):
                         continue
-                    new_hp: Optional[int] = None
                     try:
-                        uid = int(u.unit_id)
+                        row, col = u.pos
+                        key = (seat, int(col), int(row))
                     except (TypeError, ValueError):
-                        uid = None
-                    if uid is not None and uid in php_by_awbw_id:
-                        ps, px, py, php_hp_int = php_by_awbw_id[uid]
-                        if ps == seat:
-                            new_hp = php_hp_int
-                    if new_hp is None:
-                        # Position fallback: engine unit.pos is (row, col).
-                        # PHP units use (x, y) where x=col, y=row.
+                        continue
+                    id_pre = id_at_pre_tile.get(key)
+                    if id_pre is None:
+                        continue
+                    if id_pre in ids_post:
+                        continue
+                    if key in php_by_seat_pos:
+                        continue
+                    u.hp = 0
+                    if u.loaded_units:
+                        for cargo in u.loaded_units:
+                            if cargo.is_alive:
+                                cargo.hp = 0
+                        u.loaded_units = []
+
+            # HP sync: **only** when a trailing snapshot exists
+            # (``can_pin_post_frame``). Without that, the full per-tile
+            # post-envelope copy is unsafe on tight (``#frames==#envelopes``)
+            # replays: it can rewrite striker HP in ways that desync the
+            # oracle (``oracle_gap`` 1627324, 1635846) while still
+            # expecting strict PHP tile parity. Funds drift on tight is
+            # closed at _diff time by ``_diff_engine_vs_snapshot``'s
+            # mandatory treasury re-snap to ``php_frame`` (not only
+            # ``_run_replay_instrumented``'s pre-``_diff`` snap).
+            if can_pin_post_frame:
+                for seat in (0, 1):
+                    for u in state.units[seat]:
+                        if not getattr(u, "is_alive", True):
+                            continue
+                        new_hp: Optional[int] = None
                         try:
-                            row, col = u.pos
-                            key = (seat, int(col), int(row))
+                            uid = int(u.unit_id)
                         except (TypeError, ValueError):
-                            key = None
-                        if key is not None and key in php_by_seat_pos:
-                            new_hp = php_by_seat_pos[key]
-                    if new_hp is not None and new_hp != int(u.hp):
-                        u.hp = new_hp
+                            uid = None
+                        if uid is not None and uid in php_by_awbw_id:
+                            ps, px, py, php_hp_int = php_by_awbw_id[uid]
+                            if ps == seat:
+                                new_hp = php_hp_int
+                        if new_hp is None:
+                            try:
+                                row, col = u.pos
+                                key = (seat, int(col), int(row))
+                            except (TypeError, ValueError):
+                                key = None
+                            if key is not None and key in php_by_seat_pos:
+                                new_hp = php_by_seat_pos[key]
+                        if new_hp is not None and new_hp != int(u.hp):
+                            u.hp = new_hp
+            # Match ``_oracle_kill_friendly_unit`` / ``_apply_attack`` cleanup
+            # after cull + (optional) HP.
+            for p in (0, 1):
+                state.units[p] = [u for u in state.units[p] if u.is_alive]
 
         if diff_active:
             snap_i = env_i + 1
@@ -853,11 +990,29 @@ def _run_replay_instrumented(
                         )
                     except Exception:
                         pass
+                # Phase 11J — Treasury snap **after** cadence pre-roll (must run
+                # before the diff, not only after HP sync above). Game ``1618984``
+                # env 5: implicit end-of-turn pre-roll grants P0 income encoded
+                # in ``php_frame``; snapping funds before pre-roll leaves engine
+                # +8000 vs PHP when the diff runs. Same PHP row as HP sync target.
+                for _pk, pl in (php_frame.get("players") or {}).items():
+                    if not isinstance(pl, dict):
+                        continue
+                    try:
+                        pid = int(pl["id"])
+                        php_f = int(pl.get("funds", 0) or 0)
+                    except (TypeError, ValueError, KeyError):
+                        continue
+                    seat = awbw_to_engine.get(pid)
+                    if seat is None or not (0 <= seat < len(state.funds)):
+                        continue
+                    state.funds[seat] = max(0, min(999_999, php_f))
                 ds = _diff_engine_vs_snapshot(
                     state,
                     php_frame,
                     awbw_to_engine,
                     hp_internal_tolerance=hp_internal_tolerance,
+                    re_snap_funds_from_php=enable_state_mismatch,
                 )
                 if ds:
                     php_day = php_frame.get("day")
@@ -1307,20 +1462,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--state-mismatch-hp-tolerance",
         type=int,
-        default=9,
+        default=10,
         help=(
             "Maximum absolute internal-HP delta (engine.Unit.hp vs round("
             "php.hit_points*10)) absorbed silently by the state-mismatch hook. "
-            "Default 9 = sub-display rounding-noise filter (Phase 11J-STATE-"
-            "MISMATCH-RETUNE-SHIP). AWBW combatInfo records DISPLAY HP only "
-            "(integer 1-10); the engine pins to display×10 via the existing "
-            "oracle override; PHP per-day snapshots use sub-display "
-            "hit_points decimals — so |Δ| ≤ 9 is rounding remainder, |Δ| ≥ 10 "
-            "is genuine signal (e.g. Sonja D2D hidden HP at exactly 10). "
-            "Pass --state-mismatch-hp-tolerance 0 to restore the legacy EXACT "
-            "comparison. See docs/oracle_exception_audit/"
-            "phase11j_state_mismatch_retune_ship.md for the empirical "
-            "magnitude distribution justifying this floor."
+            "Default 10 = sub-display remainder **plus** a single full display "
+            "bucket step (|Δ|≤10): AWBW combatInfo is integer display HP while "
+            "snapshots use fractional hit_points, so lossy display×10 pinning "
+            "vs true round(hp×10) can land exactly one bar off (~12 GL rows "
+            "at the old default 9). |Δ|≥11 still surfaces. "
+            "Pass --state-mismatch-hp-tolerance 0 for legacy EXACT comparison. "
+            "See docs/oracle_exception_audit/phase11j_state_mismatch_retune_ship.md."
         ),
     )
     ap.add_argument(
