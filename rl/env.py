@@ -598,6 +598,12 @@ class AWBWEnv(gym.Env):
         self._invalid_action_count: int = 0
         self._max_p1_microsteps: int = 0
         self._p1_truncated_mid_turn = False
+        # Phase 0a.2 (FPS campaign): per-episode wall-time split between the
+        # P0 step path and the P1 microstep loop. Bounded by perf_counter()
+        # at episode boundary; never read during the hot path. Surfaced as
+        # wall_p0_s / wall_p1_s in game_log.jsonl.
+        self._wall_p0_s: float = 0.0
+        self._wall_p1_s: float = 0.0
         # Tier 1 (plan p0-capture-architecture-fix): per-episode count of
         # learner actions that were overridden by the capture-greedy teacher.
         # Surfaced in game_log.jsonl so we can verify the teacher is firing.
@@ -623,11 +629,15 @@ class AWBWEnv(gym.Env):
         # If P1 opens, run the opponent before the learner's first step — same contract as
         # server/play_human.new_session: observations must always be on P0's clock.
         # (After _max_p1_microsteps init — _run_random_opponent updates that counter.)
+        # Phase 0a.2: count this opening opponent run as wall_p1_s so per-episode
+        # totals reflect ALL P1 work, not just the post-step microsteps.
         if not self.state.done and self.state.active_player == 1:
+            _t_open = time.perf_counter()
             if self.opponent_policy is not None:
                 self._run_policy_opponent(0.0)
             else:
                 self._run_random_opponent(0.0)
+            self._wall_p1_s += time.perf_counter() - _t_open
 
         # Reset replay buffer and record the starting position.
         self._replay_frames = []
@@ -640,6 +650,13 @@ class AWBWEnv(gym.Env):
     ) -> tuple[dict, float, bool, bool, dict]:
         if self.state is None:
             raise RuntimeError("Call reset() before step().")
+
+        # Phase 0a.2: per-step wall accounting. _t_step_start brackets the entire
+        # step; _p1_delta is added to _wall_p1_s and subtracted from the P0 share.
+        # perf_counter() calls are at episode/section boundaries only, so they
+        # cannot bias hot-path timing.
+        _t_step_start = time.perf_counter()
+        _p1_delta = 0.0
 
         self._p0_env_steps += 1
 
@@ -663,6 +680,8 @@ class AWBWEnv(gym.Env):
         if action is None:
             self._invalid_action_count += 1
             obs = self._get_obs()
+            # Phase 0a.2: invalid-action early return is still P0 work; account it.
+            self._wall_p0_s += time.perf_counter() - _t_step_start
             return obs, -0.1, False, False, {"invalid_action": True}
 
         # Φ-shaping snapshot (plan rl_capture-combat_recalibration). Bracketed
@@ -712,10 +731,12 @@ class AWBWEnv(gym.Env):
 
         # ── Auto-step opponent ────────────────────────────────────────────────
         if not done and self.state.active_player == 1:
+            _t_p1 = time.perf_counter()
             if self.opponent_policy is not None:
                 reward = self._run_policy_opponent(reward)
             else:
                 reward = self._run_random_opponent(reward)
+            _p1_delta = time.perf_counter() - _t_p1
 
         # Apply Φ-delta AFTER opponent loop so the snapshot brackets the full
         # P0-action-to-next-P0-decision transition. On terminal we use Φ:=0 so
@@ -762,6 +783,12 @@ class AWBWEnv(gym.Env):
                     reward -= float(raw_tc)
                 except ValueError:
                     pass
+
+        # Phase 0a.2: finalize per-step wall split BEFORE logging so the
+        # finished-game record reflects this step's contribution.
+        _step_total = time.perf_counter() - _t_step_start
+        self._wall_p1_s += _p1_delta
+        self._wall_p0_s += max(0.0, _step_total - _p1_delta)
 
         # Log finished game (Phase A requirement)
         if terminated:
@@ -1095,6 +1122,21 @@ class AWBWEnv(gym.Env):
             0, reloads_now - getattr(self, "_opponent_reloads_at_start", 0)
         )
 
+        # Phase 0a.2: per-episode P0/P1 wall split. Sums of perf_counter()
+        # deltas captured around the step() body and the opponent loop.
+        wall_p0_s = float(getattr(self, "_wall_p0_s", 0.0))
+        wall_p1_s = float(getattr(self, "_wall_p1_s", 0.0))
+
+        # Phase 0a.3: worker RSS at episode end. Lazy-imported so a stale
+        # worker without psutil installed degrades to None instead of crashing
+        # training. Cheap (~us) and only at episode boundary.
+        worker_rss_mb: float | None
+        try:
+            import psutil  # type: ignore[import]
+            worker_rss_mb = float(psutil.Process().memory_info().rss) / (1024.0 * 1024.0)
+        except Exception:
+            worker_rss_mb = None
+
         # Build comprehensive log record per LOGGING_PLAN.md Phase A (game_id added in _append_game_log_line)
         log_record = {
             # High-signal outcome fields first
@@ -1168,6 +1210,14 @@ class AWBWEnv(gym.Env):
             "approx_engine_actions_per_p0_step": approx_engine_actions_per_p0_step,
             "opponent_checkpoint_reload_count": opponent_checkpoint_reload_count,
 
+            # Phase 0a (FPS campaign): per-episode wall split between the
+            # P0 step path and the P1 microstep loop, plus worker RSS at
+            # episode end. Used to size Phase 1a / Phase 6 ROI before any
+            # hot-path code change. See .cursor/plans/train.py_fps_campaign_*.
+            "wall_p0_s": wall_p0_s,
+            "wall_p1_s": wall_p1_s,
+            "worker_rss_mb": worker_rss_mb,
+
             # Tier 1 (plan p0-capture-architecture-fix): visibility into
             # teacher-mix so we can verify it is firing and slice metrics by mix value.
             "learner_greedy_mix": float(getattr(self, "_learner_greedy_mix", 0.0)),
@@ -1181,7 +1231,8 @@ class AWBWEnv(gym.Env):
             "episode_started_at": self._episode_info.get("episode_started_at"),
 
             # Schema version for future compatibility
-            "log_schema_version": "1.5",
+            # 1.6: Phase 0a (FPS campaign) — added wall_p0_s / wall_p1_s / worker_rss_mb.
+            "log_schema_version": "1.6",
         }
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag

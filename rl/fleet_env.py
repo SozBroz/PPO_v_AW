@@ -14,13 +14,16 @@ from __future__ import annotations
 import glob
 import json
 import os
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_CKPT_ZIP_RE = re.compile(r"^checkpoint_(\d+)\.zip$", re.IGNORECASE)
+# Any top-level `checkpoint_*.zip` in a checkpoint_dir is a managed snapshot
+# (historical PPO zips, opponent pool, prune targets).  Not used for
+# `latest.zip`, `promoted/*.zip`, or `bc/*.zip`.
+def _is_managed_checkpoint_zip_name(name: str) -> bool:
+    return name.startswith("checkpoint_") and name.lower().endswith(".zip")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -302,33 +305,54 @@ def resolve_fleet_opponent_pool_root(checkpoint_dir: Path, cfg: FleetConfig) -> 
 
 
 def sorted_checkpoint_zip_paths(checkpoint_dir: Path) -> list[Path]:
-    """``checkpoint_*.zip`` under ``checkpoint_dir`` only, ordered by numeric suffix."""
+    """
+    ``checkpoint_*.zip`` under ``checkpoint_dir`` only, oldest first.
+
+    Order is (modification time, path name) so merged directories from
+    different hosts stay chronological; legacy ``checkpoint_0000.zip``-style
+    names remain supported.  Timestamp-style names
+    (``checkpoint_YYYYMMDDTHHMMSS_*Z``) sort lexicographically by time for
+    equal mtimes.
+    """
     ck = _norm(checkpoint_dir)
     if not ck.is_dir():
         return []
-    keyed: list[tuple[int, Path]] = []
+    paths: list[Path] = []
     for p in ck.iterdir():
         if not p.is_file():
             continue
-        m = _CKPT_ZIP_RE.match(p.name)
-        if m:
-            keyed.append((int(m.group(1)), p))
-    return [p for _, p in sorted(keyed, key=lambda t: t[0])]
+        if not _is_managed_checkpoint_zip_name(p.name):
+            continue
+        paths.append(p)
+    return sorted(paths, key=lambda p: (p.stat().st_mtime, p.name))
 
 
-def next_checkpoint_save_index(checkpoint_dir: Path) -> int:
-    """Next ``checkpoint_{idx:04d}`` index (max existing + 1, or 0 if none)."""
-    paths = sorted_checkpoint_zip_paths(checkpoint_dir)
-    if not paths:
-        return 0
-    m = _CKPT_ZIP_RE.match(paths[-1].name)
-    return int(m.group(1)) + 1 if m else len(paths)
+def new_checkpoint_stem_utc() -> str:
+    """
+    Return a new snapshot stem (no ``.zip``) that is unique across processes
+    and valid on both Windows and POSIX (no ``:`` or other reserved chars).
+
+    Format: ``checkpoint_<UTC YYYYMMDDTHHMMSS>_<N>Z`` where *N* is a 20-digit,
+    zero-padded count of nanoseconds since the Unix epoch (from
+    :func:`time.time_ns`, bumped if needed so successive saves in this process
+    never reuse a stem on hosts where the clock has sub-microsecond
+    resolution).
+    """
+    n = time.time_ns()
+    last: int = getattr(new_checkpoint_stem_utc, "_last_n", 0)
+    if n <= last:
+        n = last + 1
+    setattr(new_checkpoint_stem_utc, "_last_n", n)
+    sec = n // 1_000_000_000
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(sec))
+    return f"checkpoint_{stamp}_{n:020d}Z"
 
 
 def prune_checkpoint_zip_snapshots(checkpoint_dir: Path, max_keep: int) -> int:
     """
-    Keep at most ``max_keep`` numbered ``checkpoint_*.zip`` files (lowest indices
-    deleted first). ``max_keep <= 0`` disables pruning.
+    Keep at most ``max_keep`` ``checkpoint_*.zip`` files under the directory
+    (oldest by modification time removed first; tie-break by name). ``max_keep
+    <= 0`` disables pruning.
 
     Returns the number of files removed.
     """

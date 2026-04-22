@@ -15,7 +15,7 @@ Training loop
 - Logs every completed game to logs/game_log.jsonl
 - Saves a checkpoint every `save_every` env steps
 - Rotating opponent pool: keeps the last `checkpoint_pool_size` checkpoints (in-memory tail).
-- On-disk `checkpoint_*.zip` retention: `checkpoint_zip_cap` (default 100) prunes oldest indices.
+- On-disk `checkpoint_*.zip` retention: `checkpoint_zip_cap` (default 100) prunes oldest (by mtime).
 """
 from __future__ import annotations
 
@@ -488,6 +488,18 @@ def _build_diagnostics_callback():
             # on first _on_step since we don't know n_envs at __init__.
             self._cur_lens: list[int] = []
             self._finished_lens: list[int] = []
+            # Phase 0a.1 (FPS campaign): env-collect vs PPO-update wall split.
+            # SB3 calls _on_rollout_start before each rollout, _on_rollout_end
+            # after the rollout buffer is full, then runs the PPO update before
+            # the next _on_rollout_start. So:
+            #   env_collect_s = rollout_end_t - rollout_start_t  (this rollout)
+            #   ppo_update_s  = rollout_start_t - prev_rollout_end_t  (prev update)
+            # The first rollout has no preceding update; ppo_update_s is omitted.
+            self._t_rollout_start: float | None = None
+            self._t_prev_rollout_end: float | None = None
+            self._last_ppo_update_s: float | None = None
+            # Per-env step count for env_steps_per_s_collect; sized lazily.
+            self._steps_in_rollout: int = 0
 
         def _on_step(self) -> bool:
             dones = self.locals.get("dones")
@@ -496,6 +508,7 @@ def _build_diagnostics_callback():
             n_envs = len(dones)
             if len(self._cur_lens) != n_envs:
                 self._cur_lens = [0] * n_envs
+            self._steps_in_rollout += n_envs
             for i in range(n_envs):
                 self._cur_lens[i] += 1
                 if dones[i]:
@@ -503,7 +516,18 @@ def _build_diagnostics_callback():
                     self._cur_lens[i] = 0
             return True
 
+        def _on_rollout_start(self) -> None:
+            now = time.perf_counter()
+            # If we have a previous rollout end, the gap until now is the PPO
+            # update wall for that rollout. Stash it so _on_rollout_end can
+            # bundle env_collect + ppo_update into a single TB flush.
+            if self._t_prev_rollout_end is not None:
+                self._last_ppo_update_s = max(0.0, now - self._t_prev_rollout_end)
+            self._t_rollout_start = now
+            self._steps_in_rollout = 0
+
         def _on_rollout_end(self) -> None:
+            now = time.perf_counter()
             n = len(self._finished_lens)
             self.logger.record("diag/episodes_per_rollout", n)
             if n:
@@ -513,6 +537,31 @@ def _build_diagnostics_callback():
                 self.logger.record("diag/ep_len_max", max(self._finished_lens))
                 self.logger.record("diag/ep_len_min", min(self._finished_lens))
             self._finished_lens.clear()
+
+            # Phase 0a.1: env-collect wall + steps/s for this rollout, plus
+            # the PPO-update wall from the prior rollout (derived in
+            # _on_rollout_start). env_steps_per_s_total uses (this rollout's
+            # collect + previous rollout's update) — that pair represents one
+            # full env+learn cycle, which is the steady-state FPS the user
+            # actually feels.
+            if self._t_rollout_start is not None:
+                env_collect_s = max(0.0, now - self._t_rollout_start)
+                self.logger.record("diag/env_collect_s", env_collect_s)
+                if env_collect_s > 0 and self._steps_in_rollout > 0:
+                    self.logger.record(
+                        "diag/env_steps_per_s_collect",
+                        self._steps_in_rollout / env_collect_s,
+                    )
+                if self._last_ppo_update_s is not None:
+                    self.logger.record("diag/ppo_update_s", self._last_ppo_update_s)
+                    cycle_s = env_collect_s + self._last_ppo_update_s
+                    if cycle_s > 0 and self._steps_in_rollout > 0:
+                        self.logger.record(
+                            "diag/env_steps_per_s_total",
+                            self._steps_in_rollout / cycle_s,
+                        )
+            self._t_prev_rollout_end = now
+            self._last_ppo_update_s = None
 
     return _Cb()
 
@@ -579,7 +628,7 @@ class SelfPlayTrainer:
         trainers should pass the shared root, e.g. ``Z:/checkpoints``).
     checkpoint_zip_cap : int
         Maximum on-disk ``checkpoint_*.zip`` files under ``checkpoint_dir``;
-        oldest numeric indices deleted after each save. ``0`` disables pruning.
+        oldest snapshots (by mtime) deleted after each save. ``0`` disables pruning.
     load_promoted : bool
         Prefer ``checkpoint_dir/promoted/best.zip`` over ``latest.zip`` when newer.
     bc_init : Path | str | None
@@ -862,6 +911,9 @@ class SelfPlayTrainer:
                 device=self.device,
                 custom_objects={"n_steps": self.n_steps},
             )
+            # Checkpoints from another machine (e.g. Main D:\) embed tensorboard_log in the zip;
+            # always write TensorBoard under this repo's logs/.
+            model.tensorboard_log = str(LOGS_DIR)
         elif self.bc_init is not None and self.bc_init.is_file():
             print(f"[self_play] Fresh run: warm-start from {self.bc_init}")
             from rl.ckpt_compat import load_maskable_ppo_compat
@@ -875,6 +927,7 @@ class SelfPlayTrainer:
                     "batch_size": self.batch_size,
                 },
             )
+            model.tensorboard_log = str(LOGS_DIR)
         else:
             model = MaskablePPO(
                 "MultiInputPolicy",
@@ -897,13 +950,12 @@ class SelfPlayTrainer:
             )
 
         from rl.fleet_env import (
-            next_checkpoint_save_index,
+            new_checkpoint_stem_utc,
             prune_checkpoint_zip_snapshots,
             sorted_checkpoint_zip_paths,
         )
 
         steps_done = 0
-        ckpt_idx = next_checkpoint_save_index(self.checkpoint_dir)
         t_start = time.time()
         cap = self.total_timesteps
 
@@ -937,11 +989,10 @@ class SelfPlayTrainer:
                 )
                 steps_done += chunk
 
-                ckpt_name = f"checkpoint_{ckpt_idx:04d}"
-                ckpt_path = self.checkpoint_dir / ckpt_name
-                _atomic_model_save(model, ckpt_path)
+                ckpt_stem = new_checkpoint_stem_utc()
+                _atomic_model_save(model, self.checkpoint_dir / ckpt_stem)
                 _atomic_model_save(model, self.checkpoint_dir / "latest")
-                print(f"[self_play] Saved {ckpt_name}.zip")
+                print(f"[self_play] Saved {ckpt_stem}.zip")
 
                 if self.checkpoint_zip_cap > 0:
                     pruned = prune_checkpoint_zip_snapshots(
@@ -955,8 +1006,6 @@ class SelfPlayTrainer:
                 tail = self.checkpoint_pool_size if self.checkpoint_pool_size > 0 else None
                 all_ck = sorted_checkpoint_zip_paths(self.checkpoint_dir)
                 self.checkpoints = all_ck[-tail:] if tail else all_ck
-
-                ckpt_idx += 1
         except KeyboardInterrupt:
             print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
             _atomic_model_save(model, self.checkpoint_dir / "latest")

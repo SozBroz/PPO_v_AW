@@ -132,7 +132,7 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=100,
         help=(
-            "Max on-disk checkpoint_*.zip files under checkpoint-dir (oldest numeric indices "
+            "Max on-disk checkpoint_*.zip files under checkpoint-dir (oldest by mtime "
             "deleted after each save). Use 0 for unlimited."
         ),
     )
