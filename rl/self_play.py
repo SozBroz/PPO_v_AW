@@ -108,27 +108,30 @@ def _atomic_model_save(model, dest_no_ext: str | os.PathLike) -> None:
     """
     Save an SB3 model to ``<dest_no_ext>.zip`` atomically.
 
-    SB3's ``model.save(path)`` writes ``path + ".zip"``. Over SMB / shared
-    mounts, an opponent process (`_CheckpointOpponent`) can race a partial
-    write and load a truncated zip. We write to ``<dest>.tmp.zip`` first, then
-    ``os.replace`` it onto the final filename — atomic on the same volume.
+    Stable-Baselines3 does **not** simply do ``str(path) + ".zip"``.  Its
+    ``open_path`` helper only appends ``.zip`` when :func:`pathlib.Path`
+    reports an **empty** ``suffix``.  A base path ending in ``.tmp`` has
+    ``suffix == ".tmp"``, so the model is written to a file literally named
+    ``<name>.tmp`` (a zip bitstream) — *not* ``<name>.tmp.zip``.  That broke
+    expected ``.tmp.zip`` / ``os.replace`` logic on every OS.
 
-    Do **not** use ``Path(..., \"x.tmp\").with_suffix(\".zip\")`` for the
-    temp zip: that replaces the ``.tmp`` *suffix* with ``.zip`` (dropping
-    ``.tmp`` from the basename), so it names the *final* path while SB3
-    actually created ``<dest>.tmp.zip``.
+    We use a temp base ``<name>_saving`` (no extra ``.`` in the filename) so
+    ``suffix == ""`` and SB3 creates ``<name>_saving.zip`` predictably, then
+    we ``os.replace`` onto ``<name>.zip``.  Over SMB / shared mounts, an
+    opponent process can still race a partial read; this keeps a single
+    final rename.
     """
     dest = Path(dest_no_ext)
     final_zip = dest.parent / f"{dest.name}.zip"
-    tmp_no_ext = dest.parent / f"{dest.name}.tmp"  # SB3 -> "<name>.tmp.zip"
-    tmp_zip = dest.parent / f"{dest.name}.tmp.zip"
+    tmp_base = dest.parent / f"{dest.name}_saving"  # Path.suffix must be ""
+    tmp_zip = dest.parent / f"{dest.name}_saving.zip"
     try:
         if tmp_zip.exists():
             try:
                 tmp_zip.unlink()
             except OSError:
                 pass
-        model.save(str(tmp_no_ext))
+        model.save(str(tmp_base))
         os.replace(str(tmp_zip), str(final_zip))
     finally:
         # Defensive cleanup: if save raised mid-write leave nothing dangling.
