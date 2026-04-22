@@ -128,6 +128,15 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         help="Historical checkpoints to rotate as opponent (default: 5)",
     )
     parser.add_argument(
+        "--checkpoint-zip-cap",
+        type=int,
+        default=100,
+        help=(
+            "Max on-disk checkpoint_*.zip files under checkpoint-dir (oldest numeric indices "
+            "deleted after each save). Use 0 for unlimited."
+        ),
+    )
+    parser.add_argument(
         "--ent-coef", type=float, default=0.05,
         help="PPO entropy coefficient (default 0.05; narrow Misery-Andy runs often use 0.02)",
     )
@@ -148,8 +157,13 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         help="Checkpoint directory (default repo/checkpoints; pool aux: .../checkpoints/pool/<ID>/)",
     )
     parser.add_argument(
-        "--pool-from-fleet", action="store_true",
-        help="Include checkpoints/pool/*/checkpoint_*.zip in opponent sampling",
+        "--pool-from-fleet",
+        action="store_true",
+        help=(
+            "Fleet opponent pool: merge checkpoint_*.zip from the fleet checkpoints root "
+            "(top-level + checkpoints/pool/*/). On auxiliary pool trainers the root is "
+            "the shared checkpoints/ (e.g. Z:\\checkpoints), not only the pool/<ID>/ leaf."
+        ),
     )
     parser.add_argument(
         "--load-promoted", action="store_true",
@@ -294,6 +308,7 @@ def main() -> None:
         load_machine_role,
         load_shared_root_for_role,
         resolve_checkpoint_dir,
+        resolve_fleet_opponent_pool_root,
         validate_aux_pool_checkpoint_dir,
         validate_fleet_at_startup,
     )
@@ -311,6 +326,12 @@ def main() -> None:
     validate_aux_pool_checkpoint_dir(fleet_cfg, checkpoint_dir)
     layout_root = fleet_cfg.shared_root if fleet_cfg.is_auxiliary else fleet_cfg.repo_root
     bootstrap_fleet_layout(layout_root, machine_id=fleet_cfg.machine_id, role=fleet_cfg.role)
+
+    fleet_opponent_root = (
+        str(resolve_fleet_opponent_pool_root(checkpoint_dir, fleet_cfg))
+        if args.pool_from_fleet
+        else None
+    )
 
     from rl.self_play import SelfPlayTrainer
     trainer = SelfPlayTrainer(
@@ -331,6 +352,8 @@ def main() -> None:
         ent_coef=args.ent_coef,
         checkpoint_dir=checkpoint_dir,
         pool_from_fleet=args.pool_from_fleet,
+        fleet_opponent_root=fleet_opponent_root,
+        checkpoint_zip_cap=args.checkpoint_zip_cap,
         load_promoted=args.load_promoted,
         bc_init=args.bc_init,
         cold_opponent=args.cold_opponent,

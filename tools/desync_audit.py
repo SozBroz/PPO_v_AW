@@ -106,6 +106,7 @@ from tools.gl_std_maps import gl_std_map_ids  # noqa: E402
 from tools.replay_snapshot_compare import (  # noqa: E402
     compare_funds,
     compare_snapshot_to_engine,
+    php_internal_from_snapshot_hit_points,
     replay_snapshot_pairing,
 )
 from engine.unit import UNIT_STATS  # noqa: E402
@@ -242,6 +243,77 @@ class _ReplayProgress:
     last_day: Optional[int] = None
     last_action_kind: Optional[str] = None
     last_envelope_index: Optional[int] = None
+
+
+def _replay_resync_unit_hp_from_php_post_frame(
+    state: GameState,
+    post_frame: dict[str, Any],
+    awbw_to_engine: dict[int, int],
+) -> None:
+    """Overwrite engine ``Unit.hp`` from a single PHP post-envelope snapshot.
+
+    Tile keys use ``(seat, row, col)`` with PHP ``y`` = row, ``x`` = column —
+    identical to ``_diff_engine_vs_snapshot`` / ``compare_units``. Skips
+    ``carried: Y`` rows for the seat/pos cache (transport + cargo rule).
+
+    Called twice on some envelopes: once after id-death cull, and again
+    **after** cadence ``_oracle_advance_turn_until_player`` + treasury snap
+    before ``_diff`` so implicit day-start property repair cannot be applied
+    twice vs ``frames[env_i+1]`` (GL **1623866** env 23 trailing).
+    """
+    raw = post_frame.get("units") or {}
+    if isinstance(raw, dict):
+        php_list = list(raw.values())
+    elif isinstance(raw, list):
+        php_list = raw
+    else:
+        return
+    php_by_awbw_id: dict[int, tuple[int, int, int, int]] = {}
+    php_by_seat_pos: dict[tuple[int, int, int], int] = {}
+    for pu in php_list:
+        if not isinstance(pu, dict):
+            continue
+        try:
+            raw_id = int(pu["id"])
+            raw_hp = float(pu["hit_points"])
+            raw_x = int(pu["x"])
+            raw_y = int(pu["y"])
+            raw_pid = int(pu["players_id"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        seat = awbw_to_engine.get(raw_pid)
+        if seat is None:
+            continue
+        hp_int = max(0, min(100, int(round(raw_hp * 10))))
+        php_by_awbw_id[raw_id] = (seat, raw_y, raw_x, hp_int)
+        if str(pu.get("carried", "N")).upper() == "Y":
+            continue
+        php_by_seat_pos.setdefault((seat, raw_y, raw_x), hp_int)
+    for seat in (0, 1):
+        for u in state.units[seat]:
+            if not getattr(u, "is_alive", True):
+                continue
+            new_hp: Optional[int] = None
+            try:
+                uid = int(u.unit_id)
+            except (TypeError, ValueError):
+                uid = None
+            if uid is not None and uid in php_by_awbw_id:
+                ps, _pr, _pc, php_hp_int = php_by_awbw_id[uid]
+                if ps == seat:
+                    new_hp = php_hp_int
+            if new_hp is None:
+                try:
+                    row, col = u.pos
+                    key = (seat, int(row), int(col))
+                except (TypeError, ValueError):
+                    key = None
+                if key is not None and key in php_by_seat_pos:
+                    new_hp = php_by_seat_pos[key]
+            if new_hp is not None and new_hp != int(u.hp):
+                u.hp = new_hp
+    for p in (0, 1):
+        state.units[p] = [x for x in state.units[p] if x.is_alive]
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +525,7 @@ def _diff_engine_vs_snapshot(
         if php_hp is None:
             continue
         try:
-            php_internal = int(round(float(php_hp) * 10))
+            php_internal = php_internal_from_snapshot_hit_points(php_hp, int(eu.hp))
         except (TypeError, ValueError):
             continue
         delta = int(eu.hp) - php_internal
@@ -817,7 +889,11 @@ def _run_replay_instrumented(
                 if seat is None:
                     continue
                 hp_int = max(0, min(100, int(round(raw_hp * 10))))
-                php_by_awbw_id[raw_id] = (seat, raw_x, raw_y, hp_int)
+                # Tile key **must** match ``_diff_engine_vs_snapshot`` /
+                # ``compare_units``: ``(seat, row, col)`` with PHP ``y`` =
+                # row, ``x`` = column (NOT ``(seat, x, y)`` — that transposed
+                # keys and skipped or mis-matched tile HP vs the diff path).
+                php_by_awbw_id[raw_id] = (seat, raw_y, raw_x, hp_int)
                 # AWBW exports **cargo** with the carrier's (x, y) and
                 # ``carried: "Y"`` — same convention as ``compare_units`` /
                 # ``_diff_engine_vs_snapshot`` (Phase 11J). If we seed
@@ -830,7 +906,7 @@ def _run_replay_instrumented(
                     continue
                 # Skip seat/pos cache for tiles already claimed (engine
                 # AWBW would never put two units on one tile).
-                php_by_seat_pos.setdefault((seat, raw_x, raw_y), hp_int)
+                php_by_seat_pos.setdefault((seat, raw_y, raw_x), hp_int)
 
             # Id-death cull **before** HP sync: avoid writing PHP hit_points onto
             # a unit PHP already removed, which can leave an illegal striker HP
@@ -860,7 +936,7 @@ def _run_replay_instrumented(
                 seat_p = awbw_to_engine.get(raw_pid)
                 if seat_p is None:
                     continue
-                id_at_pre_tile[(seat_p, raw_x, raw_y)] = raw_id
+                id_at_pre_tile[(seat_p, raw_y, raw_x)] = raw_id
             ids_post: set[int] = set()
             for pu in php_units_list:
                 if not isinstance(pu, dict):
@@ -875,7 +951,7 @@ def _run_replay_instrumented(
                         continue
                     try:
                         row, col = u.pos
-                        key = (seat, int(col), int(row))
+                        key = (seat, int(row), int(col))
                     except (TypeError, ValueError):
                         continue
                     id_pre = id_at_pre_tile.get(key)
@@ -902,29 +978,9 @@ def _run_replay_instrumented(
             # mandatory treasury re-snap to ``php_frame`` (not only
             # ``_run_replay_instrumented``'s pre-``_diff`` snap).
             if can_pin_post_frame:
-                for seat in (0, 1):
-                    for u in state.units[seat]:
-                        if not getattr(u, "is_alive", True):
-                            continue
-                        new_hp: Optional[int] = None
-                        try:
-                            uid = int(u.unit_id)
-                        except (TypeError, ValueError):
-                            uid = None
-                        if uid is not None and uid in php_by_awbw_id:
-                            ps, px, py, php_hp_int = php_by_awbw_id[uid]
-                            if ps == seat:
-                                new_hp = php_hp_int
-                        if new_hp is None:
-                            try:
-                                row, col = u.pos
-                                key = (seat, int(col), int(row))
-                            except (TypeError, ValueError):
-                                key = None
-                            if key is not None and key in php_by_seat_pos:
-                                new_hp = php_by_seat_pos[key]
-                        if new_hp is not None and new_hp != int(u.hp):
-                            u.hp = new_hp
+                _replay_resync_unit_hp_from_php_post_frame(
+                    state, post_frame_for_sync, awbw_to_engine
+                )
             # Match ``_oracle_kill_friendly_unit`` / ``_apply_attack`` cleanup
             # after cull + (optional) HP.
             for p in (0, 1):
@@ -1007,6 +1063,15 @@ def _run_replay_instrumented(
                     if seat is None or not (0 <= seat < len(state.funds)):
                         continue
                     state.funds[seat] = max(0, min(999_999, php_f))
+                # Cadence pre-roll can re-apply the next seat's day-start property
+                # repair *after* the post-envelope HP copy above. Re-copy from the
+                # same ``php_frame`` so ``_diff`` sees engine HP aligned with the
+                # snapshot (GL 1623866 env 23; must not mutate between envelopes
+                # beyond what PHP already encoded in this frame).
+                if can_pin_post_frame:
+                    _replay_resync_unit_hp_from_php_post_frame(
+                        state, php_frame, awbw_to_engine
+                    )
                 ds = _diff_engine_vs_snapshot(
                     state,
                     php_frame,

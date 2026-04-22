@@ -93,12 +93,15 @@ def _trace_to_action(entry: dict) -> Action:
     move_pos   = tuple(entry["move_pos"])   if entry["move_pos"]   is not None else None
     target_pos = tuple(entry["target_pos"]) if entry["target_pos"] is not None else None
     unit_type  = UnitType[entry["unit_type"]] if entry["unit_type"] is not None else None
+    raw_sel = entry.get("select_unit_id")
+    select_unit_id = int(raw_sel) if raw_sel is not None else None
     return Action(
         action_type=atype,
         unit_pos=unit_pos,
         move_pos=move_pos,
         target_pos=target_pos,
         unit_type=unit_type,
+        select_unit_id=select_unit_id,
     )
 
 
@@ -487,7 +490,12 @@ def _emit_move_or_fire(
 
     moving_unit: Optional[Unit] = None
     if start is not None:
-        moving_unit = state.get_unit_at(*start)
+        # Must mirror ``GameState._apply_wait`` / ``_apply_attack`` tile
+        # disambiguation: ``get_unit_at`` is first-match on stacks; the trace
+        # pins the actor with ``select_unit_id`` (same field ``full_trace`` logs).
+        moving_unit = state.get_unit_at_oracle_id(
+            start[0], start[1], action.select_unit_id
+        )
 
     # Pre-step snapshot of the attacker (and the defender for ATTACK). We use
     # ``copy.copy`` because ``Unit`` holds only scalars plus ``loaded_units``
@@ -499,7 +507,9 @@ def _emit_move_or_fire(
     if moving_unit is not None:
         attacker_pre = copy.copy(moving_unit)
     if atype == ActionType.ATTACK and action.target_pos is not None:
-        defender_pre = state.get_unit_at(*action.target_pos)
+        defender_pre = state.get_unit_at_oracle_id(
+            action.target_pos[0], action.target_pos[1], action.select_unit_id
+        )
         # Track whether this is a seam strike (empty tile w/ terrain 113/114).
         # The post-step terrain flip decides the AttackSeam envelope shape.
         if defender_pre is None:
@@ -507,14 +517,27 @@ def _emit_move_or_fire(
             if tid_pre in (113, 114):
                 seam_target = action.target_pos
     if atype == ActionType.REPAIR and action.target_pos is not None:
-        repaired_pre = state.get_unit_at(*action.target_pos)
+        repaired_pre = state.get_unit_at_oracle_id(
+            action.target_pos[0], action.target_pos[1], action.select_unit_id
+        )
 
     step_failed = False
     try:
         state.step(action)
     except IllegalActionError:
         # STEP-GATE: trace actions come from AWBW envelopes, not get_legal_actions.
-        state.step(action, oracle_mode=True)
+        # The oracle step can still raise ValueError (e.g. ``_move_unit`` when the
+        # replay timeline drifted and the path is no longer reachable). Sibling
+        # ``except ValueError`` on this ``try`` does *not* catch that — exceptions
+        # from an ``except`` block are not handled by the same statement — so
+        # mirror the force-move recovery here.
+        try:
+            state.step(action, oracle_mode=True)
+        except ValueError:
+            step_failed = True
+            if moving_unit is not None and end is not None:
+                state._move_unit_forced(moving_unit, end)
+                state._finish_action(moving_unit)
     except ValueError:
         # Re-executed state has diverged from the original game (a blocker
         # occupies a tile it didn't hold during the live match). Force-move

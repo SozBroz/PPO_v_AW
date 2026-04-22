@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,7 +131,34 @@ def main() -> int:
         metavar="N",
         help="Engine calendar tiebreak: end-of-game property count after N days (default: MAX_TURNS from engine.game, usually 100).",
     )
+    ap.add_argument(
+        "--parallel",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run each seating block in parallel processes (default: false). Each worker loads a full policy "
+            "(multi-GB); use only if you have RAM for --parallel-workers concurrent loads (default cap: 2)."
+        ),
+    )
+    ap.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Max worker processes per seating block. Default caps at min(CPU, 2) because each worker "
+            "loads a full policy (multi-GB); raise only if you have RAM headroom."
+        ),
+    )
+    ap.add_argument(
+        "--phi-profile",
+        choices=("balanced", "capture"),
+        default="balanced",
+        help="Φ preset (α,β,κ) when using phi shaping; default balanced. Sets AWBW_PHI_PROFILE for this run.",
+    )
     args = ap.parse_args()
+    # Must be set before any import that loads engine.game (e.g. rl.self_play); workers inherit the env.
+    os.environ["AWBW_PHI_PROFILE"] = str(args.phi_profile)
 
     max_env_steps = (
         None if args.max_env_steps is None or args.max_env_steps <= 0 else int(args.max_env_steps)
@@ -177,6 +206,56 @@ def main() -> int:
         base_wins = 0
         game_no = 0
 
+        def _one_game_outcome(
+            *,
+            challenger: Path,
+            defender: Path,
+            game_no: int,
+            seed: int,
+            label: str,
+        ) -> None:
+            nonlocal cand_wins, base_wins
+            _gi, w, was_trunc = _worker_game(
+                {
+                    "game_i": game_no,
+                    "seed": seed,
+                    "challenger": str(challenger),
+                    "defender": str(defender),
+                    "map_pool_json": pool_json,
+                    "tier": args.tier,
+                    "co_p0": args.co_p0,
+                    "co_p1": args.co_p1,
+                    "deterministic": args.deterministic,
+                    "max_env_steps": max_env_steps,
+                    "max_p1_microsteps": args.max_p1_microsteps,
+                    "max_turns": args.max_turns,
+                }
+            )
+            if challenger == cand_snap:
+                cw = w == 0
+                bw = w == 1
+            else:
+                cw = w == 1
+                bw = w == 0
+            if cw:
+                cand_wins += 1
+            elif bw:
+                base_wins += 1
+            print(
+                f"[sym] game={game_no} block={label} seed={seed} winner_p0={w} "
+                f"candidate_win={cw} truncated={was_trunc}"
+            )
+            results.append(
+                {
+                    "game": game_no,
+                    "block": label,
+                    "seed": seed,
+                    "winner": w,
+                    "candidate_win": cw,
+                    "truncated": was_trunc,
+                }
+            )
+
         def run_block(
             *,
             challenger: Path,
@@ -185,13 +264,27 @@ def main() -> int:
             label: str,
         ) -> None:
             nonlocal game_no, cand_wins, base_wins
+            if n_games <= 0:
+                return
+            tasks: list[tuple[int, int]] = []
             for _ in range(n_games):
                 game_no += 1
                 seed = int(rng.integers(0, 2**31 - 1))
-                _gi, w, was_trunc = _worker_game(
+                tasks.append((game_no, seed))
+
+            cpu = os.cpu_count() or 4
+            if args.parallel_workers is not None:
+                cap = int(args.parallel_workers)
+            else:
+                # Uncapped parallel (e.g. one worker per game) can OOM: each process loads MaskablePPO + buffers.
+                cap = min(cpu, 2)
+            workers = max(1, min(n_games, cap))
+            use_parallel = bool(args.parallel) and n_games > 1 and workers > 1
+            if use_parallel:
+                payloads = [
                     {
-                        "game_i": game_no,
-                        "seed": seed,
+                        "game_i": gn,
+                        "seed": sd,
                         "challenger": str(challenger),
                         "defender": str(defender),
                         "map_pool_json": pool_json,
@@ -203,37 +296,57 @@ def main() -> int:
                         "max_p1_microsteps": args.max_p1_microsteps,
                         "max_turns": args.max_turns,
                     }
-                )
-                # Candidate win: P0 win when candidate is challenger, P1 win when candidate is defender
-                if challenger == cand_snap:
-                    cw = w == 0
-                    bw = w == 1
-                else:
-                    cw = w == 1
-                    bw = w == 0
-                if cw:
-                    cand_wins += 1
-                elif bw:
-                    base_wins += 1
-                print(
-                    f"[sym] game={game_no} block={label} seed={seed} winner_p0={w} "
-                    f"candidate_win={cw} truncated={was_trunc}"
-                )
-                results.append(
-                    {
-                        "game": game_no,
-                        "block": label,
-                        "seed": seed,
-                        "winner": w,
-                        "candidate_win": cw,
-                        "truncated": was_trunc,
-                    }
-                )
+                    for gn, sd in tasks
+                ]
+                print(f"[sym] parallel block={label} workers={workers} games={n_games}")
+                with ProcessPoolExecutor(max_workers=workers) as ex:
+                    futs = {ex.submit(_worker_game, p): p for p in payloads}
+                    by_i: dict[int, tuple[int, bool]] = {}
+                    for fut in as_completed(futs):
+                        p = futs[fut]
+                        gi, w, was_trunc = fut.result()
+                        by_i[int(gi)] = (w, was_trunc)
+                for gn, sd in tasks:
+                    w, was_trunc = by_i[gn]
+                    if challenger == cand_snap:
+                        cw = w == 0
+                        bw = w == 1
+                    else:
+                        cw = w == 1
+                        bw = w == 0
+                    if cw:
+                        cand_wins += 1
+                    elif bw:
+                        base_wins += 1
+                    print(
+                        f"[sym] game={gn} block={label} seed={sd} winner_p0={w} "
+                        f"candidate_win={cw} truncated={was_trunc}"
+                    )
+                    results.append(
+                        {
+                            "game": gn,
+                            "block": label,
+                            "seed": sd,
+                            "winner": w,
+                            "candidate_win": cw,
+                            "truncated": was_trunc,
+                        }
+                    )
+            else:
+                for gn, sd in tasks:
+                    _one_game_outcome(
+                        challenger=challenger,
+                        defender=defender,
+                        game_no=gn,
+                        seed=sd,
+                        label=label,
+                    )
 
         print(
             f"[sym] candidate_as_P0 x{args.games_first_seat} "
             f"then candidate_as_P1 x{args.games_second_seat} "
-            f"(max_env_steps={max_env_steps}, max_turns={args.max_turns})"
+            f"(max_env_steps={max_env_steps}, max_turns={args.max_turns}, "
+            f"parallel={args.parallel})"
         )
         run_block(
             challenger=cand_snap,
@@ -247,6 +360,8 @@ def main() -> int:
             n_games=args.games_second_seat,
             label="candidate_P1",
         )
+
+        results.sort(key=lambda r: int(r["game"]))
 
         total = cand_wins + base_wins
         print(
@@ -276,6 +391,8 @@ def main() -> int:
                 "candidate_snapshot": str(cand_snap),
                 "baseline_snapshot": str(base_snap),
                 "eval_snapshot_run_id": run_id,
+                "parallel": bool(args.parallel),
+                "parallel_workers": args.parallel_workers,
                 "map_id": args.map_id,
                 "tier": args.tier,
                 "max_env_steps": max_env_steps,
@@ -283,6 +400,7 @@ def main() -> int:
                 "max_p1_microsteps": args.max_p1_microsteps,
                 "co_p0": args.co_p0,
                 "co_p1": args.co_p1,
+                "phi_profile": str(args.phi_profile),
                 "candidate_wins": cand_wins,
                 "baseline_wins": base_wins,
                 "per_seat": {"candidate_as_p0": [w_p0, n_p0], "candidate_as_p1": [w_p1, n_p1]},

@@ -75,13 +75,19 @@ LEARNER_GREEDY_MIX_ENV = "AWBW_LEARNER_GREEDY_MIX"
 #                       Φ(s_after) − Φ(s_before), where
 #                       Φ = α·Δval + β·Δprops + κ·Δcap-progress (contested).
 #                       Telescopes; suicidal caps net to value cost only.
+# When mode is "phi", AWBW_PHI_PROFILE picks defaults for α,β,κ if the
+# per-coefficient env vars are unset. Explicit AWBW_PHI_ALPHA / _BETA / _KAPPA
+# still override. Default profile is "balanced"; "capture" skews toward κ.
 REWARD_SHAPING_ENV = "AWBW_REWARD_SHAPING"
-PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient (default 2e-5)
-PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient (default 0.05)
-PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient (default 0.05)
-_PHI_ALPHA_DEFAULT = 2e-5
-_PHI_BETA_DEFAULT  = 0.05
-_PHI_KAPPA_DEFAULT = 0.05
+PHI_PROFILE_ENV = "AWBW_PHI_PROFILE"
+PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient
+PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
+PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient
+# (α, β, κ) when in phi mode and a coefficient env is unset:
+PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float]] = {
+    "balanced": (2e-5, 0.05, 0.05),
+    "capture": (2e-5, 0.02, 0.25),
+}
 
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
@@ -514,15 +520,21 @@ class AWBWEnv(gym.Env):
         mode = (os.environ.get(REWARD_SHAPING_ENV, "level") or "level").strip().lower()
         self._reward_shaping_mode: str = mode if mode in ("level", "phi") else "level"
 
+        prof_raw = (os.environ.get(PHI_PROFILE_ENV, "balanced") or "balanced").strip().lower()
+        if prof_raw not in PHI_PROFILE_DEFAULTS:
+            prof_raw = "balanced"
+        self._phi_profile: str = prof_raw
+        p_alpha, p_beta, p_kappa = PHI_PROFILE_DEFAULTS[prof_raw]
+
         def _read_float(env_name: str, default: float) -> float:
             try:
                 return float(os.environ.get(env_name, "") or default)
             except ValueError:
                 return default
 
-        self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, _PHI_ALPHA_DEFAULT)
-        self._phi_beta:  float = _read_float(PHI_BETA_ENV,  _PHI_BETA_DEFAULT)
-        self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, _PHI_KAPPA_DEFAULT)
+        self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, p_alpha)
+        self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
+        self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
 
     # ── Map helpers ───────────────────────────────────────────────────────────
 

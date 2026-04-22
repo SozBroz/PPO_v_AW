@@ -53,7 +53,33 @@ def frames_envelopes_aligned(n_frames: int, n_envelopes: int) -> bool:
     return replay_snapshot_pairing(n_frames, n_envelopes) is not None
 
 
-def _php_unit_bars(u: dict[str, Any]) -> int:
+def php_internal_from_snapshot_hit_points(php_raw: Any, engine_hp: int) -> int:
+    """Map PHP ``hit_points`` to internal HP (1–100) for comparator vs ``Unit.hp``.
+
+    Site exports are normally ``internal / 10`` as a float (``2.0`` = 20 HP). A
+    **Global League / tight-zip** class stores an effectively **20× compressed**
+    value: ``0.1``/``0.2``/… where ``round(php*10)`` is a bogus 1–2 but
+    ``round(php*200)`` matches the **engine** (ground truth in audit). When the
+    ×10 reading is far from the engine but ×200 is within 1 internal HP, trust
+    the ×200 path (else keep ×10).
+
+    This does **not** change engine or oracle sim — only snapshot diff hygiene.
+    """
+    try:
+        f = float(php_raw)
+    except (TypeError, ValueError):
+        return 0
+    a = int(round(f * 10.0))
+    b = int(round(f * 200.0))
+    eng = int(engine_hp)
+    if abs(b - eng) <= 1 and abs(b - eng) < abs(a - eng):
+        return max(0, min(100, b))
+    return max(0, min(100, a))
+
+
+def _php_unit_bars(
+    u: dict[str, Any], *, engine_internal_hp: Optional[int] = None
+) -> int:
     """
     AWBW snapshot ``hit_points`` is the **internal HP / 10** as a float
     (e.g. ``6.3`` = 63 internal HP). The displayed bar is the **ceiling** of
@@ -63,10 +89,16 @@ def _php_unit_bars(u: dict[str, Any]) -> int:
     whenever PHP stored a non-integer ``hit_points`` whose rounded value
     differed from its ceiling (e.g. PHP ``6.3`` → ``round`` 6 vs engine ceil
     7). Both sides should use ceiling so only true internal-HP drift surfaces.
+
+    When ``engine_internal_hp`` is set, ``php_internal_from_snapshot_hit_points``
+    rewrites lossy *200-scale* zip rows so bars match the engine where appropriate.
     """
     hp = u.get("hit_points")
     if hp is None:
         return 0
+    if engine_internal_hp is not None:
+        intern = php_internal_from_snapshot_hit_points(hp, engine_internal_hp)
+        return max(0, min(10, (intern + 9) // 10))
     v = int(math.ceil(float(hp)))
     return max(0, min(10, v))
 
@@ -158,7 +190,7 @@ def compare_units(
             php_cmp = aliases.get(php_name, php_name)
             if eng_cmp != php_cmp:
                 out.append(f"at {key} type engine={eng_name!r} php={php_name!r}")
-        php_bars = _php_unit_bars(pu)
+        php_bars = _php_unit_bars(pu, engine_internal_hp=int(eu.hp))
         eng_bars = eu.display_hp
         if php_bars != eng_bars:
             out.append(

@@ -49,8 +49,10 @@ Use `use_reloader=False` in `server/app.py` (or `flask run --no-reload`) so the 
 
 ## Fleet (main + auxiliary)
 
-- **Main (default):** `python train.py` uses local `checkpoints/` only. No share required. Optional flags: `--pool-from-fleet` (adds `checkpoints/pool/*/checkpoint_*.zip` to the opponent pool), `--load-promoted` (prefer newer `checkpoints/promoted/best.zip` over `latest.zip` on restart), `--bc-init <zip>` (warm-start when there is no resume zip).
+- **Shared opponent pool:** With `--pool-from-fleet`, training merges **top-level** `checkpoint_*.zip` and every `checkpoints/pool/*/checkpoint_*.zip` under the fleet **checkpoints root**. Auxiliary pool machines (`--checkpoint-dir Z:\checkpoints\pool\<ID>\`) automatically use the shared root `Z:\checkpoints` for that merge so aux sees **main’s line + all pool exports**; main should also point `--checkpoint-dir` at the same shared `checkpoints\` when `Z:` is mounted so both sides write and read the same tree.
+- **Main (default):** `python train.py` uses local `checkpoints/` if you omit `--checkpoint-dir`. Optional: `--pool-from-fleet`, `--load-promoted` (prefer newer `checkpoints/promoted/best.zip` over `latest.zip` on restart), `--bc-init <zip>` (warm-start when there is no resume zip).
 - **Auxiliary:** set `AWBW_MACHINE_ROLE=auxiliary`, `AWBW_MACHINE_ID`, and `AWBW_SHARED_ROOT` (default `Z:\`). Pool trainers use e.g. `python train.py --checkpoint-dir Z:\checkpoints\pool\<ID>\` with that ID matching `AWBW_MACHINE_ID`.
+- **Disk cap:** `--checkpoint-zip-cap` (default **100**) deletes oldest `checkpoint_*.zip` under `--checkpoint-dir` after each save; use `0` for unlimited.
 - **BC:** aux runs `scripts/train_bc.py` with `--demos` pointing at `data/*_bc_rows.jsonl` on the share and `--save Z:\checkpoints\bc\bc_warmstart_<name>.zip`; main may pass `--bc-init` to consume on a fresh run.
 - **Tier 4 / `--shared-training`:** not implemented; reserved for shared async weights (MASTERPLAN §10).
 

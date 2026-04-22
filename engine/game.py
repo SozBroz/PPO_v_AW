@@ -461,7 +461,11 @@ class GameState:
                 self.action_stage      = ActionStage.ACTION
 
         elif action.action_type == ActionType.ATTACK:
-            self._apply_attack(action)
+            self._apply_attack(
+                action,
+                oracle_mode=oracle_mode,
+                oracle_strict=oracle_strict,
+            )
 
         elif action.action_type == ActionType.CAPTURE:
             capture_shaping = self._apply_capture(action)
@@ -1119,7 +1123,13 @@ class GameState:
     # Attack
     # ------------------------------------------------------------------
 
-    def _apply_attack(self, action: Action):
+    def _apply_attack(
+        self,
+        action: Action,
+        *,
+        oracle_mode: bool = False,
+        oracle_strict: bool = False,
+    ):
         # Phase 11J P-COLO-ATTACKER: if STEP-GATE has already pinned the actor
         # via ``selected_unit`` and that unit is alive on ``action.unit_pos``,
         # prefer it over ``get_unit_at`` — the latter returns the *first*
@@ -1164,8 +1174,18 @@ class GameState:
         # out at ``ammo == 0`` even though the MG is unmetered). Trust the
         # oracle and skip this defense-in-depth check; the override is
         # consumed at L684 below so any subsequent step is gated normally.
+        #
+        # Replay export / zip rebuild calls ``step(..., oracle_mode=True)``
+        # after IllegalActionError: the live ``full_trace`` can disagree with
+        # ``get_attack_targets`` on the rebuilt timeline (benign drift, or
+        # indirect move_pos vs unit.pos edge cases). Non-strict oracle trusts
+        # the envelope like the HP override path; ``oracle_strict`` keeps this
+        # mirror check for audit builds.
         oracle_pinned = self._oracle_combat_damage_override is not None
-        if defender_pre is not None and not oracle_pinned:
+        skip_attack_inv = oracle_pinned or (
+            oracle_mode and not oracle_strict
+        )
+        if defender_pre is not None and not skip_attack_inv:
             atk_from = action.move_pos if action.move_pos is not None else attacker.pos
             if action.target_pos not in get_attack_targets(self, attacker, atk_from):
                 raise ValueError(

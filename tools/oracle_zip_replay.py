@@ -1839,6 +1839,15 @@ def _oracle_fire_indirect_defender_from_attack_ring(
     )
     if rec_in_ring is not None:
         return rec_in_ring
+    # GL 1629722: ``units_hit_points == 0`` is post-strike (defender destroyed).
+    # Comparing ``want == 0`` to alive units' ``display_hp`` never matches; the
+    # relaxed band can still pick a **neighbour** in ``ring_foes`` (e.g. Infantry
+    # one tile off) when the true victim sat on ``record`` but was outside the
+    # engine's computed indirect ``ring`` (LOS / min-range edge vs AWBW). Let
+    # :func:`_oracle_fire_resolve_defender_target_pos` use ``get_unit_at(record)``
+    # and Chebyshev / id fallbacks instead of snapping to the wrong ring tile.
+    if hint_hp is not None and int(hint_hp) == 0:
+        return None
     if hint_hp is not None:
         want = int(hint_hp)
         strict = [(tr, tc, u) for tr, tc, u in ring_foes if int(u.display_hp) == want]

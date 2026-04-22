@@ -11,12 +11,16 @@ Optional:
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_CKPT_ZIP_RE = re.compile(r"^checkpoint_(\d+)\.zip$", re.IGNORECASE)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -265,7 +269,80 @@ def verdict_summary_from_symmetric_json(data: dict[str, Any]) -> dict[str, Any]:
 
 def iter_pool_checkpoint_zips(checkpoint_dir: Path) -> list[str]:
     """Globs checkpoints/pool/*/checkpoint_*.zip for opponent mixing."""
-    import glob
-
     pattern = str(checkpoint_dir / "pool" / "*" / "checkpoint_*.zip")
     return sorted(glob.glob(pattern))
+
+
+def iter_fleet_opponent_checkpoint_zips(fleet_checkpoint_root: Path) -> list[str]:
+    """
+    All ``checkpoint_*.zip`` paths under a fleet **root** ``checkpoints/`` dir:
+    top-level snapshots plus ``pool/*/checkpoint_*.zip`` from auxiliary exports.
+    """
+    r = str(_norm(fleet_checkpoint_root))
+    top = sorted(glob.glob(os.path.join(r, "checkpoint_*.zip")))
+    pool = iter_pool_checkpoint_zips(Path(r))
+    return sorted(set(top + pool))
+
+
+def resolve_fleet_opponent_pool_root(checkpoint_dir: Path, cfg: FleetConfig) -> Path:
+    """
+    Root directory used to merge fleet-wide opponent checkpoints when
+    ``pool_from_fleet`` is enabled.
+
+    Auxiliary pool trainers write under ``<shared>/checkpoints/pool/<ID>/`` but
+    should still draw opponents from the shared ``<shared>/checkpoints/`` tree
+    (main line + every pool machine).
+    """
+    ck = _norm(checkpoint_dir)
+    if cfg.is_auxiliary and checkpoint_dir_is_aux_pool_tree(checkpoint_dir, cfg):
+        if cfg.shared_root is None:
+            return ck
+        return _norm(cfg.shared_root) / "checkpoints"
+    return ck
+
+
+def sorted_checkpoint_zip_paths(checkpoint_dir: Path) -> list[Path]:
+    """``checkpoint_*.zip`` under ``checkpoint_dir`` only, ordered by numeric suffix."""
+    ck = _norm(checkpoint_dir)
+    if not ck.is_dir():
+        return []
+    keyed: list[tuple[int, Path]] = []
+    for p in ck.iterdir():
+        if not p.is_file():
+            continue
+        m = _CKPT_ZIP_RE.match(p.name)
+        if m:
+            keyed.append((int(m.group(1)), p))
+    return [p for _, p in sorted(keyed, key=lambda t: t[0])]
+
+
+def next_checkpoint_save_index(checkpoint_dir: Path) -> int:
+    """Next ``checkpoint_{idx:04d}`` index (max existing + 1, or 0 if none)."""
+    paths = sorted_checkpoint_zip_paths(checkpoint_dir)
+    if not paths:
+        return 0
+    m = _CKPT_ZIP_RE.match(paths[-1].name)
+    return int(m.group(1)) + 1 if m else len(paths)
+
+
+def prune_checkpoint_zip_snapshots(checkpoint_dir: Path, max_keep: int) -> int:
+    """
+    Keep at most ``max_keep`` numbered ``checkpoint_*.zip`` files (lowest indices
+    deleted first). ``max_keep <= 0`` disables pruning.
+
+    Returns the number of files removed.
+    """
+    if max_keep <= 0:
+        return 0
+    paths = sorted_checkpoint_zip_paths(checkpoint_dir)
+    if len(paths) <= max_keep:
+        return 0
+    to_remove = paths[: len(paths) - max_keep]
+    n = 0
+    for p in to_remove:
+        try:
+            p.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n

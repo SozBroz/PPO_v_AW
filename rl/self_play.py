@@ -14,7 +14,8 @@ Training loop
 - MaskablePPO (sb3_contrib) against rotating historical checkpoints
 - Logs every completed game to logs/game_log.jsonl
 - Saves a checkpoint every `save_every` env steps
-- Rotating opponent pool: keeps the last `checkpoint_pool_size` checkpoints
+- Rotating opponent pool: keeps the last `checkpoint_pool_size` checkpoints (in-memory tail).
+- On-disk `checkpoint_*.zip` retention: `checkpoint_zip_cap` (default 100) prunes oldest indices.
 """
 from __future__ import annotations
 
@@ -101,6 +102,36 @@ def update_elo(
 def _mask_fn(env: "AWBWEnv") -> np.ndarray:  # type: ignore[name-defined]
     """Module-level mask function — picklable for SubprocVecEnv workers."""
     return env.action_masks()
+
+
+def _atomic_model_save(model, dest_no_ext: str | os.PathLike) -> None:
+    """
+    Save an SB3 model to ``<dest_no_ext>.zip`` atomically.
+
+    SB3's ``model.save(path)`` writes ``path + ".zip"``. Over SMB / shared
+    mounts, an opponent process (`_CheckpointOpponent`) can race a partial
+    write and load a truncated zip. We write to ``<dest>.tmp.zip`` first, then
+    ``os.replace`` it onto the final filename — atomic on the same volume.
+    """
+    dest = Path(dest_no_ext)
+    final_zip = dest.with_suffix(".zip")
+    tmp_no_ext = dest.with_name(dest.name + ".tmp")
+    tmp_zip = tmp_no_ext.with_suffix(".zip")
+    try:
+        if tmp_zip.exists():
+            try:
+                tmp_zip.unlink()
+            except OSError:
+                pass
+        model.save(str(tmp_no_ext))
+        os.replace(str(tmp_zip), str(final_zip))
+    finally:
+        # Defensive cleanup: if save raised mid-write leave nothing dangling.
+        if tmp_zip.exists():
+            try:
+                tmp_zip.unlink()
+            except OSError:
+                pass
 
 
 def _nearest_neutral_income_dist(state: GameState, pos: tuple[int, int]) -> int:
@@ -255,9 +286,10 @@ class _CheckpointOpponent:
       legal so P0 has the entire map to itself. Used for the smoke gate
       in plan p0-capture-architecture-fix.
 
-    With ``pool_from_fleet``, also samples ``checkpoint_*.zip`` under
-    ``<checkpoint_dir>/pool/*/`` (divergent aux trainers writing into
-    per-machine pool dirs).
+    With ``pool_from_fleet``, also samples fleet-wide ``checkpoint_*.zip`` under
+    ``<fleet_opponent_root>`` (top-level plus ``pool/*/``). For auxiliary pool
+    trainers, pass ``fleet_opponent_root`` = shared ``checkpoints/`` (e.g.
+    ``Z:\\checkpoints``) so opponents include main line + every pool export.
     """
 
     def __init__(
@@ -267,8 +299,10 @@ class _CheckpointOpponent:
         opponent_mix: float = 0.0,
         pool_from_fleet: bool = False,
         cold_opponent: str = "random",
+        fleet_opponent_root: Optional[str] = None,
     ) -> None:
         self._dir = checkpoint_dir
+        self._fleet_opponent_root = fleet_opponent_root
         self._refresh_every = refresh_every
         self._opponent_mix = max(0.0, min(1.0, float(opponent_mix)))
         self._pool_from_fleet = bool(pool_from_fleet)
@@ -294,9 +328,10 @@ class _CheckpointOpponent:
 
         ckpts = sorted(_glob.glob(os.path.join(self._dir, "checkpoint_*.zip")))
         if self._pool_from_fleet:
-            from rl.fleet_env import iter_pool_checkpoint_zips
+            from rl.fleet_env import iter_fleet_opponent_checkpoint_zips
 
-            ckpts = sorted(set(ckpts + iter_pool_checkpoint_zips(Path(self._dir))))
+            root = self._fleet_opponent_root or self._dir
+            ckpts = sorted(set(ckpts + iter_fleet_opponent_checkpoint_zips(Path(root))))
         if not ckpts:
             self._model = None
             return
@@ -392,6 +427,7 @@ def _make_env_factory(
     opponent_mix: float = 0.0,
     pool_from_fleet: bool = False,
     cold_opponent: str = "random",
+    fleet_opponent_root: str | None = None,
 ) -> Callable:
     """Return a picklable env factory for SubprocVecEnv."""
     def _init():
@@ -402,6 +438,7 @@ def _make_env_factory(
             opponent_mix=opponent_mix,
             pool_from_fleet=pool_from_fleet,
             cold_opponent=cold_opponent,
+            fleet_opponent_root=fleet_opponent_root,
         )
         env = AWBWEnv(
             map_pool=map_pool,
@@ -535,7 +572,14 @@ class SelfPlayTrainer:
     checkpoint_dir : Path | str | None
         Checkpoint directory (default ``<repo>/checkpoints``).
     pool_from_fleet : bool
-        Also sample opponent checkpoints from ``checkpoint_dir/pool/*/checkpoint_*.zip``.
+        Also sample opponent checkpoints from the fleet root (see ``fleet_opponent_root``).
+    fleet_opponent_root : Path | str | None
+        Shared ``checkpoints/`` directory for fleet-wide opponent zips when using
+        ``pool_from_fleet`` (defaults to ``checkpoint_dir`` on main; aux pool
+        trainers should pass the shared root, e.g. ``Z:/checkpoints``).
+    checkpoint_zip_cap : int
+        Maximum on-disk ``checkpoint_*.zip`` files under ``checkpoint_dir``;
+        oldest numeric indices deleted after each save. ``0`` disables pruning.
     load_promoted : bool
         Prefer ``checkpoint_dir/promoted/best.zip`` over ``latest.zip`` when newer.
     bc_init : Path | str | None
@@ -561,6 +605,8 @@ class SelfPlayTrainer:
         ent_coef: float = 0.05,
         checkpoint_dir: Optional[Path | str] = None,
         pool_from_fleet: bool = False,
+        fleet_opponent_root: Optional[Path | str] = None,
+        checkpoint_zip_cap: int = 100,
         load_promoted: bool = False,
         bc_init: Optional[Path | str] = None,
         cold_opponent: str = "random",
@@ -588,6 +634,10 @@ class SelfPlayTrainer:
             Path(checkpoint_dir).resolve() if checkpoint_dir is not None else CHECKPOINT_DIR.resolve()
         )
         self.pool_from_fleet = bool(pool_from_fleet)
+        self.fleet_opponent_root: Optional[str] = (
+            str(Path(fleet_opponent_root).resolve()) if fleet_opponent_root else None
+        )
+        self.checkpoint_zip_cap = int(checkpoint_zip_cap)
         self.load_promoted = bool(load_promoted)
         self.bc_init = Path(bc_init).resolve() if bc_init else None
         cold = str(cold_opponent or "random").strip().lower()
@@ -614,7 +664,16 @@ class SelfPlayTrainer:
             if not self.map_pool:
                 raise ValueError(f"No maps found with map_id={self.map_id_filter}")
 
-        self.checkpoints: list[Path] = sorted(self.checkpoint_dir.glob("checkpoint_*.zip"))
+        from rl.fleet_env import prune_checkpoint_zip_snapshots, sorted_checkpoint_zip_paths
+
+        if self.checkpoint_zip_cap > 0:
+            pruned = prune_checkpoint_zip_snapshots(self.checkpoint_dir, self.checkpoint_zip_cap)
+            if pruned:
+                print(
+                    f"[self_play] Pruned {pruned} old checkpoint_*.zip "
+                    f"(cap={self.checkpoint_zip_cap})"
+                )
+        self.checkpoints = sorted_checkpoint_zip_paths(self.checkpoint_dir)
         self.elo_ratings: dict[str, float] = {"latest": 1200.0}
 
     # ── Opponent helpers ──────────────────────────────────────────────────────
@@ -630,10 +689,19 @@ class SelfPlayTrainer:
         ``checkpoints/checkpoint_*.zip`` exist, and **capture-greedy**
         heuristics when none exist yet.
         """
-        if not self.checkpoints:
+        if self.pool_from_fleet:
+            from rl.fleet_env import iter_fleet_opponent_checkpoint_zips, sorted_checkpoint_zip_paths
+
+            root = Path(self.fleet_opponent_root) if self.fleet_opponent_root else self.checkpoint_dir
+            local = {str(p) for p in sorted_checkpoint_zip_paths(self.checkpoint_dir)}
+            fleet = set(iter_fleet_opponent_checkpoint_zips(root))
+            candidates = [Path(p) for p in sorted(local | fleet)]
+        else:
+            candidates = list(self.checkpoints)
+        if not candidates:
             return None
 
-        ckpt_path = random.choice(self.checkpoints)
+        ckpt_path = random.choice(candidates)
         try:
             from rl.ckpt_compat import load_maskable_ppo_compat
 
@@ -661,6 +729,7 @@ class SelfPlayTrainer:
             opponent_mix=self.opponent_mix,
             pool_from_fleet=self.pool_from_fleet,
             cold_opponent=self.cold_opponent,
+            fleet_opponent_root=self.fleet_opponent_root,
         )
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
@@ -673,7 +742,25 @@ class SelfPlayTrainer:
             return vec_env
         else:
             from rl.env import AWBWEnv
-            env = AWBWEnv(map_pool=self.map_pool, render_mode=None, **env_kw)
+
+            opponent = _CheckpointOpponent(
+                str(self.checkpoint_dir),
+                opponent_mix=self.opponent_mix,
+                pool_from_fleet=self.pool_from_fleet,
+                cold_opponent=self.cold_opponent,
+                fleet_opponent_root=self.fleet_opponent_root,
+            )
+            env = AWBWEnv(
+                map_pool=self.map_pool,
+                opponent_policy=opponent,
+                render_mode=None,
+                co_p0=self.co_p0,
+                co_p1=self.co_p1,
+                tier_name=self.tier_name,
+                curriculum_broad_prob=self.curriculum_broad_prob,
+                curriculum_tag=self.curriculum_tag,
+            )
+            opponent.attach_env(env)
             return ActionMasker(env, _mask_fn)
 
     # ── Main training loop ────────────────────────────────────────────────────
@@ -706,6 +793,12 @@ class SelfPlayTrainer:
         cur_bits.append(f"ent_coef={self.ent_coef}")
         if self.pool_from_fleet:
             cur_bits.append("pool_from_fleet=1")
+            if self.fleet_opponent_root:
+                fro = Path(self.fleet_opponent_root)
+                if fro.resolve() != self.checkpoint_dir.resolve():
+                    cur_bits.append(f"fleet_opponent_root={fro}")
+        if self.checkpoint_zip_cap > 0:
+            cur_bits.append(f"checkpoint_zip_cap={self.checkpoint_zip_cap}")
         if self.load_promoted:
             cur_bits.append("load_promoted=1")
         if self.bc_init is not None:
@@ -803,8 +896,14 @@ class SelfPlayTrainer:
                 tensorboard_log=str(LOGS_DIR),
             )
 
+        from rl.fleet_env import (
+            next_checkpoint_save_index,
+            prune_checkpoint_zip_snapshots,
+            sorted_checkpoint_zip_paths,
+        )
+
         steps_done = 0
-        ckpt_idx = len(self.checkpoints)
+        ckpt_idx = next_checkpoint_save_index(self.checkpoint_dir)
         t_start = time.time()
         cap = self.total_timesteps
 
@@ -840,19 +939,27 @@ class SelfPlayTrainer:
 
                 ckpt_name = f"checkpoint_{ckpt_idx:04d}"
                 ckpt_path = self.checkpoint_dir / ckpt_name
-                model.save(str(ckpt_path))
-                model.save(str(self.checkpoint_dir / "latest"))
+                _atomic_model_save(model, ckpt_path)
+                _atomic_model_save(model, self.checkpoint_dir / "latest")
                 print(f"[self_play] Saved {ckpt_name}.zip")
 
-                resolved = Path(str(ckpt_path) + ".zip")
-                self.checkpoints.append(resolved)
-                if len(self.checkpoints) > self.checkpoint_pool_size:
-                    self.checkpoints.pop(0)
+                if self.checkpoint_zip_cap > 0:
+                    pruned = prune_checkpoint_zip_snapshots(
+                        self.checkpoint_dir, self.checkpoint_zip_cap
+                    )
+                    if pruned:
+                        print(
+                            f"[self_play] Pruned {pruned} checkpoint_*.zip "
+                            f"(cap={self.checkpoint_zip_cap})"
+                        )
+                tail = self.checkpoint_pool_size if self.checkpoint_pool_size > 0 else None
+                all_ck = sorted_checkpoint_zip_paths(self.checkpoint_dir)
+                self.checkpoints = all_ck[-tail:] if tail else all_ck
 
                 ckpt_idx += 1
         except KeyboardInterrupt:
             print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
-            model.save(str(self.checkpoint_dir / "latest"))
+            _atomic_model_save(model, self.checkpoint_dir / "latest")
             print(f"[self_play] Saved -> {self.checkpoint_dir / 'latest.zip'}")
 
         total_elapsed = time.time() - t_start

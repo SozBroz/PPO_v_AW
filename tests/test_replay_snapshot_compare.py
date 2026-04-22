@@ -12,7 +12,10 @@ import math
 
 import pytest
 
-from tools.replay_snapshot_compare import _php_unit_bars
+from tools.replay_snapshot_compare import (
+    _php_unit_bars,
+    php_internal_from_snapshot_hit_points,
+)
 
 
 @pytest.mark.parametrize(
@@ -48,3 +51,13 @@ def test_php_unit_bars_matches_engine_display_hp_for_internal_hp_range():
             f"internal_hp={internal_hp} php={php_hp} engine={engine_bars} "
             f"php_bars={php_bars}"
         )
+
+
+def test_php_internal_coerce_200scale_small_float():
+    assert php_internal_from_snapshot_hit_points(0.1, 20) == 20
+    assert php_internal_from_snapshot_hit_points(0.2, 40) == 40
+    assert php_internal_from_snapshot_hit_points(6.3, 63) == 63
+
+
+def test_php_unit_bars_with_engine_coerces_01_to_two_bars():
+    assert _php_unit_bars({"hit_points": 0.1}, engine_internal_hp=20) == 2

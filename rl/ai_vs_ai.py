@@ -24,7 +24,8 @@ After export, the **AWBW Replay Player** desktop app is started with the new
 If the exe is missing, the replay folder is opened in the file manager.
 
 If no suitable ``train.py`` process is found, falls back to the legacy defaults
-(random Std map, tier T2, ``checkpoints/latest.zip``).
+(random Std map, tier T2, checkpoint: ``Z:\\checkpoints\\latest.zip`` when that
+file exists, else repo ``checkpoints/latest.zip``).
 
 Decision rule
 -------------
@@ -64,7 +65,15 @@ from rl.encoder import encode_state
 _MAP_POOL_PATH = _REPO / "data" / "gl_map_pool.json"
 _MAPS_DIR      = _REPO / "data" / "maps"
 _CKPT_DEFAULT  = _REPO / "checkpoints" / "latest.zip"
+_Z_PREFERRED_CKPT = Path("Z:/checkpoints/latest.zip")
 _REPLAY_OUT    = _REPO / "replays"
+
+
+def _default_ckpt_path() -> Path:
+    """Repo ``checkpoints/latest.zip``, unless a file exists at ``Z:/checkpoints/latest.zip``."""
+    if _Z_PREFERRED_CKPT.is_file():
+        return _Z_PREFERRED_CKPT
+    return _CKPT_DEFAULT
 
 _TRAIN_PY_TAIL = re.compile(r"train\.py[\"']?$", re.IGNORECASE)
 
@@ -78,8 +87,17 @@ def _log(msg: str) -> None:
 def _argv_for_this_module() -> list[str]:
     """Arguments after ``python -m rl.ai_vs_ai`` or ``python .../ai_vs_ai.py``."""
     a = sys.argv[1:]
-    if len(a) >= 2 and a[0] == "-m":
-        return a[2:]
+    # Walk for ``-m <module>`` so this works with ``-X`` / ``-3`` / ``-E`` and other
+    # CPython preflags (the old head-only check missed flags when ``-m`` was not argv[1]).
+    for i, arg in enumerate(a):
+        if arg == "-m" and i + 1 < len(a):
+            return a[i + 2 :]
+    if not a:
+        return []
+    if a[0] == "-c":
+        return []
+    if not a[0].startswith("-"):
+        return a[1:]
     if a:
         return a[1:]
     return []
@@ -334,7 +352,7 @@ def _open_replay_in_desktop_viewer(replay_zip: Path) -> None:
     exe = _resolve_awbw_replay_player_exe(_REPO)
     if exe is None:
         _log(
-            f"viewer: AWBW Replay Player.exe not found — set {_REPLAY_PLAYER_EXE_ENV} "
+            f"viewer: AWBW Replay Player.exe not found - set {_REPLAY_PLAYER_EXE_ENV} "
             "or build third_party/AWBW-Replay-Player (see README / desync-triage-viewer §4a)"
         )
         _open_replay_output_folder(replay_zip)
@@ -345,7 +363,7 @@ def _open_replay_in_desktop_viewer(replay_zip: Path) -> None:
             cwd=str(exe.parent),
             close_fds=sys.platform != "win32",
         )
-        _log(f"viewer: AWBW Replay Player — {exe.name} loaded {zp}")
+        _log(f"viewer: AWBW Replay Player - {exe.name} loaded {zp}")
     except OSError as exc:
         _log(f"viewer: could not start {exe}: {exc}")
         _open_replay_output_folder(replay_zip)
@@ -404,7 +422,7 @@ def _load_model(ckpt_path: Path):
         _log(f"checkpoint: loaded MaskablePPO from {ckpt_path}")
         return model
     except Exception as exc:
-        _log(f"checkpoint: could not load {ckpt_path}: {exc} — using random policy")
+        _log(f"checkpoint: could not load {ckpt_path}: {exc} - using random policy")
         return None
 
 
@@ -541,11 +559,11 @@ def run_game(
     # ---- Checkpoint ----
     model = None
     if not force_random:
-        path = ckpt_path or _CKPT_DEFAULT
+        path = ckpt_path or _default_ckpt_path()
         if path.exists():
             model = _load_model(path)
         else:
-            _log(f"checkpoint: not found at {path} — using random policy")
+            _log(f"checkpoint: not found at {path} - using random policy")
 
     if model is None:
         _log("policy: uniform random over legal actions")
@@ -597,7 +615,7 @@ def run_game(
     try:
         while not state.done:
             if state.turn > max_turns:
-                _log(f"play: hit max_turns={max_turns} (day={state.turn}) — stopping")
+                _log(f"play: hit max_turns={max_turns} (day={state.turn}) - stopping")
                 break
 
             # Fuse checks are issued *before* we pick the next action so the
@@ -654,7 +672,7 @@ def run_game(
             f"play: FAILED with '{msg}' [{reason}] at "
             f"day={state.turn} active=P{state.active_player} "
             f"stage={state.action_stage.name} actions={action_count} "
-            f"turn_actions={turn_action_count} — dumping partial replay"
+            f"turn_actions={turn_action_count} - dumping partial replay"
         )
         if reason != "no_legal_actions":
             # Fuse trip: print the exact legal-action distribution at the
@@ -696,7 +714,7 @@ def run_game(
         else "Draw"
     )
     _log(
-        f"play: finished — {winner_str} | day={state.turn} | actions={action_count} | "
+        f"play: finished - {winner_str} | day={state.turn} | actions={action_count} | "
         f"snapshots={len(snapshots)}"
     )
     _log(
@@ -754,7 +772,7 @@ def run_game(
             _log(f"export: complete  total {dt:.1f}s")
         except Exception as exc:
             export_error[0] = exc
-            _log(f"export: FAILED — {exc!r}")
+            _log(f"export: FAILED - {exc!r}")
 
     _log("export: worker thread starting (main thread will join when done)")
     worker = threading.Thread(
@@ -928,14 +946,14 @@ def _dump_partial_replay_on_failure(
         _write_trace_record(record, trace_path)
         _log(f"partial: trace JSON written -> {trace_path.resolve()}")
     except Exception as trace_exc:
-        _log(f"partial: trace JSON write FAILED — {trace_exc!r}")
+        _log(f"partial: trace JSON write FAILED - {trace_exc!r}")
 
     reason_tag = {
         "no_legal_actions": "no legal actions",
         "fuse_total":       "action fuse: total",
         "fuse_per_turn":    "action fuse: per-turn",
     }.get(reason, reason)
-    partial_game_name = f"AI-vs-AI  {map_name}  [PARTIAL — {reason_tag}]"
+    partial_game_name = f"AI-vs-AI  {map_name}  [PARTIAL - {reason_tag}]"
 
     try:
         from tools.export_awbw_replay import write_awbw_replay
@@ -951,7 +969,7 @@ def _dump_partial_replay_on_failure(
         _log(f"partial: replay zip (with p: stream) -> {zip_path.resolve()}")
     except Exception as zip_exc:
         _log(
-            f"partial: zip export with full_trace FAILED — {zip_exc!r} — "
+            f"partial: zip export with full_trace FAILED - {zip_exc!r} - "
             f"retrying snapshot-only"
         )
         try:
@@ -967,7 +985,7 @@ def _dump_partial_replay_on_failure(
             )
             _log(f"partial: replay zip (snapshot-only fallback) -> {zip_path.resolve()}")
         except Exception as zip_exc2:
-            _log(f"partial: snapshot-only zip export also FAILED — {zip_exc2!r}")
+            _log(f"partial: snapshot-only zip export also FAILED - {zip_exc2!r}")
 
 
 def _save_trace(
@@ -1013,7 +1031,8 @@ def main() -> None:
         action="store_true",
         help=(
             "Do not read a running train.py process — use only ai_vs_ai flags "
-            f"and defaults (e.g. tier T2, random Std map, {_CKPT_DEFAULT.name})."
+            "and defaults (e.g. tier T2, random Std map, latest.zip: "
+            f"Z: if present, else {_CKPT_DEFAULT.name})."
         ),
     )
     parser.add_argument(
@@ -1027,8 +1046,8 @@ def main() -> None:
         type=Path,
         default=argparse.SUPPRESS,
         help=(
-            f"Checkpoint zip (when following train: overrides trainer checkpoint "
-            f"resolution; default alone: {_CKPT_DEFAULT})"
+            "Checkpoint zip (when following train: overrides trainer checkpoint "
+            f"resolution; when alone: {_Z_PREFERRED_CKPT} if that file exists, else {_CKPT_DEFAULT})"
         ),
     )
     parser.add_argument(
@@ -1085,6 +1104,10 @@ def main() -> None:
         ),
     )
     args = parser.parse_args(user)
+    # If CPython/launcher preflags made ``user`` empty or incomplete, the flag
+    # can still appear in raw ``sys.argv``; honor it so ``--no-follow-train`` is reliable.
+    if not args.no_follow_train and any(x == "--no-follow-train" for x in sys.argv[1:]):
+        args.no_follow_train = True
 
     want_follow = not args.no_follow_train
     if want_follow:
@@ -1149,7 +1172,7 @@ def main() -> None:
         else:
             _log(
                 "follow-train: no training train.py process found "
-                "(or none parseable); using legacy defaults (Std map, T2, latest.zip)"
+                "(or none parseable); using legacy defaults (Std map, T2, ckpt: Z: if present else repo latest.zip)"
             )
 
     run_game(
