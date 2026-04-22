@@ -1115,6 +1115,19 @@ class GameState:
                     if hits > 0:
                         u.hp = max(1, u.hp - 30 * hits)
 
+        # Eagle (10) SCOP "Lightning Strike" — AWBW wiki
+        # (https://awbw.fandom.com/wiki/Eagle): all non-footsoldier own units
+        # may move and fire again. Footsoldiers (infantry, mech) are unchanged
+        # so they cannot gain a second activation from this refresh.
+        elif co.co_id == 10 and not cop:
+            for u in self.units[player]:
+                if not u.is_alive:
+                    continue
+                cls = UNIT_STATS[u.unit_type].unit_class
+                if cls in ("infantry", "mech"):
+                    continue
+                u.moved = False
+
         # Prune dead units from power effects
         for p in (0, 1):
             self.units[p] = [u for u in self.units[p] if u.is_alive]
@@ -1770,7 +1783,19 @@ class GameState:
 
         stats = UNIT_STATS[target.unit_type]
         did_heal = False
-        if target.hp < 100:
+        # Display-cap parity with property-day repair (R4 in
+        # ``_resupply_on_properties``): internal 91–99 still has display HP 10
+        # (bar maxed). AWBW charges **no** gold for a Black Boat HP tick in
+        # that band, but still tops internal HP up to 100 (residue under the
+        # maxed bar). GL **1635742** env 38: Md.Tank @ 97 internal, PHP
+        # ``Repair.funds`` stays 2600g while ``repaired`` shows post-HP display
+        # 10; pre-fix engine charged ``_black_boat_heal_cost`` (1600g) and
+        # denied the following INF×2 build chain.
+        display_hp = (target.hp + 9) // 10
+        if target.hp < 100 and display_hp >= 10:
+            target.hp = 100
+            did_heal = True
+        elif target.hp < 100:
             cost = self._black_boat_heal_cost(target.unit_type)
             if self.funds[boat.player] >= cost:
                 target.hp = min(100, target.hp + 10)
@@ -2091,8 +2116,18 @@ class GameState:
             return
 
         cargo = transport.loaded_units.pop(cargo_idx)
-        cargo.pos   = drop_pos
-        cargo.moved = True   # dropped units cannot act again this turn
+        cargo.pos = drop_pos
+        cco = self.co_states[cargo.player]
+        cargo_cls = UNIT_STATS[cargo.unit_type].unit_class
+        # Eagle SCOP: unloaded non-footsoldiers may still act this turn (wiki).
+        if (
+            cco.co_id == 10
+            and cco.scop_active
+            and cargo_cls not in ("infantry", "mech")
+        ):
+            cargo.moved = False
+        else:
+            cargo.moved = True  # dropped units cannot act again this turn
         self.units[cargo.player].append(cargo)
 
         self.game_log.append({
@@ -2168,6 +2203,14 @@ class GameState:
         self.funds[player] -= cost
         self.gold_spent[player] += cost  # Track spending
         stats    = UNIT_STATS[ut]
+        co       = self.co_states[player]
+        # Eagle SCOP "Lightning Strike": non-footsoldier builds may move the same
+        # turn (AWBW wiki). Infantry/mech still spawn exhausted like normal.
+        lightning_build_moves_now = (
+            co.co_id == 10
+            and co.scop_active
+            and stats.unit_class not in ("infantry", "mech")
+        )
         new_unit = Unit(
             unit_type=ut,
             player=player,
@@ -2175,7 +2218,7 @@ class GameState:
             ammo=stats.max_ammo if stats.max_ammo > 0 else 0,
             fuel=stats.max_fuel,
             pos=action.move_pos,
-            moved=True,  # Newly built units can't move this turn
+            moved=not lightning_build_moves_now,
             loaded_units=[],
             is_submerged=False,
             capture_progress=20,

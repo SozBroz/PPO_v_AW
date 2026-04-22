@@ -5009,6 +5009,37 @@ def _repair_boat_awbw_id(repair_block: dict[str, Any]) -> int:
     raise UnsupportedOracleAction(f"Repair: cannot parse boat id from unit={u!r}")
 
 
+def _oracle_snap_treasury_from_repair_funds_block_if_present(
+    state: GameState,
+    repair_block: dict[str, Any],
+) -> None:
+    """When AWBW embeds post-repair treasury in ``funds.global``, mirror the engine.
+
+    Black Boat display-cap healing (engine ``_apply_repair``) matches PHP on the
+    **no-1600g-charge** path, but tie-breakers in :func:`_finish_repair_after_boat_ready`
+    or prior HP drift can still leave ``state.funds`` hundreds off — enough to
+    deny later builds. PHP is authoritative for the **treasury** on this line.
+
+    Anchor: GL **1635742** env 38 — after Repair, PHP ``funds.global`` is
+    2600g while a strict heal-cost path could strand the engine at 0g before
+    twin ``Build Infantry`` actions.
+    """
+    fd = repair_block.get("funds")
+    if not isinstance(fd, dict):
+        return
+    raw = fd.get("global")
+    if raw is None:
+        return
+    try:
+        g = int(raw)
+    except (TypeError, ValueError):
+        return
+    eng = int(state.active_player)
+    if eng not in (0, 1):
+        return
+    state.funds[eng] = max(0, min(999_999, g))
+
+
 def _ensure_unit_committed_at_tile(
     state: GameState,
     u: Unit,
@@ -5111,6 +5142,9 @@ def _finish_repair_after_boat_ready(
     def _pick(cands: list[Action]) -> None:
         if len(cands) == 1:
             _engine_step(state, cands[0], before_engine_step)
+            _oracle_snap_treasury_from_repair_funds_block_if_present(
+                state, repair_block
+            )
             return
         raise UnsupportedOracleAction(
             f"Repair: expected 1 matching REPAIR, got {len(cands)}; "
@@ -5186,9 +5220,15 @@ def _finish_repair_after_boat_ready(
                 )
             )
             _engine_step(state, hit[0], before_engine_step)
+            _oracle_snap_treasury_from_repair_funds_block_if_present(
+                state, repair_block
+            )
             return
     if len(legal_rep) == 1:
         _engine_step(state, legal_rep[0], before_engine_step)
+        _oracle_snap_treasury_from_repair_funds_block_if_present(
+            state, repair_block
+        )
         return
 
     if not legal_rep:
@@ -5588,6 +5628,13 @@ def _apply_oracle_action_json_body(
         alive_after = sum(1 for u in state.units[eng] if u.is_alive)
         if funds_after == funds_before and alive_after == alive_before:
             detail2 = _oracle_diagnose_build_refusal(state, r, c, eng, ut)
+            # Zips can include a top-level ``Build`` line for a click that does not
+            # spend funds (engine snapshot has slightly less $ than PHP at apply time).
+            # Treat engine-side ``insufficient funds`` only as a faithful no-op; other
+            # refusal shapes remain ``UnsupportedOracleAction`` (wrong owner, tile
+            # blocked, unproducible type, etc.).
+            if detail2.startswith("insufficient funds"):
+                return
             raise UnsupportedOracleAction(
                 f"Build no-op at tile ({r},{c}) unit={ut.name} for engine P{eng}: "
                 f"engine refused BUILD ({detail2}; funds_after={funds_after}$)"

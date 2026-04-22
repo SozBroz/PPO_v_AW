@@ -59,5 +59,11 @@ def test_php_internal_coerce_200scale_small_float():
     assert php_internal_from_snapshot_hit_points(6.3, 63) == 63
 
 
+def test_php_internal_coerce_300scale_lossy_point_one():
+    """GL tight zips sometimes store 0.1 for ~30 internal (0.15 true); ×300=30."""
+    assert php_internal_from_snapshot_hit_points(0.1, 30) == 30
+    assert php_internal_from_snapshot_hit_points(0.1, 27) == 30
+
+
 def test_php_unit_bars_with_engine_coerces_01_to_two_bars():
     assert _php_unit_bars({"hit_points": 0.1}, engine_internal_hp=20) == 2

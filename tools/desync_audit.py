@@ -268,8 +268,11 @@ def _replay_resync_unit_hp_from_php_post_frame(
         php_list = raw
     else:
         return
-    php_by_awbw_id: dict[int, tuple[int, int, int, int]] = {}
-    php_by_seat_pos: dict[tuple[int, int, int], int] = {}
+    # Store raw ``hit_points`` floats; decode with the same
+    # ``php_internal_from_snapshot_hit_points`` rule as ``_diff_engine_vs_snapshot``
+    # (×10 vs ×200 GL tight-zip scale) using the engine unit as the hint.
+    php_by_awbw_id: dict[int, tuple[int, float]] = {}
+    php_by_seat_pos: dict[tuple[int, int, int], float] = {}
     for pu in php_list:
         if not isinstance(pu, dict):
             continue
@@ -284,11 +287,10 @@ def _replay_resync_unit_hp_from_php_post_frame(
         seat = awbw_to_engine.get(raw_pid)
         if seat is None:
             continue
-        hp_int = max(0, min(100, int(round(raw_hp * 10))))
-        php_by_awbw_id[raw_id] = (seat, raw_y, raw_x, hp_int)
+        php_by_awbw_id[raw_id] = (seat, raw_hp)
         if str(pu.get("carried", "N")).upper() == "Y":
             continue
-        php_by_seat_pos.setdefault((seat, raw_y, raw_x), hp_int)
+        php_by_seat_pos.setdefault((seat, raw_y, raw_x), raw_hp)
     for seat in (0, 1):
         for u in state.units[seat]:
             if not getattr(u, "is_alive", True):
@@ -299,9 +301,11 @@ def _replay_resync_unit_hp_from_php_post_frame(
             except (TypeError, ValueError):
                 uid = None
             if uid is not None and uid in php_by_awbw_id:
-                ps, _pr, _pc, php_hp_int = php_by_awbw_id[uid]
+                ps, raw_hp_php = php_by_awbw_id[uid]
                 if ps == seat:
-                    new_hp = php_hp_int
+                    new_hp = php_internal_from_snapshot_hit_points(
+                        raw_hp_php, int(u.hp)
+                    )
             if new_hp is None:
                 try:
                     row, col = u.pos
@@ -309,7 +313,9 @@ def _replay_resync_unit_hp_from_php_post_frame(
                 except (TypeError, ValueError):
                     key = None
                 if key is not None and key in php_by_seat_pos:
-                    new_hp = php_by_seat_pos[key]
+                    new_hp = php_internal_from_snapshot_hit_points(
+                        php_by_seat_pos[key], int(u.hp)
+                    )
             if new_hp is not None and new_hp != int(u.hp):
                 u.hp = new_hp
     for p in (0, 1):
@@ -653,21 +659,29 @@ def _run_replay_instrumented(
     # away. ``frames`` is always available in the audit path (see
     # ``audit_one`` below) but kept guarded for safety.
     #
-    # Per-envelope post frame: need ``frames[env_i + 1]`` for the pin + HP
-    # sync + id-death cull. The old global
-    # ``len(frames) >= len(envelopes) + 1`` skipped **all** of that whenever
-    # the replay had no **trailing** frame after the last action (``frames
-    # == envelopes`` in count), but every non-terminal envelope still has a
-    # valid post frame — a blind spot for HP sync and ghost culls (gid
-    # 1613840: 29/29, mismatch at env 24; ``frames[25]`` exists).
-    can_pin_post_frame = frames is not None and len(frames) >= len(envelopes) + 1
+    # Per-envelope post frame: need ``frames[env_i + 1]`` for the pin, HP
+    # sync, and id-death cull.
+    #
+    # * **Pin + multi-hit scan** — run whenever ``has_post_for_sync`` (any
+    #   pairing with ``frames[env_i+1]``). Tight zips (``len(frames) ==
+    #   len(envelopes)``) still have a post line for every non-terminal
+    #   envelope; the pin must run for those too — otherwise
+    #   ``_oracle_post_envelope_units_by_id`` stays wrong and
+    #   ``combatInfo`` display ×10 is the sole defender HP source. GL gid
+    #   **1631520** env 24: Anti-Air vs B-Copter with defender display ``1``
+    #   (true internal **7** from ``hit_points`` 0.7) under-applied strike
+    #   damage and counter by one display bucket.
+    #
+    # * **Post-envelope HP sync** — also uses ``has_post_for_sync`` (not
+    #   trailing-count); see §813+. **Pre-diff** second resync when
+    #   ``enable_state_mismatch`` fixed tight-pairing drift (Agent C2, 2026-04-22).
     for env_i, (_pid, day, actions) in enumerate(envelopes):
         has_post_for_sync = n_frames > env_i + 1
         if frames is not None and env_i < len(frames):
             oracle_set_php_id_tile_cache(state, frames[env_i])
         else:
             setattr(state, "_oracle_php_id_to_rc", {})
-        if can_pin_post_frame:
+        if has_post_for_sync:
             post_frame = frames[env_i + 1]
             pin: dict[int, int] = {}
             for u in (post_frame.get("units") or {}).values():
@@ -968,16 +982,15 @@ def _run_replay_instrumented(
                                 cargo.hp = 0
                         u.loaded_units = []
 
-            # HP sync: **only** when a trailing snapshot exists
-            # (``can_pin_post_frame``). Without that, the full per-tile
-            # post-envelope copy is unsafe on tight (``#frames==#envelopes``)
-            # replays: it can rewrite striker HP in ways that desync the
-            # oracle (``oracle_gap`` 1627324, 1635846) while still
-            # expecting strict PHP tile parity. Funds drift on tight is
-            # closed at _diff time by ``_diff_engine_vs_snapshot``'s
-            # mandatory treasury re-snap to ``php_frame`` (not only
-            # ``_run_replay_instrumented``'s pre-``_diff`` snap).
-            if can_pin_post_frame:
+            # HP sync: run whenever ``frames[env_i+1]`` exists (trailing *or*
+            # tight).  Historically this was gated on ``can_pin_post_frame``
+            # (trailing-only) to avoid GL ``oracle_gap`` 1627324 / 1635846;
+            # those paths are now covered by post-kill Fire mover snap and
+            # combatInfo/pin heuristics.  Skipping resync on **tight** zips
+            # (``#frames==#envelopes``) left engine HP stale vs each PHP
+            # post-envelope line — ``state_mismatch_units`` on Misery
+            # 123858 (e.g. 1632825, 1634267, 1635164) and other GL tight exports.
+            if has_post_for_sync:
                 _replay_resync_unit_hp_from_php_post_frame(
                     state, post_frame_for_sync, awbw_to_engine
                 )
@@ -1068,10 +1081,15 @@ def _run_replay_instrumented(
                 # same ``php_frame`` so ``_diff`` sees engine HP aligned with the
                 # snapshot (GL 1623866 env 23; must not mutate between envelopes
                 # beyond what PHP already encoded in this frame).
-                if can_pin_post_frame:
-                    _replay_resync_unit_hp_from_php_post_frame(
-                        state, php_frame, awbw_to_engine
-                    )
+                #
+                # Must run for **tight** pairings too (``len(frames) == len(envelopes)``,
+                # so ``can_pin_post_frame`` is false): otherwise the pre-roll can apply
+                # day-start repair while the PHP snapshot is still the pre-repair
+                # post-envelope line from the other cadence, and we surface bogus
+                # ``state_mismatch_units`` (e.g. 1631858, 1631767).
+                _replay_resync_unit_hp_from_php_post_frame(
+                    state, php_frame, awbw_to_engine
+                )
                 ds = _diff_engine_vs_snapshot(
                     state,
                     php_frame,

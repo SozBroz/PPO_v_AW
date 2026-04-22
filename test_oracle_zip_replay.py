@@ -1831,7 +1831,11 @@ class TestOracleUnloadPerSeatUnitOnly(unittest.TestCase):
 
 
 class TestOracleBuildNoopGuard(unittest.TestCase):
-    """Site ``Build``: engine refusal surfaces as ``UnsupportedOracleAction`` (Build no-op)."""
+    """Site ``Build``: most engine refusals surface as ``UnsupportedOracleAction`` (Build no-op).
+
+    When the engine refuses only for ``insufficient funds``, the handler returns
+    (PHP may still emit ``Build`` for a no-spend client/server edge).
+    """
 
     def _build_site_json(self) -> dict:
         return {

@@ -183,21 +183,21 @@
       "cop_stars": 3,
       "scop_stars": 6,
       "day_to_day": {
-        "description": "+15% ATK for air units, -15% ATK for naval units"
+        "description": "Air units +15% ATK, +10% DEF, -2 fuel/day; naval units -30% ATK (AWBW wiki)"
       },
-      "atk_modifiers": {"air": 15, "naval": -15},
-      "def_modifiers": {},
+      "atk_modifiers": {"air": 15, "naval": -30},
+      "def_modifiers": {"air": 10},
       "cop": {
         "name": "Lightning Drive",
-        "description": "+10% additional ATK for air units",
-        "atk_modifiers": {"air": 10},
-        "def_modifiers": {}
+        "description": "Air units +5% ATK and +10% DEF (AWBW wiki; stacks with universal COP/SCOP +10%/+10%)",
+        "atk_modifiers": {"air": 5},
+        "def_modifiers": {"air": 10}
       },
       "scop": {
         "name": "Lightning Strike",
-        "description": "All air units may move and act a second time this turn (excluding units that already acted)",
-        "atk_modifiers": {},
-        "def_modifiers": {}
+        "description": "Air +5% ATK and +10% DEF; all non-footsoldier units may move and fire again, even if built this turn (AWBW wiki)",
+        "atk_modifiers": {"air": 5},
+        "def_modifiers": {"air": 10}
       }
     },
     "11": {

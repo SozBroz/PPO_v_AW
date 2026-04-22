@@ -63,6 +63,12 @@ def php_internal_from_snapshot_hit_points(php_raw: Any, engine_hp: int) -> int:
     ×10 reading is far from the engine but ×200 is within 1 internal HP, trust
     the ×200 path (else keep ×10).
 
+    Some exports round **aggressively** (e.g. ``0.1`` for true ``0.15`` =
+    internal 30): ×200 reads 20, ×300 reads 30. When ``f`` is small and the
+    ×10 reading is ``≤ 1``, we pick among ×10 / ×200 / ×300 candidates the
+    value **closest** to ``engine_hp`` (tie-break: prefer ×200, then ×300, then
+    ×10) so ``desync_audit`` SM rows do not false-positive on scale alone.
+
     This does **not** change engine or oracle sim — only snapshot diff hygiene.
     """
     try:
@@ -71,9 +77,27 @@ def php_internal_from_snapshot_hit_points(php_raw: Any, engine_hp: int) -> int:
         return 0
     a = int(round(f * 10.0))
     b = int(round(f * 200.0))
+    c300 = int(round(f * 300.0))
     eng = int(engine_hp)
     if abs(b - eng) <= 1 and abs(b - eng) < abs(a - eng):
         return max(0, min(100, b))
+    # Lossy GL floats: ``a <= 1`` avoids pulling in ambiguous 0.15-scale rows
+    # where ``a == 2`` (still standard ``internal/10`` territory).
+    if f > 0 and f < 0.25 and a <= 1:
+        c_clamped = max(0, min(100, c300))
+        best: tuple[int, int] = (10**9, 99)
+        chosen = a
+        for val, tie_pri in (
+            (max(0, min(100, a)), 3),
+            (max(0, min(100, b)), 1),
+            (c_clamped, 2),
+        ):
+            dist = abs(val - eng)
+            key = (dist, tie_pri)
+            if key < best:
+                best = key
+                chosen = val
+        return chosen
     return max(0, min(100, a))
 
 

@@ -218,11 +218,6 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
         if co.scop_active:
             move_range += 2
 
-    # Eagle SCOP: copters/air get +2 move
-    if co.co_id == 10 and co.scop_active:
-        if stats.unit_class in ("air", "copter"):
-            move_range += 2
-
     # Sami COP: infantry +1, SCOP +2
     if co.co_id == 8:
         if stats.unit_class == "infantry":
