@@ -20,12 +20,24 @@ Games whose catalog row is missing ``co_p0_id`` or ``co_p1_id`` are **not**
 replayed; they emit ``catalog_incomplete`` so you can fix the scrape or JSON
 first — the engine cannot create a game without two CO ids.
 
-What this does NOT do (yet)
----------------------------
-Per-day diffing of engine state vs the embedded PHP snapshot lines. The current
-oracle pipeline only steps the action stream; adding state-vs-snapshot
-assertions is a future enhancement and is reserved for the
-``state_mismatch_investigate`` class.
+State-mismatch / silent gold drift (opt-in)
+-------------------------------------------
+Pass ``--enable-state-mismatch`` to diff engine vs PHP after each envelope.
+When enabled, the audit **automatically**:
+
+1. Prints a **SILENT DRIFT** summary block to stderr (counts + every
+   ``state_mismatch_funds`` row — "gold drift" — plus units/multi totals).
+2. Writes sidecar JSONLs next to ``--register``:
+
+   * ``<register_stem>_state_mismatch_funds.jsonl`` — one line per funds-only drift
+   * ``<register_stem>_state_mismatch_units.jsonl`` — units-only rows
+   * ``<register_stem>_state_mismatch_multi.jsonl`` — multi-axis rows
+
+   Use ``--no-silent-drift-sidecars`` to suppress sidecar files (summary still prints).
+
+3. Optional ``--fail-on-state-mismatch-funds`` exits with code **2** if any
+   funds drift row exists (for CI / promotion gates). Catalog/loader errors
+   still use exit **1**.
 
 Examples::
 
@@ -67,6 +79,7 @@ from tools.oracle_zip_replay import (  # noqa: E402
     _oracle_advance_turn_until_player,
     apply_oracle_action_json,
     map_snapshot_player_ids_to_engine,
+    oracle_set_php_id_tile_cache,
     parse_p_envelopes_from_zip,
     resolve_replay_first_mover,
 )
@@ -123,6 +136,91 @@ CLS_STATE_MISMATCH_UNITS = "state_mismatch_units"
 CLS_STATE_MISMATCH_MULTI = "state_mismatch_multi"
 CLS_STATE_MISMATCH_INVESTIGATE = "state_mismatch_investigate"  # comparator failure / unknown layout
 CLS_CATALOG_INCOMPLETE = "catalog_incomplete"  # missing co_p0_id / co_p1_id in JSON — cannot build GameState
+
+_STATE_MISMATCH_SIDE_CLS = (
+    CLS_STATE_MISMATCH_FUNDS,
+    CLS_STATE_MISMATCH_UNITS,
+    CLS_STATE_MISMATCH_MULTI,
+    CLS_STATE_MISMATCH_INVESTIGATE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Silent drift reporting (Phase 11J — auto-surface gold drift)
+# ---------------------------------------------------------------------------
+def _state_mismatch_sidecar_paths(register: Path) -> dict[str, Path]:
+    """Sidecar JSONL paths derived from the main register path."""
+    stem = register.stem
+    parent = register.parent
+    return {
+        CLS_STATE_MISMATCH_FUNDS: parent / f"{stem}_state_mismatch_funds.jsonl",
+        CLS_STATE_MISMATCH_UNITS: parent / f"{stem}_state_mismatch_units.jsonl",
+        CLS_STATE_MISMATCH_MULTI: parent / f"{stem}_state_mismatch_multi.jsonl",
+        CLS_STATE_MISMATCH_INVESTIGATE: parent / f"{stem}_state_mismatch_investigate.jsonl",
+    }
+
+
+def _write_state_mismatch_sidecars(register: Path, rows: list["AuditRow"]) -> None:
+    """Emit filtered JSONL sidecars for triage / composer dispatch."""
+    buckets: dict[str, list["AuditRow"]] = {k: [] for k in _STATE_MISMATCH_SIDE_CLS}
+    for row in rows:
+        if row.cls in buckets:
+            buckets[row.cls].append(row)
+    paths = _state_mismatch_sidecar_paths(register)
+    for cls_key, path in paths.items():
+        subset = buckets.get(cls_key, [])
+        if not subset:
+            if path.is_file():
+                path.unlink()
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in subset:
+                fh.write(json.dumps(row.to_json(), ensure_ascii=False) + "\n")
+
+
+def _print_silent_drift_summary(register: Path, rows: list["AuditRow"], counts: dict[str, int]) -> None:
+    """Stderr banner: gold drift (funds) always listed; other state_mismatch counts."""
+    funds_rows = [r for r in rows if r.cls == CLS_STATE_MISMATCH_FUNDS]
+    n_f = len(funds_rows)
+    n_u = counts.get(CLS_STATE_MISMATCH_UNITS, 0)
+    n_m = counts.get(CLS_STATE_MISMATCH_MULTI, 0)
+    n_i = counts.get(CLS_STATE_MISMATCH_INVESTIGATE, 0)
+    print("", file=sys.stderr)
+    print(
+        "[desync_audit] ========== SILENT DRIFT (state-mismatch vs PHP) ==========",
+        file=sys.stderr,
+    )
+    print(
+        f"[desync_audit] gold_drift (state_mismatch_funds): {n_f}  |  "
+        f"units_only: {n_u}  |  multi_axis: {n_m}  |  investigate: {n_i}",
+        file=sys.stderr,
+    )
+    if n_f:
+        print("[desync_audit] --- funds rows (fix these for treasury parity) ---", file=sys.stderr)
+        for r in sorted(funds_rows, key=lambda x: x.games_id):
+            msg = (r.message or "").replace("\n", " ")[:200]
+            print(
+                f"[desync_audit]   gid={r.games_id}  "
+                f"env~{r.approx_envelope_index} day~{r.approx_day}  |  {msg}",
+                file=sys.stderr,
+            )
+    else:
+        print("[desync_audit]   (no state_mismatch_funds rows)", file=sys.stderr)
+    paths = _state_mismatch_sidecar_paths(register)
+    side_written: list[str] = []
+    for cls_key in _STATE_MISMATCH_SIDE_CLS:
+        pth = paths[cls_key]
+        if pth.is_file():
+            side_written.append(str(pth))
+    if side_written:
+        print("[desync_audit] sidecar files:", file=sys.stderr)
+        for pth in side_written:
+            print(f"[desync_audit]   {pth}", file=sys.stderr)
+    print(
+        "[desync_audit] ==============================================",
+        file=sys.stderr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +553,10 @@ def _run_replay_instrumented(
     # ``audit_one`` below) but kept guarded for safety.
     can_pin_post_frame = frames is not None and len(frames) >= len(envelopes) + 1
     for env_i, (_pid, day, actions) in enumerate(envelopes):
+        if frames is not None and env_i < len(frames):
+            oracle_set_php_id_tile_cache(state, frames[env_i])
+        else:
+            setattr(state, "_oracle_php_id_to_rc", {})
         if can_pin_post_frame:
             post_frame = frames[env_i + 1]
             pin: dict[int, int] = {}
@@ -1221,12 +1323,36 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "magnitude distribution justifying this floor."
         ),
     )
+    ap.add_argument(
+        "--no-silent-drift-sidecars",
+        action="store_true",
+        help=(
+            "With --enable-state-mismatch, skip writing *_state_mismatch_{funds,units,"
+            "multi,investigate}.jsonl next to --register. The stderr SILENT DRIFT "
+            "summary still prints."
+        ),
+    )
+    ap.add_argument(
+        "--fail-on-state-mismatch-funds",
+        action="store_true",
+        help=(
+            "Exit with code 2 if any row is state_mismatch_funds (gold drift). "
+            "Requires --enable-state-mismatch (for CI after canonical 936/0/0)."
+        ),
+    )
     return ap
 
 
 def main() -> int:
     ap = _build_arg_parser()
     args = ap.parse_args()
+    if args.fail_on_state_mismatch_funds and not args.enable_state_mismatch:
+        print(
+            "[desync_audit] error: --fail-on-state-mismatch-funds requires "
+            "--enable-state-mismatch",
+            file=sys.stderr,
+        )
+        return 1
 
     catalog_paths: list[Path] = (
         list(args.catalog) if args.catalog is not None else [CATALOG_DEFAULT]
@@ -1344,7 +1470,20 @@ def main() -> int:
     width = max((len(k) for k in counts), default=8)
     for k in sorted(counts):
         print(f"  {k:<{width}}  {counts[k]:>4}")
-    return 0
+
+    exit_code = 0
+    if args.enable_state_mismatch:
+        if not args.no_silent_drift_sidecars:
+            _write_state_mismatch_sidecars(args.register, rows)
+        _print_silent_drift_summary(args.register, rows, counts)
+        if args.fail_on_state_mismatch_funds and counts.get(CLS_STATE_MISMATCH_FUNDS, 0) > 0:
+            print(
+                "[desync_audit] FAIL (--fail-on-state-mismatch-funds): "
+                f"{counts[CLS_STATE_MISMATCH_FUNDS]} gold_drift row(s)",
+                file=sys.stderr,
+            )
+            exit_code = 2
+    return exit_code
 
 
 if __name__ == "__main__":

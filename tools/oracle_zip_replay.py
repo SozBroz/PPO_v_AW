@@ -1360,8 +1360,25 @@ def _oracle_set_combat_damage_override_from_combat_info(
             return None
         return max(0, min(100, d * 10))
 
+    def _refine_defender_hp_with_pin(base: Optional[int], pin_hp: int) -> int:
+        """Merge defender post-envelope pin with lossy combatInfo ×10.
+
+        Same ``frames[env_i+1]`` hazard as Phase 11K attacker pin, plus PHP
+        day-start repair landing in the trailing snapshot while combatInfo is
+        still post-strike (gid 1611364 env 21): reject ``pin_hp`` when it is a
+        full display step above ``base`` (``pin_hp > base + 9``).  Sub-bar
+        refinement (<10 internal) still trusts the pin (1635679).
+        """
+        if base is None:
+            return pin_hp
+        if abs(pin_hp - base) < 10:
+            return pin_hp
+        if pin_hp > base + 9:
+            return base
+        return pin_hp
+
     awbw_def_hp = _to_internal(def_ci.get("units_hit_points")) if isinstance(def_ci, dict) else None
-    awbw_att_hp = _to_internal(att_ci.get("units_hit_points")) if isinstance(def_ci, dict) else None
+    awbw_att_hp = _to_internal(att_ci.get("units_hit_points")) if isinstance(att_ci, dict) else None
 
     # Phase 11K-FIRE-FRAC-COUNTER-SHIP — recover sub-display-HP counter
     # damage. AWBW combat is float; ``combatInfo.units_hit_points`` is the
@@ -1387,7 +1404,24 @@ def _oracle_set_combat_damage_override_from_combat_info(
         except (TypeError, ValueError):
             att_uid = None
         if att_uid is not None and att_uid in pin:
-            awbw_att_hp = pin[att_uid]
+            pin_hp = int(pin[att_uid])
+            if awbw_att_hp is None:
+                awbw_att_hp = pin_hp
+            elif (
+                pin_hp == 100
+                and awbw_att_hp is not None
+                and awbw_att_hp < 100
+            ):
+                # 1611364 env 21: trailing frame reflects post-Join full HP on
+                # the striker while per-fire combatInfo is still post-counter.
+                # A broad ``pin > base + N`` gate regressed legitimate strikes
+                # (e.g. GL 1627324) where the pin is materially above combatInfo
+                # for non-heal reasons — full internal HP is the safe sentinel.
+                pass
+            elif abs(pin_hp - awbw_att_hp) < 10:
+                awbw_att_hp = pin_hp
+            else:
+                awbw_att_hp = pin_hp
 
     # Phase 11K-FIRE-FRAC-COUNTER-SHIP — defender-side fractional pin.
     # The defender's post-envelope HP is unambiguous when this defender is
@@ -1409,7 +1443,8 @@ def _oracle_set_combat_damage_override_from_combat_info(
         except (TypeError, ValueError):
             def_uid = None
         if def_uid is not None and def_uid in pin and def_uid not in multi_def:
-            awbw_def_hp = pin[def_uid]
+            pin_hp = int(pin[def_uid])
+            awbw_def_hp = _refine_defender_hp_with_pin(awbw_def_hp, pin_hp)
 
     dmg: Optional[int] = None
     counter: Optional[int] = None
@@ -2084,6 +2119,29 @@ def _repair_display_hp_matches_hint(display_hp: int, want: int) -> bool:
     return display_hp == want or abs(int(display_hp) - int(want)) <= 1
 
 
+def _repair_pairs_filter_by_php_hit_points_hint(
+    pairs: list[tuple[Unit, Unit]], w: int
+) -> list[tuple[Unit, Unit]]:
+    """Narrow (Black Boat, ally) pairs using PHP ``repaired.global.units_hit_points``.
+
+    The hint is the **post**-heal display bar after a Black Boat +1 bar tick, so
+    the canonical **pre**-heal display is ``w - 1``. A plain ±1 fuzzy match
+    would also admit ``w + 1`` (e.g. full-HP allies at display 10 when ``w=9``),
+    picking the wrong boat+ally when several Black Boats are on the map (GL
+    1624307 env 36).
+    """
+    want_pre = max(0, min(10, w - 1))
+    pre = [(b, t) for b, t in pairs if t.display_hp == want_pre]
+    if pre:
+        return pre
+    exact = [(b, t) for b, t in pairs if t.display_hp == w]
+    if exact:
+        return exact
+    return [
+        (b, t) for b, t in pairs if _repair_display_hp_matches_hint(t.display_hp, w)
+    ]
+
+
 def _oracle_fallback_repair_boat_and_ally(
     state: GameState,
     eng: int,
@@ -2263,12 +2321,7 @@ def _resolve_repair_target_tile(
     hp_key = _oracle_awbw_scalar_int_optional(rep_gl.get("units_hit_points"))
     pairs_unc = list(pairs)
     if hp_key is not None:
-        w = hp_key
-        strict = [(b, t) for b, t in pairs if t.display_hp == w]
-        relaxed = [
-            (b, t) for b, t in pairs if _repair_display_hp_matches_hint(t.display_hp, w)
-        ]
-        pairs = strict if strict else relaxed
+        pairs = _repair_pairs_filter_by_php_hit_points_hint(pairs, int(hp_key))
     # Site ``units_hit_points`` can disagree with bars after prior-step drift;
     # restore unfiltered pairs when HP hints eliminate everyone.
     if len(pairs) == 0 and len(pairs_unc) > 0:
@@ -2278,8 +2331,15 @@ def _resolve_repair_target_tile(
         if len(tposes) == 1:
             return next(iter(tposes))
         if hp_key is not None:
-            w = hp_key
-            hp_pairs = [(b, t) for b, t in pairs if _repair_display_hp_matches_hint(t.display_hp, w)]
+            w = int(hp_key)
+            want_pre = max(0, min(10, w - 1))
+            hp_pairs = [(b, t) for b, t in pairs if t.display_hp == want_pre]
+            if len(hp_pairs) != 1:
+                hp_pairs = [
+                    (b, t)
+                    for b, t in pairs
+                    if _repair_display_hp_matches_hint(t.display_hp, w)
+                ]
             if len(hp_pairs) == 1:
                 return hp_pairs[0][1].pos
         try:
@@ -2322,12 +2382,7 @@ def _resolve_repair_target_tile(
                 loose = loose_bh
         loose_unc = list(loose)
         if hp_key is not None:
-            w = hp_key
-            strict_l = [(b, t) for b, t in loose if t.display_hp == w]
-            relaxed_l = [
-                (b, t) for b, t in loose if _repair_display_hp_matches_hint(t.display_hp, w)
-            ]
-            loose = strict_l if strict_l else relaxed_l
+            loose = _repair_pairs_filter_by_php_hit_points_hint(loose, int(hp_key))
         if len(loose) == 0 and len(loose_unc) > 0:
             loose = loose_unc
         if len(loose) > 1:
@@ -2335,10 +2390,15 @@ def _resolve_repair_target_tile(
             if len(tposes) == 1:
                 return next(iter(tposes))
             if hp_key is not None:
-                w = hp_key
-                hp_loose = [
-                    (b, t) for b, t in loose if _repair_display_hp_matches_hint(t.display_hp, w)
-                ]
+                w = int(hp_key)
+                want_pre = max(0, min(10, w - 1))
+                hp_loose = [(b, t) for b, t in loose if t.display_hp == want_pre]
+                if len(hp_loose) != 1:
+                    hp_loose = [
+                        (b, t)
+                        for b, t in loose
+                        if _repair_display_hp_matches_hint(t.display_hp, w)
+                    ]
                 if len(hp_loose) == 1:
                     return hp_loose[0][1].pos
             try:
@@ -2450,6 +2510,31 @@ def _unit_by_awbw_units_id(state: GameState, units_id: int) -> Optional[Unit]:
             if int(u.unit_id) == int(units_id) and u.is_alive:
                 return u
     return None
+
+
+def oracle_set_php_id_tile_cache(state: GameState, frame: dict[str, Any]) -> None:
+    """Cache AWBW ``units[].id`` → (row, col) from a PHP snapshot **before** an envelope.
+
+    Predeployed engine ``unit_id`` values do not match PHP database ids, so
+    ``Delete``'s ``unitId.global`` cannot resolve via :func:`_unit_by_awbw_units_id`.
+    The pre-envelope frame's tile for that id is authoritative for which friendly
+    occupier to scrap (gid 1628198: Delete 192112547 before Jess SCOP).
+    """
+    m: dict[int, tuple[int, int]] = {}
+    for u in (frame.get("units") or {}).values():
+        if not isinstance(u, dict):
+            continue
+        if str(u.get("carried", "N")).upper() == "Y":
+            continue
+        try:
+            uid = int(u.get("id") or 0)
+            row = int(u["y"])
+            col = int(u["x"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if uid > 0:
+            m[uid] = (row, col)
+    setattr(state, "_oracle_php_id_to_rc", m)
 
 
 def _oracle_sole_dive_hide_actor_for_player(state: GameState, eng: int) -> Optional[Unit]:
@@ -4660,8 +4745,23 @@ def _finish_move_join_load_capture_wait(
     state: GameState,
     move_dict: dict[str, Any],
     before_engine_step: EngineStepHook,
+    *,
+    include_capture: bool = True,
 ) -> None:
-    """After SELECT + move_pos commit: pick JOIN / LOAD / CAPTURE / WAIT at path end."""
+    """After SELECT + move_pos commit: pick JOIN / LOAD / CAPTURE / WAIT at path end.
+
+    ``include_capture=False`` is set by the bare ``Move`` envelope handler.
+    AWBW emits an explicit ``Capt`` envelope for every capture; a plain
+    ``Move`` ending on a neutral property is intentional non-capture (the
+    player chose to walk onto the building and WAIT). Letting CAPTURE win
+    over WAIT here silently flips the property a day early — anchor:
+    gid 1631288 env 4 (Adder Inf 192332167 walks 17,1 → 17,4 onto neutral
+    city, PHP keeps cap=20, engine drops cap to 10, then completes capture
+    one envelope earlier and pockets +$1000 income on the day-5 boundary).
+    Load / Join envelopes still pass ``include_capture=True`` (their
+    JOIN / LOAD terminators win before CAPTURE is even considered, but
+    the legacy default is preserved for safety).
+    """
     paths_g = (move_dict.get("paths") or {}).get("global") or []
     if paths_g:
         path_end = _path_end_rc(paths_g)
@@ -4691,11 +4791,27 @@ def _finish_move_join_load_capture_wait(
             if a.action_type == ActionType.LOAD and a.move_pos == end:
                 chosen = a
                 break
-    if chosen is None:
+    if chosen is None and include_capture:
         for a in legal:
             if a.action_type == ActionType.CAPTURE and a.move_pos == end:
                 chosen = a
                 break
+    # Bare ``Move`` envelope ending on a neutral property: engine
+    # ``get_legal_actions`` prunes WAIT when CAPTURE is available (RL
+    # discipline, see ``engine/action.py`` ~line 720). PHP DOES allow a
+    # capture-class unit to walk onto a neutral building and just sit
+    # there (deny / pass-through / set up a Build target next turn);
+    # AWBW would have emitted an explicit ``Capt`` envelope had a
+    # capture been intended. Synthesize WAIT and let oracle_mode bypass
+    # the legality gate. Anchor: gid 1631288 env 4 (Adder Inf 17,1 → 17,4).
+    if chosen is None and not include_capture and state.selected_unit is not None:
+        if any(a.action_type == ActionType.CAPTURE and a.move_pos == end for a in legal):
+            er2, ec2 = end
+            chosen = Action(
+                ActionType.WAIT,
+                unit_pos=state.selected_unit.pos,
+                move_pos=(er2, ec2),
+            )
     # AWBW site zips: transport ``Move`` then a separate ``Unload`` JSON. If we
     # ``WAIT`` here, ``_finish_action`` clears the half-turn and ``Unload`` can
     # never apply. When UNLOAD is legal, commit the move and stay in ACTION.
@@ -5008,11 +5124,37 @@ def _finish_repair_after_boat_ready(
     hp_key = _oracle_awbw_scalar_int_optional(rep_gl.get("units_hit_points"))
     if hp_key is not None:
         want = hp_key
+        # Phase 11J-FINAL-LASTMILE-V2 — Black Boat Repair target disambiguation.
+        #
+        # PHP ``repaired.global.units_hit_points`` is the **post-heal** display
+        # bar of the repaired ally (Black Boat heal = +1 display = +10 internal).
+        # Engine sees the **pre-heal** state when picking the legal action, so
+        # the canonical pre-heal display is ``want - 1`` (clamped to [0, 10]).
+        #
+        # Prior matching tried ``display_hp == want`` exact then a permissive
+        # ±1 fuzzy fallback. With two adjacent allies one bar apart (e.g. an
+        # Infantry at hp=71 / display=8 and a full-HP Infantry at hp=100 /
+        # display=10 next to a Black Boat at (13,12), gid 1617442 env 21), the
+        # ±1 fuzzy admitted both and the (target_pos sort) tiebreaker picked
+        # the wrong target — engine repaired the full-HP ally (no heal, no
+        # charge, $100 funds drift carried into env 22).
+        #
+        # Fix: prefer ``display_hp == want - 1`` first (canonical pre-heal),
+        # then fall back to exact ``== want`` and finally ±1 fuzzy. This keeps
+        # the existing tolerance for cases where engine HP already drifted into
+        # ``want`` (rare but observed before HP-sync was added) while making
+        # the dominant case unambiguous.
+        want_pre = max(0, min(10, want - 1))
         hit = []
         for a in legal_rep:
             t = state.get_unit_at(*a.target_pos) if a.target_pos else None
-            if t is not None and t.display_hp == want:
+            if t is not None and t.display_hp == want_pre:
                 hit.append(a)
+        if not hit:
+            for a in legal_rep:
+                t = state.get_unit_at(*a.target_pos) if a.target_pos else None
+                if t is not None and t.display_hp == want:
+                    hit.append(a)
         if not hit:
             for a in legal_rep:
                 t = state.get_unit_at(*a.target_pos) if a.target_pos else None
@@ -5382,6 +5524,19 @@ def _apply_oracle_action_json_body(
             if target is not None and int(target.player) == int(eng_for_delete):
                 _oracle_kill_friendly_unit(state, target)
                 killed = True
+        if (
+            not killed
+            and uid_int is not None
+            and eng_for_delete is not None
+        ):
+            rcmap = getattr(state, "_oracle_php_id_to_rc", None) or {}
+            rc = rcmap.get(int(uid_int))
+            if rc is not None:
+                r, c = rc
+                target2 = state.get_unit_at(r, c)
+                if target2 is not None and int(target2.player) == int(eng_for_delete):
+                    _oracle_kill_friendly_unit(state, target2)
+                    killed = True
         if not killed and eng_for_delete is not None:
             pending = getattr(state, "_oracle_pending_delete_seats", None)
             if pending is None:
@@ -5641,7 +5796,7 @@ def _apply_oracle_action_json_body(
             awbw_to_engine,
             before_engine_step,
             after_move=lambda: _finish_move_join_load_capture_wait(
-                state, obj, before_engine_step
+                state, obj, before_engine_step, include_capture=False
             ),
             envelope_awbw_player_id=envelope_awbw_player_id,
             allow_phantom_degenerate_skip=True,
@@ -7400,7 +7555,11 @@ def replay_oracle_zip(
         replay_first_mover=first_mover,
     )
     n_act = 0
-    for _pid, _day, actions in envs:
+    for env_i, (_pid, _day, actions) in enumerate(envs):
+        if env_i < len(frames):
+            oracle_set_php_id_tile_cache(state, frames[env_i])
+        else:
+            setattr(state, "_oracle_php_id_to_rc", {})
         for obj in actions:
             if state.done:
                 break

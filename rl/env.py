@@ -67,6 +67,22 @@ BUILD_MASK_INFANTRY_ONLY_ENV = "AWBW_BUILD_MASK_INFANTRY_ONLY"
 # value to decay. See plan p0-capture-architecture-fix Tier 1.
 LEARNER_GREEDY_MIX_ENV = "AWBW_LEARNER_GREEDY_MIX"
 
+# Reward shaping mode (plan rl_capture-combat_recalibration).
+#   "level" (default) — legacy: per-step (p0_val − p1_val) × 2e-6 + asymmetric
+#                       property-diff term. Persists every step → cumulative
+#                       shaping drowns terminal ±1.0 and capture chips.
+#   "phi"             — potential-based: per-step reward gets
+#                       Φ(s_after) − Φ(s_before), where
+#                       Φ = α·Δval + β·Δprops + κ·Δcap-progress (contested).
+#                       Telescopes; suicidal caps net to value cost only.
+REWARD_SHAPING_ENV = "AWBW_REWARD_SHAPING"
+PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient (default 2e-5)
+PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient (default 0.05)
+PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient (default 0.05)
+_PHI_ALPHA_DEFAULT = 2e-5
+_PHI_BETA_DEFAULT  = 0.05
+_PHI_KAPPA_DEFAULT = 0.05
+
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
 # When SESSION_GAME_COUNTER_DB_ENV is unset, count completed games in this process only (tests, ad-hoc env use).
@@ -492,6 +508,22 @@ class AWBWEnv(gym.Env):
             self._learner_greedy_mix = 0.0
         self._learner_greedy_mix = max(0.0, min(1.0, self._learner_greedy_mix))
 
+        # Reward shaping mode + Φ coefficients — read once per env instance
+        # so SubprocVecEnv workers inherit a stable value at spawn. Restart
+        # the run to change. See plan rl_capture-combat_recalibration.
+        mode = (os.environ.get(REWARD_SHAPING_ENV, "level") or "level").strip().lower()
+        self._reward_shaping_mode: str = mode if mode in ("level", "phi") else "level"
+
+        def _read_float(env_name: str, default: float) -> float:
+            try:
+                return float(os.environ.get(env_name, "") or default)
+            except ValueError:
+                return default
+
+        self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, _PHI_ALPHA_DEFAULT)
+        self._phi_beta:  float = _read_float(PHI_BETA_ENV,  _PHI_BETA_DEFAULT)
+        self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, _PHI_KAPPA_DEFAULT)
+
     # ── Map helpers ───────────────────────────────────────────────────────────
 
     def _load_map(self, map_id: int) -> MapData:
@@ -621,21 +653,31 @@ class AWBWEnv(gym.Env):
             obs = self._get_obs()
             return obs, -0.1, False, False, {"invalid_action": True}
 
+        # Φ-shaping snapshot (plan rl_capture-combat_recalibration). Bracketed
+        # around P0 action AND opponent micro-steps so a chip → opponent kills
+        # capturer → cp resets sequence is captured as a single ΔΦ on this step.
+        if self._reward_shaping_mode == "phi":
+            phi_before = self._compute_phi(self.state)
+        else:
+            phi_before = 0.0
+
         self.state, reward, done = self._engine_step_with_belief(action)
         self._capture_frame(action=action)
 
         if action.action_type == ActionType.CAPTURE and self._first_p0_capture_step is None:
             self._first_p0_capture_step = self._p0_env_steps
 
-        # Dense shaping: property advantage + unit value differential.
-        # Coefficients are small relative to terminal ±1.0 but large enough to
-        # provide a meaningful learning signal across the long horizon.
-        # Asymmetric penalty (plan p0-capture-architecture-fix): the prior
-        # symmetric (p0 - p1) * 0.005 manufactured a "punished for existing"
+        # Dense shaping (legacy "level" mode): property advantage + unit value
+        # differential. Coefficients are small relative to terminal ±1.0 but
+        # because they are LEVELS not deltas, cumulative trajectory impact
+        # scales with remaining episode length — see plan
+        # rl_capture-combat_recalibration for why "phi" mode replaces this.
+        # Asymmetric penalty (plan p0-capture-architecture-fix): prior
+        # symmetric (p0 − p1)*0.005 manufactured a "punished for existing"
         # gradient when the opponent bootstrapped with capture-greedy and the
-        # learner had no teacher. Penalty is now 5x softer than reward to
-        # break the dead-curriculum trap without removing the diff signal.
-        if not done:
+        # learner had no teacher. Penalty is 5× softer than reward to break the
+        # dead-curriculum trap without removing the diff signal.
+        if self._reward_shaping_mode == "level" and not done:
             p0_props = self.state.count_properties(0)
             p1_props = self.state.count_properties(1)
             diff = p0_props - p1_props
@@ -662,6 +704,14 @@ class AWBWEnv(gym.Env):
                 reward = self._run_policy_opponent(reward)
             else:
                 reward = self._run_random_opponent(reward)
+
+        # Apply Φ-delta AFTER opponent loop so the snapshot brackets the full
+        # P0-action-to-next-P0-decision transition. On terminal we use Φ:=0 so
+        # trajectory shaping telescopes to −Φ(s_0) and terminal ±1.0 is not
+        # double-counted with material/property potential.
+        if self._reward_shaping_mode == "phi":
+            phi_after = 0.0 if self.state.done else self._compute_phi(self.state)
+            reward += phi_after - phi_before
 
         obs = self._get_obs()
         terminated = bool(self.state.done)
@@ -726,6 +776,58 @@ class AWBWEnv(gym.Env):
         return None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _compute_phi(self, state: GameState) -> float:
+        """Potential function Φ(s) for P0-perspective reward shaping.
+
+        Φ = α·(p0_val − p1_val)
+          + β·(p0_props − p1_props)
+          + κ·Σ_{prop contested for P0}(1 − cp/20)
+          − κ·Σ_{prop contested for P1}(1 − cp/20)
+
+        "Contested for P" = property is neutral or owned by 1−P AND cp < 20.
+        The engine resets cp to 20 when a capturer dies or vacates the tile
+        (engine/game.py lines 1290–1303 plus the move_unit path), so chip
+        credit is automatically refunded in ΔΦ — no special-case shaping.
+
+        Per-step shaping = Φ(s_after) − Φ(s_before); on terminal we use
+        Φ(s_after) := 0 so the trajectory shaping telescopes to −Φ(s_0)
+        (a per-episode constant) and does not double-count terminal ±1.0.
+        """
+        # Material (value coin: cost × hp/100, same units as legacy level form).
+        p0_val = sum(
+            UNIT_STATS[u.unit_type].cost * u.hp / 100
+            for u in state.units[0]
+            if u.is_alive
+        )
+        p1_val = sum(
+            UNIT_STATS[u.unit_type].cost * u.hp / 100
+            for u in state.units[1]
+            if u.is_alive
+        )
+
+        p0_props = state.count_properties(0)
+        p1_props = state.count_properties(1)
+
+        # Contested capture progress. cp ∈ [0, 20]; (1 − cp/20) ∈ [0, 1].
+        cap_p0 = 0.0  # contested for P0 (neutral or P1-owned, partly chipped)
+        cap_p1 = 0.0  # contested for P1 (neutral or P0-owned, partly chipped)
+        for prop in state.properties:
+            cp = prop.capture_points
+            if cp >= 20:
+                continue
+            chip = 1.0 - cp / 20.0
+            owner = prop.owner
+            if owner != 0:  # neutral or P1-owned → contested for P0 to take
+                cap_p0 += chip
+            if owner != 1:  # neutral or P0-owned → contested for P1 to take
+                cap_p1 += chip
+
+        return (
+            self._phi_alpha * (p0_val - p1_val)
+            + self._phi_beta  * (p0_props - p1_props)
+            + self._phi_kappa * (cap_p0 - cap_p1)
+        )
 
     def _get_obs(self, observer: int = 0) -> dict:
         """Render observation from ``observer``'s perspective, honouring the

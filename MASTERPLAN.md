@@ -1,6 +1,6 @@
 # AWBW-RL Master Plan
 
-*Last updated: 2026-04-20*
+*Last updated: 2026-04-22*
 
 This document is the strategic north star for the AWBW reinforcement learning project.
 It records where we are, where we are going, and — critically — the concrete thresholds
@@ -18,7 +18,7 @@ that should gate each phase transition.
 | Policy | **Active** | SB3 `MultiInputPolicy` with `net_arch=[]` — Linear 256→35k + action mask |
 | Value head | **Active** | Linear 256→1, step-level V(s) |
 | Opponent | **Active** | `_CheckpointOpponent` — rotates through historical checkpoints, falls back to random |
-| Reward | **Active** | Terminal ±1.0 + property delta ×0.005 + unit value differential ×2e-6 |
+| Reward | **Dual path** | **Default (`level`):** terminal ±1.0 + per-step property diff (asymmetric) + unit-value *level* ×2e-6 + engine capture constants (`_CAPTURE_*` in `engine/game.py`). **Opt-in (`phi`):** terminal ±1.0 + potential-based Φ-delta in `rl/env.py` (value + property + contested capture progress); engine capture shaping suppressed. See **§11** and [`.cursor/plans/rl_capture-combat_recalibration_4ebf9d22.plan.md`](.cursor/plans/rl_capture-combat_recalibration_4ebf9d22.plan.md). |
 | Training | **Active** | MaskablePPO, n_steps=512, n_envs=4, batch=256, γ=0.99, λ=0.95 |
 
 ### What the Current Run Is Building
@@ -334,7 +334,7 @@ Two PPO loops running at different timescales:
 ```
 For each Macro step (one full turn):
     Collect 20–30 Micro steps using current Macro goal G
-    Update Micro policy on step-level rewards (property delta, unit value)
+    Update Micro policy on step-level rewards (legacy: property + unit-value level terms; under **phi** mode: Φ-delta shaping from `rl/env.py`)
     Record turn-level outcome (turn-end board, turn reward)
 
 Every N Macro steps:
@@ -498,6 +498,50 @@ Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second
 - **Canonical symmetric / ego-centric observations** so one net can cover both seats without dual-policy training (ties to §9 Tier 4).
 - **Opponent sampling policy** driven by measured win-rate band vs pool (MASTERPLAN healthy band ~52–62% vs checkpoints).
 - **Ray / RLlib** or other true distributed PPO if disk-async remains insufficient.
+
+---
+
+## 11. Reward shaping — Φ rollout and validation (future work)
+
+**Context:** Legacy dense rewards used **levels** (property count and army value) every P0 step, so cumulative shaping scaled with episode length and could **drown terminal ±1.0**; kills could read as negative on average because the value tax persisted. **Potential-based shaping** (`AWBW_REWARD_SHAPING=phi`) replaces that with `F(s,s') = Φ(s') − Φ(s)` plus a contested-capture term that **auto-refunds** chip progress when the engine resets `capture_points` (capturer dies / vacates). Implementation: `rl/env.py`, gated engine capture in `engine/game.py`, tests in `tests/test_env_shaping.py`, smoke tool `tools/phi_smoke.py`.
+
+### 11.1 Training bootstrap (must-do before distributed workers)
+
+`engine/game.py` reads `_PHI_SHAPING_ACTIVE` **once at import**. Set shaping mode **before** any import of `engine.game` (e.g. at the top of `train.py` after optional `.env` load, or in the shell that launches training):
+
+- `AWBW_REWARD_SHAPING=phi` — enable Φ path + suppress engine `_CAPTURE_*` shaping.
+- Optional tuning (defaults `2e-5` / `0.05` / `0.05`): `AWBW_PHI_ALPHA`, `AWBW_PHI_BETA`, `AWBW_PHI_KAPPA`.
+
+SubprocVecEnv workers inherit env at spawn; changing mid-run is undefined — **restart the run** to switch modes or coefficients.
+
+### 11.2 Pre-PPO validation (cheap, no GPU)
+
+Run [`tools/phi_smoke.py`](tools/phi_smoke.py) on a fixed curriculum slice (e.g. Misery T3 mirror) to compare **phi vs level** on the same policy (greedy×greedy is a pessimistic stalemate stress test):
+
+- **Trajectory shaping** `|ΣF|` should stay **≪** legacy level (order-of-magnitude gap is the health signal).
+- **Per-step peak** `|F|`: defaults often land ~0.15–0.21 on rare large material swings; **halving** α/β/κ (~0.05–0.10 peak) if you want shaping strictly under ~20% of terminal per step.
+- **Cap vs kill** (mean |shaping| on CAPTURE vs KILL steps): should stay **same order of magnitude** (no “revenge table”; favorable trades show as positive material Φ).
+
+Document the command line and seed in the run notes so regressions are comparable.
+
+### 11.3 PPO scratch smoke (after env validation)
+
+- Short run (e.g. 50k–500k steps, small `n_envs` / `n_steps` acceptable) with **`AWBW_REWARD_SHAPING=phi`**, same curriculum tag as a recent **level** baseline for apples-to-apples.
+- **Re-baseline TensorBoard:** `explained_variance` and value loss will shift vs level-trained checkpoints — do **not** interpret old thresholds literally until a new plateau forms.
+- Watch **advantage / return variance**: if dominated by Φ spikes, prefer **halving** coefficients (§11.2) before architectural changes.
+- **Checkpoint policy:** resuming a **level**-trained `latest.zip` under **phi** is allowed for smoke but expect **value-head drift**; a **scratch** run from random or BC init is the honest read for the new return distribution.
+
+### 11.4 Default flip (later gate)
+
+After scratch + slice metrics look healthy:
+
+- [ ] Flip default shaping to `phi` in code (or document `phi` as standard in `train.py` bootstrap) and **remove or dead-code** the legacy level block in `rl/env.py` only when no production run depends on it.
+- [ ] Update §1 table row “Reward” to **Active (phi)** and prune stale “level only” prose elsewhere in this doc.
+
+### 11.5 MASTERPLAN metric hygiene under phi
+
+- Slice **win rate / game length / captures** by `curriculum_tag` and by `AWBW_REWARD_SHAPING` value in run notes (env is not logged in `game_log` today — add a tag or env echo in launch scripts).
+- Phase 1 **Full Go** gates (§3) still apply; reward switch does **not** replace distribution or replay qualitative bars.
 
 ---
 

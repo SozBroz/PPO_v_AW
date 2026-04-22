@@ -69,12 +69,25 @@ class IllegalActionError(ValueError):
 # Coefficients raised after the P0-skew investigation (plan p0-capture-architecture-fix):
 # the previous values were dominated by the per-step property-diff penalty in
 # rl/env.py, leaving the learner with no positive discovery signal.
+#
+# NOTE (plan rl_capture-combat_recalibration): when env-var
+# AWBW_REWARD_SHAPING=phi is set, ``_apply_capture`` returns 0.0 and these
+# constants are ignored — the env's potential-based shaping (Φ_cap term)
+# subsumes them and adds a free refund-on-reset via Φ telescoping.
 _CAPTURE_SHAPING_PROGRESS: float = 0.04  # per 20 capture_points reduced toward flip
 _CAPTURE_SHAPING_COMPLETE: float = 0.20  # bonus when ownership flips to capturer
 # One-shot bonus the first time a given unit attempts CAPTURE in an episode.
 # Rewards the *behavior* (issuing CAPTURE) so the SELECT->MOVE->CAPTURE chain
 # gets a positive credit-assignment signal even before the tile flips.
 _CAPTURE_FIRST_ATTEMPT_BONUS: float = 0.01
+
+# Read-once gate so engine-side capture shaping can be disabled when the env
+# uses potential-based shaping. Module-level read keeps SubprocVecEnv workers
+# consistent (each child process inherits the value at import time).
+import os as _os
+_PHI_SHAPING_ACTIVE: bool = (
+    _os.environ.get("AWBW_REWARD_SHAPING", "level").strip().lower() == "phi"
+)
 
 # Sami (CO 8): AWBW footsoldier capture points per capture action by display HP.
 # https://awbw.fandom.com/wiki/Sami — COP/SCOP do not stack extra capture beyond D2D
@@ -1467,16 +1480,21 @@ class GameState:
         # First-attempt bonus: rewards the *behavior* of issuing CAPTURE once
         # per (unit, episode) — survives credit-assignment across the 3-stage
         # action chain even when the property does not flip on this attempt.
+        # Track set-membership unconditionally (used by other code paths /
+        # logging); only emit shaping when phi mode is OFF.
         uid = int(getattr(unit, "unit_id", 0) or 0)
-        if uid > 0 and uid not in self.capture_attempted_unit_ids:
+        first_attempt = uid > 0 and uid not in self.capture_attempted_unit_ids
+        if uid > 0:
             self.capture_attempted_unit_ids.add(uid)
-            shaping += _CAPTURE_FIRST_ATTEMPT_BONUS
-        if contest:
-            reduced = float(old_cp - max(prop.capture_points, 0))
-            shaping += _CAPTURE_SHAPING_PROGRESS * (reduced / 20.0)
+        if not _PHI_SHAPING_ACTIVE:
+            if first_attempt:
+                shaping += _CAPTURE_FIRST_ATTEMPT_BONUS
+            if contest:
+                reduced = float(old_cp - max(prop.capture_points, 0))
+                shaping += _CAPTURE_SHAPING_PROGRESS * (reduced / 20.0)
 
         if prop.capture_points <= 0:
-            if contest:
+            if contest and not _PHI_SHAPING_ACTIVE:
                 shaping += _CAPTURE_SHAPING_COMPLETE
             prop.owner = unit.player
             prop.capture_points = 20
@@ -2390,6 +2408,7 @@ class GameState:
                 # docs/oracle_exception_audit/phase11j_build_no_op_cluster_close.md
                 # for the per-gid breakdown.
                 listed = UNIT_STATS[unit.unit_type].cost
+                repair_morning_initial_hp = int(unit.hp)
                 display_hp = (unit.hp + 9) // 10  # ceil(internal/10)
                 if display_hp >= 10:
                     # Display bar already maxed — PHP does not repair
@@ -2397,7 +2416,14 @@ class GameState:
                     cost = 0
                     step = 0
                 elif co.co_id != 28:
-                    display_step = 1 if display_hp == 9 else 2
+                    # Display-8 internal 71–80: PHP uses one +10 tick at 10% first
+                    # (gid 1624307 env 36, 73 internal; top of display-8 band 79–80).
+                    if display_hp == 9:
+                        display_step = 1
+                    elif display_hp == 8 and 71 <= unit.hp <= 80:
+                        display_step = 1
+                    else:
+                        display_step = 2
                     cost = max(1, (display_step * 10 * listed) // 100) if listed > 0 else 0
                     step = min(display_step * 10, 100 - unit.hp)
                 else:
@@ -2417,6 +2443,29 @@ class GameState:
                         0, min(999_999, self.funds[player] - cost),
                     )
                     self.gold_spent[player] += cost
+                # Same-morning second +10 when PHP finishes display-8 band (71–80)
+                # with a follow-up display-9 tick (80→90→100). Does not run for 73→83
+                # (morning ends at 83 internal — not 90).
+                if (
+                    co.co_id != 28
+                    and 71 <= repair_morning_initial_hp <= 80
+                    and unit.hp == 90
+                    and unit.hp < 100
+                ):
+                    dh2 = (unit.hp + 9) // 10
+                    if dh2 == 9:
+                        listed2 = UNIT_STATS[unit.unit_type].cost
+                        cost2 = (
+                            max(1, (10 * listed2) // 100) if listed2 > 0 else 0
+                        )
+                        step2 = min(10, 100 - unit.hp)
+                        if step2 > 0 and self.funds[player] >= cost2:
+                            unit.hp = min(100, unit.hp + step2)
+                            self.funds[player] = max(
+                                0,
+                                min(999_999, self.funds[player] - cost2),
+                            )
+                            self.gold_spent[player] += cost2
 
             # Resupply (fuel/ammo) runs even when the heal is skipped — the
             # AWBW canon line above explicitly preserves resupply on the
