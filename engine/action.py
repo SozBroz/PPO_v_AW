@@ -261,6 +261,18 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
     visited: dict[tuple[int, int], int] = {start: 0}
     queue: collections.deque[tuple[tuple[int, int], int]] = collections.deque([(start, 0)])
 
+    # Phase 2b: per-call effective_move_cost memoization. unit and state are fixed
+    # for this BFS; the same tid is hit many times during neighbor expansion.
+    # Cache lives only inside this function call's stack frame -> no cross-call
+    # invalidation risk (weather/CO changes invalidate by re-entering this fn).
+    _cost_cache: dict[int, int] = {}
+    def _cached_cost(tid: int) -> int:
+        c = _cost_cache.get(tid)
+        if c is None:
+            c = effective_move_cost(state, unit, tid)
+            _cost_cache[tid] = c
+        return c
+
     while queue:
         (r, c), fuel_used = queue.popleft()
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -268,7 +280,7 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
             if not (0 <= nr < state.map_data.height and 0 <= nc < state.map_data.width):
                 continue
             tid  = state.map_data.terrain[nr][nc]
-            cost = effective_move_cost(state, unit, tid)
+            cost = _cached_cost(tid)
             if cost >= INF_PASSABLE:
                 continue
             new_fuel = fuel_used + cost
