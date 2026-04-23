@@ -115,7 +115,7 @@ _RL_LEGAL_ACTION_TYPES: frozenset = frozenset({
 # Action dataclass
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class Action:
     action_type: ActionType
     unit_pos:   Optional[tuple[int, int]] = None   # position of acting unit

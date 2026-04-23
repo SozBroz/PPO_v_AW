@@ -197,15 +197,51 @@ def encode_state(
     hp_hi_ch = N_UNIT_CHANNELS + 1
 
     # ── Terrain channels ─────────────────────────────────────────────────────
+    # Phase 3b: one-hot terrain block is a pure function of map_data.terrain.
+    # Cache per MapData; invalidate when the terrain grid changes (capture and
+    # pipe-seam breaks mutate terrain in place — see engine/game.py).
     terrain_ch_offset = N_UNIT_CHANNELS + N_HP_CHANNELS
-    for r in range(H):
-        for c in range(W):
-            tid = state.map_data.terrain[r][c]
-            cat = _get_terrain_category(tid)
-            spatial[r, c, terrain_ch_offset + cat] = 1.0
+    md = state.map_data
+    H_md = min(md.height, GRID_SIZE)
+    W_md = min(md.width, GRID_SIZE)
+    tids_live = np.empty((H_md, W_md), dtype=np.int32)
+    for r in range(H_md):
+        tids_live[r, :] = md.terrain[r][:W_md]
 
-    # ── Property ownership channels ──────────────────────────────────────────
+    terrain_block = getattr(md, "_encoded_terrain_channels", None)
+    terrain_snap = getattr(md, "_encoded_terrain_tid_snapshot", None)
+    cache_ok = (
+        terrain_block is not None
+        and terrain_snap is not None
+        and terrain_block.shape
+        == (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS)
+        and terrain_snap.shape == (H_md, W_md)
+        and np.array_equal(terrain_snap, tids_live)
+    )
+    if not cache_ok:
+        terrain_block = np.zeros(
+            (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS), dtype=np.float32
+        )
+        for r in range(H_md):
+            for c in range(W_md):
+                cat = _get_terrain_category(int(tids_live[r, c]))
+                terrain_block[r, c, cat] = 1.0
+        try:
+            md._encoded_terrain_channels = terrain_block
+            md._encoded_terrain_tid_snapshot = tids_live.copy()
+        except (AttributeError, TypeError):
+            pass
+
+    np.copyto(
+        spatial[:, :, terrain_ch_offset : terrain_ch_offset + N_TERRAIN_CHANNELS],
+        terrain_block,
+    )
+
+    # ── Property ownership + capture progress + neutral income (single pass) ─
     prop_ch_offset = N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS
+    cap_ch0 = N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS
+    cap_ch1 = cap_ch0 + 1
+    neutral_inc_ch = cap_ch1 + 1
     for prop in state.properties:
         r, c = prop.row, prop.col
         if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
@@ -222,7 +258,6 @@ def encode_state(
         else:
             ptype = _PROP_TYPE_CITY
 
-        # ownership: 0 = neutral, 1 = player 0, 2 = player 1
         if prop.owner is None:
             ownership = 0
         elif prop.owner == 0:
@@ -232,16 +267,9 @@ def encode_state(
 
         spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
 
-    # ── Capture progress + neutral income mask (after property ownership) ─────
-    cap_ch0 = N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS
-    cap_ch1 = cap_ch0 + 1
-    neutral_inc_ch = cap_ch1 + 1
-    for prop in state.properties:
-        r, c = prop.row, prop.col
-        if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
-            continue
         if prop.owner is None and not prop.is_comm_tower and not prop.is_lab:
             spatial[r, c, neutral_inc_ch] = 1.0
+
         if prop.capture_points < 20:
             occ = state.get_unit_at(r, c)
             if occ is not None:
