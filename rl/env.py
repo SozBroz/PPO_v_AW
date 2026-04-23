@@ -240,12 +240,17 @@ def _action_to_flat(action: Action) -> int:
     return 0
 
 
-def _flat_to_action(flat_idx: int, state: GameState) -> Optional[Action]:
+def _flat_to_action(
+    flat_idx: int,
+    state: GameState,
+    legal: list[Action] | None = None,
+) -> Optional[Action]:
     """
     Decode a flat integer back to a legal Action for the current state.
     Returns None if the index does not correspond to any legal action.
     """
-    legal = get_legal_actions(state)
+    if legal is None:
+        legal = get_legal_actions(state)
     for a in legal:
         if _action_to_flat(a) == flat_idx:
             return a
@@ -265,7 +270,11 @@ def _action_label(action: Optional[Action]) -> Optional[dict]:
     }
 
 
-def _get_action_mask(state: GameState, out: np.ndarray | None = None) -> np.ndarray:
+def _get_action_mask(
+    state: GameState,
+    out: np.ndarray | None = None,
+    legal: list[Action] | None = None,
+) -> np.ndarray:
     """Return a bool mask over [0, ACTION_SPACE_SIZE) indicating legal actions.
 
     When ``out`` is a pre-allocated array of shape (ACTION_SPACE_SIZE,) and dtype bool,
@@ -277,16 +286,24 @@ def _get_action_mask(state: GameState, out: np.ndarray | None = None) -> np.ndar
     else:
         mask = out
         mask.fill(False)
-    for action in get_legal_actions(state):
+    if legal is None:
+        legal = get_legal_actions(state)
+    for action in legal:
         idx = _action_to_flat(action)
         if 0 <= idx < ACTION_SPACE_SIZE:
             mask[idx] = True
     return mask
 
 
-def _strip_non_infantry_builds(mask: np.ndarray, state: GameState) -> None:
+def _strip_non_infantry_builds(
+    mask: np.ndarray,
+    state: GameState,
+    legal: list[Action] | None = None,
+) -> None:
     """In-place: clear BUILD entries except ``INFANTRY`` (bootstrap curriculum)."""
-    for action in get_legal_actions(state):
+    if legal is None:
+        legal = get_legal_actions(state)
+    for action in legal:
         if action.action_type == ActionType.BUILD and action.unit_type != UnitType.INFANTRY:
             idx = _action_to_flat(action)
             if 0 <= idx < ACTION_SPACE_SIZE:
@@ -521,6 +538,13 @@ class AWBWEnv(gym.Env):
         )
         self._scalars_obs_buf = np.zeros((N_SCALARS,), dtype=np.float32)
 
+        # Phase 4: env-scoped legal-action cache. Populated lazily by
+        # self._get_legal(); invalidated after every state.step in
+        # _engine_step_with_belief and on reset(). Kills the 3x
+        # get_legal_actions per P0 step (mask + strip + decode) and
+        # the 2x per P1 policy microstep (mask + decode).
+        self._legal_cache: list[Action] | None = None
+
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
         self._p1_truncated_mid_turn: bool = False
@@ -578,6 +602,20 @@ class AWBWEnv(gym.Env):
             return int(fn())
         except Exception:
             return None
+
+    def _get_legal(self) -> list[Action]:
+        """Return cached legal actions for self.state; populate on first call.
+
+        Phase 4: cache invalidates after every state.step (see
+        _engine_step_with_belief) and on reset(). Safe to call multiple
+        times between steps — always returns the same list reference.
+        """
+        if self._legal_cache is None:
+            self._legal_cache = get_legal_actions(self.state)
+        return self._legal_cache
+
+    def _invalidate_legal_cache(self) -> None:
+        self._legal_cache = None
 
     # ── Map helpers ───────────────────────────────────────────────────────────
 
@@ -641,6 +679,7 @@ class AWBWEnv(gym.Env):
         if self._max_turns is not None:
             _mk["max_turns"] = self._max_turns
         self.state = make_initial_state(map_data, p0_co, p1_co, **_mk)
+        self._invalidate_legal_cache()
         # Who opens (engine seat 0 or 1) per make_initial_state predeploy rule; see engine/game.py.
         self._opening_player = int(self.state.active_player)
 
@@ -736,12 +775,14 @@ class AWBWEnv(gym.Env):
         # for the final on-policy phase.
         if self._learner_greedy_mix > 0.0 and random.random() < self._learner_greedy_mix:
             from rl.self_play import pick_capture_greedy_flat
-            mask = _get_action_mask(self.state, out=self._action_mask_buf)
+            mask = _get_action_mask(
+                self.state, out=self._action_mask_buf, legal=self._get_legal()
+            )
             action_idx = pick_capture_greedy_flat(self.state, mask)
             self._learner_teacher_overrides += 1
 
         # ── Decode & apply player-0 action ────────────────────────────────────
-        action = _flat_to_action(action_idx, self.state)
+        action = _flat_to_action(action_idx, self.state, legal=self._get_legal())
         if action is None:
             self._invalid_action_count += 1
             obs = self._get_obs()
@@ -869,10 +910,11 @@ class AWBWEnv(gym.Env):
         if self.state is None:
             self._action_mask_buf.fill(False)
             return self._action_mask_buf
-        mask = _get_action_mask(self.state, out=self._action_mask_buf)
+        legal = self._get_legal()
+        mask = _get_action_mask(self.state, out=self._action_mask_buf, legal=legal)
         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
         if flag in ("1", "true", "yes", "on"):
-            _strip_non_infantry_builds(mask, self.state)
+            _strip_non_infantry_builds(mask, self.state, legal=legal)
         return mask
 
     def render(self) -> str | None:
@@ -1016,6 +1058,7 @@ class AWBWEnv(gym.Env):
 
         # Execute
         self.state, reward, done = self.state.step(action)
+        self._invalidate_legal_cache()
 
         post_by_id: dict[int, Any] = {}
         for p in (0, 1):
@@ -1095,7 +1138,7 @@ class AWBWEnv(gym.Env):
             if cap is not None and microsteps >= cap:
                 self._p1_truncated_mid_turn = True
                 break
-            legal = get_legal_actions(self.state)
+            legal = self._get_legal()
             if not legal:
                 break
             action = random.choice(legal)
@@ -1123,16 +1166,16 @@ class AWBWEnv(gym.Env):
             needs_obs_fn = getattr(self.opponent_policy, "needs_observation", None)
             needs_obs = True if needs_obs_fn is None else bool(needs_obs_fn())
             obs = self._get_obs(observer=1) if needs_obs else None
-            mask = _get_action_mask(self.state, out=self._action_mask_buf)
+            legal = self._get_legal()
+            mask = _get_action_mask(self.state, out=self._action_mask_buf, legal=legal)
             try:
                 opp_idx = int(self.opponent_policy(obs, mask))
             except Exception:
                 opp_idx = -1
 
-            action = _flat_to_action(opp_idx, self.state)
+            action = _flat_to_action(opp_idx, self.state, legal=legal)
             if action is None:
                 # Policy returned illegal index — fall back to random
-                legal = get_legal_actions(self.state)
                 if not legal:
                     break
                 action = random.choice(legal)
