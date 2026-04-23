@@ -92,6 +92,38 @@ def test_heartbeat_main_writes_under_repo_root(tmp_path: Path) -> None:
     assert payload["task"] == "train"
 
 
+def test_heartbeat_main_with_machine_id_uses_machine_dir(tmp_path: Path) -> None:
+    """Solo main-role trainer with AWBW_MACHINE_ID set must land at fleet/<id>/.
+
+    Regression for fleet validation 2026-04-22: pc-b ran in solo main role with
+    AWBW_MACHINE_ID=pc-b, but heartbeat hardcoded fleet/main/status.json,
+    making the orchestrator's fleet/<machine_id>/ lookup miss it entirely.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ck = repo / "checkpoints"
+    ck.mkdir()
+    cfg = FleetConfig(
+        role="main",
+        machine_id="pc-b",
+        shared_root=None,
+        repo_root=repo,
+    )
+    trainer = _make_trainer(fleet_cfg=cfg, checkpoint_dir=ck)
+
+    trainer._write_trainer_status(steps_done=10_000, rate=22.5)
+
+    expected = repo / "fleet" / "pc-b" / "status.json"
+    assert expected.is_file(), "main role with machine_id must land at fleet/<id>/"
+    legacy = repo / "fleet" / "main" / "status.json"
+    assert not legacy.exists(), "must NOT also write the legacy fleet/main/ path"
+
+    payload = json.loads(expected.read_text(encoding="utf-8"))
+    assert payload["role"] == "main"
+    assert payload["machine_id"] == "pc-b"
+    assert payload["steps_done"] == 10_000
+
+
 def test_heartbeat_auxiliary_without_machine_id_is_noop(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

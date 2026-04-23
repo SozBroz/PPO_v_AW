@@ -1013,7 +1013,8 @@ class SelfPlayTrainer:
                 return
             status_path = Path(cfg.shared_root) / "fleet" / cfg.machine_id / "status.json"
         else:
-            status_path = Path(cfg.repo_root) / "fleet" / "main" / "status.json"
+            machine_dir = cfg.machine_id or "main"
+            status_path = Path(cfg.repo_root) / "fleet" / machine_dir / "status.json"
 
         extra = {
             "steps_done": int(steps_done),
