@@ -273,6 +273,17 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
             _cost_cache[tid] = c
         return c
 
+    # Phase 2c: per-call occupancy lookup. get_unit_at is O(total_units) linear
+    # scan; in BFS it's called per-neighbor expansion AND per-visited-tile during
+    # the stop-tile filter. Build the (row, col) -> Unit mapping ONCE here from
+    # all alive units. Cache lives in this stack frame only -- BFS does not
+    # mutate state -- so zero cross-call invalidation risk.
+    _occupancy: dict[tuple[int, int], Unit] = {}
+    for _player_units in state.units.values():
+        for _u in _player_units:
+            if _u.is_alive:
+                _occupancy[_u.pos] = _u
+
     while queue:
         (r, c), fuel_used = queue.popleft()
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -288,7 +299,7 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
                 continue
 
             # Cannot pass through enemy units
-            occupant = state.get_unit_at(nr, nc)
+            occupant = _occupancy.get((nr, nc))
             if occupant is not None and occupant.player != unit.player:
                 continue
 
@@ -299,7 +310,7 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
     # Filter to tiles where the unit can legally stop, preserving the cost.
     result: dict[tuple[int, int], int] = {}
     for pos, cost in visited.items():
-        occupant = state.get_unit_at(*pos)
+        occupant = _occupancy.get(pos)
         if occupant is None or pos == unit.pos:
             result[pos] = cost
         elif occupant.player == unit.player:

@@ -6,10 +6,11 @@ step(action) → (state, reward, done)
 """
 from __future__ import annotations
 
-import copy
+import copy as _copy_mod
+import random as _random_mod
 from dataclasses import dataclass, field
 from collections import Counter
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from engine.unit import Unit, UnitType, UNIT_STATS, idle_start_of_day_fuel_drain
 from engine.terrain import get_terrain, property_terrain_id_after_owner_change
@@ -2653,6 +2654,128 @@ class GameState:
         )
         return "\n".join(lines)
 
+    def apply_full_turn(
+        self,
+        plan_or_policy: Union[list[Action], Callable[["GameState"], Action]],
+        *,
+        copy: bool = True,
+        max_actions: int = 10_000,
+        rng_seed: Optional[int] = None,
+        on_step: Optional[Callable[[GameState, Action, float, bool], None]] = None,
+    ) -> tuple[GameState, list[Action], float, bool]:
+        """
+        Apply one full turn for ``self.active_player`` and return the resulting
+        state at the start of the next turn (or terminal).
+
+        Phase 11a: foundation for MCTS turn-level rollouts.
+
+        Args:
+            plan_or_policy:
+                - ``list[Action]``: a fixed plan; consumed in order. If the plan
+                  exhausts before the turn ends, raises ``RuntimeError``.
+                - ``Callable[[GameState], Action]``: invoked at each sub-step with
+                  the current state; must return a legal action (validated against
+                  ``get_legal_actions``).
+            copy:
+                If True (default), the input state is deep-copied; the caller's
+                state is NOT mutated. If False, this method mutates ``self`` in
+                place — the caller must own the state and be ready for it to
+                change. Set False inside MCTS for hot-path performance.
+            max_actions:
+                Hard cap on sub-steps inside the turn. Prevents infinite loops if
+                a buggy policy gets stuck. Default 10_000 is generous for AWBW
+                (a turn is typically 5-50 sub-steps).
+            rng_seed:
+                If not None, ``random.seed(rng_seed)`` is called BEFORE the rollout
+                to make combat-luck rolls deterministic. Saved-and-restored so the
+                global RNG state is preserved across the call.
+            on_step:
+                Optional callback ``(state_after, action, reward, done)`` invoked
+                after each sub-step. Use for tree-search bookkeeping or tracing.
+
+        Returns:
+            ``(final_state, actions_taken, total_reward, done)``:
+                * ``final_state``: the resulting state. If ``copy=True``, this is
+                  a different object from the input; if ``copy=False``, it IS
+                  ``self``.
+                * ``actions_taken``: list of Actions actually applied.
+                * ``total_reward``: sum of per-step rewards from ``self.active_player``'s
+                  perspective at the START of the turn (the player whose turn
+                  this rollout simulated). Note: ``state.step`` returns reward
+                  from the *active* player at the time of the call; we accumulate
+                  with the SIGN that the starting player would see (we're always
+                  the active player during this rollout, so just sum directly).
+                * ``done``: True if the game ended during this turn.
+
+        Raises:
+            ValueError: if the input state's ``action_stage`` is not SELECT
+                        (we only support starting at a clean turn boundary).
+            RuntimeError: if a plan exhausts before the turn ends, or if
+                          ``max_actions`` is exceeded.
+            IllegalActionError: propagated from ``state.step`` if the policy
+                                picks an illegal action (caller must catch).
+        """
+        if self.action_stage != ActionStage.SELECT:
+            raise ValueError(
+                f"apply_full_turn requires action_stage==SELECT at entry, "
+                f"got {self.action_stage.name}"
+            )
+
+        state = _copy_mod.deepcopy(self) if copy else self
+        starting_player = state.active_player
+
+        saved_rng_state: Optional[object] = None
+        if rng_seed is not None:
+            saved_rng_state = _random_mod.getstate()
+            _random_mod.seed(rng_seed)
+
+        actions_taken: list[Action] = []
+        total_reward = 0.0
+        done = False
+
+        if isinstance(plan_or_policy, list):
+            plan_iter = iter(plan_or_policy)
+
+            def get_action(_s: GameState) -> Optional[Action]:
+                return next(plan_iter, None)
+        else:
+            policy = plan_or_policy
+
+            def get_action(s: GameState) -> Action:
+                return policy(s)
+
+        try:
+            for _ in range(max_actions):
+                if done:
+                    break
+                if state.active_player != starting_player:
+                    break
+                action = get_action(state)
+                if action is None:
+                    raise RuntimeError(
+                        "plan exhausted before turn ended; "
+                        f"actions_taken={len(actions_taken)} "
+                        f"active_player still {state.active_player}, "
+                        f"stage={state.action_stage.name}"
+                    )
+                _, reward, done = state.step(action)
+                actions_taken.append(action)
+                total_reward += float(reward)
+                if on_step is not None:
+                    on_step(state, action, float(reward), done)
+                if done or state.active_player != starting_player:
+                    break
+            else:
+                raise RuntimeError(
+                    f"apply_full_turn exceeded max_actions={max_actions}; "
+                    f"actions_taken={len(actions_taken)} active={state.active_player}"
+                )
+        finally:
+            if saved_rng_state is not None:
+                _random_mod.setstate(saved_rng_state)
+
+        return state, actions_taken, total_reward, done
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -2682,7 +2805,7 @@ def make_initial_state(
     mt = MAX_TURNS if max_turns is None else int(max_turns)
     if mt < 1:
         raise ValueError(f"max_turns must be >= 1, got {mt}")
-    props = copy.deepcopy(map_data.properties)
+    props = _copy_mod.deepcopy(map_data.properties)
     units = specs_to_initial_units(map_data.predeployed_specs)
 
     # Deep-copy the mutable pieces of ``map_data`` that the engine writes to
@@ -2690,7 +2813,7 @@ def make_initial_state(
     # leak across games that share the same loaded MapData instance.
     # Properties are already cloned above; the terrain grid is the only other
     # in-place mutation the engine performs.
-    map_data = copy.copy(map_data)
+    map_data = _copy_mod.copy(map_data)
     map_data.terrain = [row[:] for row in map_data.terrain]
 
     # Initialise seam HP (99 per intact HPipe/VPipe seam tile).
