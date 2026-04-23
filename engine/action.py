@@ -189,10 +189,34 @@ def units_can_join(mover: Unit, occupant: Unit) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Per-call unit occupancy (Phase 2c / 2d): (row, col) -> Unit for O(1) tile lookup
+# ---------------------------------------------------------------------------
+
+def _build_occupancy(state: GameState) -> dict[tuple[int, int], Unit]:
+    """Build per-call (row, col) -> Unit lookup over alive units in both players.
+
+    Phase 2c (extended Phase 2d): replaces O(N) state.get_unit_at scans with
+    O(1) dict lookups. Caller must guarantee state.units is not mutated for
+    the lifetime of the dict (true throughout get_legal_actions and helpers).
+    """
+    occ: dict[tuple[int, int], Unit] = {}
+    for player_units in state.units.values():
+        for u in player_units:
+            if u.is_alive:
+                occ[u.pos] = u
+    return occ
+
+
+# ---------------------------------------------------------------------------
 # Movement reachability (Dijkstra/BFS with fuel as cost)
 # ---------------------------------------------------------------------------
 
-def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int], int]:
+def compute_reachable_costs(
+    state: GameState,
+    unit: Unit,
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
+) -> dict[tuple[int, int], int]:
     """
     Return a mapping of legal end-tile positions to the minimum movement-point
     cost the unit pays to reach them. Movement cost equals the sum of terrain
@@ -206,6 +230,9 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
     - Cannot end on a friendly unit unless loading into a transport with room,
       or joining (same type) onto an injured ally.
     """
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
+
     stats      = UNIT_STATS[unit.unit_type]
     move_range = stats.move_range
     co         = state.co_states[unit.player]
@@ -273,17 +300,6 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
             _cost_cache[tid] = c
         return c
 
-    # Phase 2c: per-call occupancy lookup. get_unit_at is O(total_units) linear
-    # scan; in BFS it's called per-neighbor expansion AND per-visited-tile during
-    # the stop-tile filter. Build the (row, col) -> Unit mapping ONCE here from
-    # all alive units. Cache lives in this stack frame only -- BFS does not
-    # mutate state -- so zero cross-call invalidation risk.
-    _occupancy: dict[tuple[int, int], Unit] = {}
-    for _player_units in state.units.values():
-        for _u in _player_units:
-            if _u.is_alive:
-                _occupancy[_u.pos] = _u
-
     while queue:
         (r, c), fuel_used = queue.popleft()
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -299,7 +315,7 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
                 continue
 
             # Cannot pass through enemy units
-            occupant = _occupancy.get((nr, nc))
+            occupant = occupancy.get((nr, nc))
             if occupant is not None and occupant.player != unit.player:
                 continue
 
@@ -310,7 +326,7 @@ def compute_reachable_costs(state: GameState, unit: Unit) -> dict[tuple[int, int
     # Filter to tiles where the unit can legally stop, preserving the cost.
     result: dict[tuple[int, int], int] = {}
     for pos, cost in visited.items():
-        occupant = _occupancy.get(pos)
+        occupant = occupancy.get(pos)
         if occupant is None or pos == unit.pos:
             result[pos] = cost
         elif occupant.player == unit.player:
@@ -338,6 +354,8 @@ def get_attack_targets(
     state: GameState,
     unit: Unit,
     move_pos: tuple[int, int],
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
 ) -> list[tuple[int, int]]:
     """
     Return all enemy tile positions this unit can attack from move_pos.
@@ -347,6 +365,8 @@ def get_attack_targets(
     and the unit has a non-zero base damage vs seams (AWBW: seams are
     legitimate attack targets without any defender unit present).
     """
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
     from engine.combat import get_base_damage, get_seam_base_damage  # local import
 
     stats = UNIT_STATS[unit.unit_type]
@@ -390,7 +410,7 @@ def get_attack_targets(
             tr, tc = mr + dr, mc + dc
             if not (0 <= tr < state.map_data.height and 0 <= tc < state.map_data.width):
                 continue
-            enemy = state.get_unit_at(tr, tc)
+            enemy = occupancy.get((tr, tc))
             if enemy is not None:
                 if enemy.player == unit.player:
                     continue
@@ -473,13 +493,14 @@ def get_producible_units(terrain_info, unit_bans: list[str]) -> list[UnitType]:
 # ---------------------------------------------------------------------------
 
 def get_legal_actions(state: GameState) -> list[Action]:
+    occupancy = _build_occupancy(state)
     player = state.active_player
     if state.action_stage == ActionStage.SELECT:
-        actions = _get_select_actions(state, player)
+        actions = _get_select_actions(state, player, occupancy=occupancy)
     elif state.action_stage == ActionStage.MOVE:
-        actions = _get_move_actions(state, player)
+        actions = _get_move_actions(state, player, occupancy=occupancy)
     elif state.action_stage == ActionStage.ACTION:
-        actions = _get_action_actions(state, player)
+        actions = _get_action_actions(state, player, occupancy=occupancy)
     else:
         actions = []
     # Phase 11J-RL-DELETE-GUARD-SHIP: defense-in-depth — fail loud if any
@@ -493,7 +514,14 @@ def get_legal_actions(state: GameState) -> list[Action]:
     return actions
 
 
-def _get_select_actions(state: GameState, player: int) -> list[Action]:
+def _get_select_actions(
+    state: GameState,
+    player: int,
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
+) -> list[Action]:
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
     actions: list[Action] = []
 
     # COP/SCOP: emit only when meter/threshold and exclusivity rules allow
@@ -549,7 +577,7 @@ def _get_select_actions(state: GameState, player: int) -> list[Action]:
                 terrain = get_terrain(state.map_data.terrain[prop.row][prop.col])
                 if terrain.is_base or terrain.is_airport or terrain.is_port:
                     # Check if factory tile is empty
-                    if state.get_unit_at(prop.row, prop.col) is None:
+                    if occupancy.get((prop.row, prop.col)) is None:
                         # Generate BUILD actions for all affordable units
                         for ut in get_producible_units(terrain, state.map_data.unit_bans):
                             cost = _build_cost(ut, state, player, (prop.row, prop.col))
@@ -564,11 +592,18 @@ def _get_select_actions(state: GameState, player: int) -> list[Action]:
     return actions
 
 
-def _get_move_actions(state: GameState, player: int) -> list[Action]:
+def _get_move_actions(
+    state: GameState,
+    player: int,
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
+) -> list[Action]:
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
     unit = state.selected_unit
     if unit is None:
         return []
-    reachable = get_reachable_tiles(state, unit)
+    reachable = set(compute_reachable_costs(state, unit, occupancy=occupancy).keys())
     # --- AWBW_CAPTURE_MOVE_GATE (RL / get_legal_actions only; default OFF) ---
     # When the env var is "1"/"true"/"yes"/"on", capturers with at least one
     # reachable capturable tile (enemy/neutral property; not comm tower / lab;
@@ -600,7 +635,14 @@ def _get_move_actions(state: GameState, player: int) -> list[Action]:
     ]
 
 
-def _get_action_actions(state: GameState, player: int) -> list[Action]:
+def _get_action_actions(
+    state: GameState,
+    player: int,
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
+) -> list[Action]:
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
     unit     = state.selected_unit
     move_pos = state.selected_move_pos
     if unit is None or move_pos is None:
@@ -609,7 +651,7 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
     # If the destination is a friendly transport (not the unit itself), the
     # *only* legal terminator is LOAD. Allowing WAIT here would co-occupy the
     # tile, leaving two drawable units on one square in snapshots.
-    occupant = state.get_unit_at(*move_pos)
+    occupant = occupancy.get(move_pos)
     # Phase 11J-FUNDS-EXTERMINATION-JOIN-SNAP-FIX: when the oracle replay
     # path-tail snap (tools/oracle_zip_replay.py::
     # _oracle_path_tail_occupant_allows_forced_snap) co-places the mover
@@ -661,7 +703,7 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
         )
 
     # --- Attack ---
-    for tpos in get_attack_targets(state, unit, move_pos):
+    for tpos in get_attack_targets(state, unit, move_pos, occupancy=occupancy):
         actions.append(Action(
             ActionType.ATTACK,
             unit_pos=unit.pos,
@@ -693,7 +735,7 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
                     continue
                 # Drop tile must be empty (or be the transport's own pre-move tile,
                 # which will become empty once the transport vacates).
-                drop_occupant = state.get_unit_at(tr, tc)
+                drop_occupant = occupancy.get((tr, tc))
                 if drop_occupant is not None and drop_occupant.pos != unit.pos:
                     continue
                 actions.append(Action(
@@ -722,7 +764,7 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
             tr, tc = move_pos[0] + dr, move_pos[1] + dc
             if not (0 <= tr < state.map_data.height and 0 <= tc < state.map_data.width):
                 continue
-            ally = state.get_unit_at(tr, tc)
+            ally = occupancy.get((tr, tc))
             if ally is None or ally.player != unit.player:
                 continue
             if int(ally.unit_id) == int(unit.unit_id):
@@ -767,7 +809,7 @@ def _get_action_actions(state: GameState, player: int) -> list[Action]:
         and not any(a.action_type == ActionType.UNLOAD for a in actions)
         and not _apc_tile_benefits_allies(state, unit, move_pos)
     ):
-        reachable = compute_reachable_costs(state, unit)
+        reachable = compute_reachable_costs(state, unit, occupancy=occupancy)
         if any(
             pos != move_pos and _apc_tile_benefits_allies(state, unit, pos)
             for pos in reachable
