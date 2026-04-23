@@ -134,6 +134,11 @@ class GameState:
     tier_name:         str
     max_turns:         int = field(default=MAX_TURNS)  # calendar tiebreak after this day count (see _end_turn)
     full_trace:        list[dict] = field(default_factory=list)  # every action incl. SELECT/END_TURN
+
+    # Luck rolls for combat (0–9) must use this RNG, not the module-level ``random``
+    # module, so parallel games / subprocesses cannot steal each other's sequence
+    # (and ``ai_vs_ai --seed`` reproduces full games including combat).
+    luck_rng:          _random_mod.Random = field(default_factory=_random_mod.Random)
     
     # Economic tracking (Phase A logging requirements)
     gold_spent:        list[int] = field(default_factory=lambda: [0, 0])  # [p0, p1] cumulative
@@ -1244,6 +1249,7 @@ class GameState:
                 attacker, defender,
                 att_terrain, def_terrain,
                 att_co, def_co,
+                luck_rng=self.luck_rng,
             )
         if dmg is not None:
             defender.hp = max(0, defender.hp - dmg)
@@ -1285,6 +1291,7 @@ class GameState:
                     att_terrain, def_terrain,
                     att_co, def_co,
                     attack_damage=dmg,
+                    luck_rng=self.luck_rng,
                 )
             if counter is not None and counter > 0:
                 attacker.hp = max(0, attacker.hp - counter)
@@ -2791,6 +2798,7 @@ def make_initial_state(
     *,
     replay_first_mover: Optional[int] = None,
     max_turns: Optional[int] = None,
+    luck_seed: Optional[int] = None,
 ) -> GameState:
     # Treasuries always start at 0g in AWBW; the opening player receives income
     # at the start of their first turn via _grant_income below. ``starting_funds``
@@ -2801,6 +2809,9 @@ def make_initial_state(
     Uses make_co_state_safe so it works even before co_data.json is generated.
 
     ``max_turns`` overrides the engine day cap (default ``MAX_TURNS``). Must be >= 1.
+
+    ``luck_seed`` seeds :attr:`GameState.luck_rng` for combat luck when not ``None``;
+    otherwise a fresh :class:`random.Random` is used (isolated from other games).
     """
     mt = MAX_TURNS if max_turns is None else int(max_turns)
     if mt < 1:
@@ -2840,6 +2851,11 @@ def make_initial_state(
         else:
             opening = 0
 
+    luck0 = (
+        _random_mod.Random(int(luck_seed))
+        if luck_seed is not None
+        else _random_mod.Random()
+    )
     state = GameState(
         map_data=map_data,
         units=units,
@@ -2865,6 +2881,7 @@ def make_initial_state(
         weather=default_weather,
         default_weather=default_weather,
         co_weather_segments_remaining=0,
+        luck_rng=luck0,
     )
     state._refresh_comm_towers()
 

@@ -57,13 +57,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+# Phase 11d schema bump: rows now carry ``machine_id`` (per-machine
+# attribution for the MCTS escalator's DROP_TO_OFF gate) and ``recorded_at``
+# (ISO-8601 UTC ``Z`` timestamp set at ``AuditRow.to_json`` time when not
+# supplied). Older rows lack both fields; consumers MUST tolerate them via
+# ``row.get(...)`` and only filter when the key is present. See
+# ``tools/mcts_eval_summary._count_recent_desyncs`` for the canonical reader.
+DESYNC_REGISTER_SCHEMA_VERSION = 2
 
 # Canonical seed for the regression gate. Pin this and never touch it without
 # coordinating a new baseline — the gate compares register diffs and any
@@ -1271,9 +1281,34 @@ class AuditRow:
     # default-OFF JSONL is byte-identical to pre-Phase-11 audits (regression
     # gate #7 in the campaign rules).
     state_mismatch: Optional[dict[str, Any]] = None
+    # Phase 11d: per-row machine attribution + UTC timestamp so the MCTS
+    # escalator can scope ``engine_desyncs_in_cycle`` to a single fleet
+    # machine inside a real cycle window. Both default to ``None`` so every
+    # historical ``AuditRow(...)`` call site in this file (and downstream
+    # callers like ``tools/desync_audit_amarriner_live.py``) keeps working
+    # without changes; ``to_json`` resolves the env fallback and timestamp
+    # at write time.
+    machine_id: Optional[str] = None
+    recorded_at: Optional[str] = None
 
     def to_json(self) -> dict[str, Any]:
+        # Resolve machine_id: explicit field wins; otherwise fall back to the
+        # fleet env layer (``AWBW_MACHINE_ID`` is set by the orchestrator and
+        # by ``scripts/start_solo_training.py``). If neither is set we emit
+        # ``null`` so legacy single-host runs stay unattributed rather than
+        # forging a host name.
+        mid = self.machine_id
+        if mid is None:
+            env_mid = os.environ.get("AWBW_MACHINE_ID")
+            mid = env_mid if env_mid else None
+        # Resolve recorded_at: explicit field wins; otherwise stamp ``now``
+        # in UTC with the same ``YYYY-MM-DDTHH:MM:SSZ`` shape as
+        # ``tools.mcts_baseline.utc_now_iso_z``.
+        recorded_at = self.recorded_at
+        if recorded_at is None:
+            recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         out: dict[str, Any] = {
+            "schema_version": DESYNC_REGISTER_SCHEMA_VERSION,
             "games_id": self.games_id,
             "map_id": self.map_id,
             "tier": self.tier,
@@ -1291,6 +1326,8 @@ class AuditRow:
             "envelopes_total": self.envelopes_total,
             "envelopes_applied": self.envelopes_applied,
             "actions_applied": self.actions_applied,
+            "machine_id": mid,
+            "recorded_at": recorded_at,
         }
         if self.state_mismatch is not None:
             out["state_mismatch"] = self.state_mismatch

@@ -723,6 +723,8 @@ class AWBWEnv(gym.Env):
         _mk: dict = dict(starting_funds=0, tier_name=tier_name)
         if self._max_turns is not None:
             _mk["max_turns"] = self._max_turns
+        if seed is not None:
+            _mk["luck_seed"] = int(seed)
         self.state = make_initial_state(map_data, p0_co, p1_co, **_mk)
         self._invalidate_legal_cache()
         # Who opens (engine seat 0 or 1) per make_initial_state predeploy rule; see engine/game.py.

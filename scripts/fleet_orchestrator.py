@@ -42,6 +42,7 @@ from rl.fleet_env import (  # noqa: E402
     sorted_checkpoint_zip_paths,
     verdict_summary_from_symmetric_json,
 )
+from rl.train_reconfig_log import append_train_reconfig_line  # noqa: E402
 
 # tools/ is not a regular package (no __init__.py); load the health gate by path.
 _mh_name = "awbw_mcts_health"
@@ -81,6 +82,15 @@ sys.modules[_pt_name] = _propose_train_args
 assert _pt_spec.loader
 _pt_spec.loader.exec_module(_propose_train_args)
 
+# Phase 11 Slice D: MCTS sim-budget escalator wiring. Direct package imports
+# (matches tests/test_mcts_baseline.py and tests/test_mcts_escalator.py) so
+# tests can patch ``tools.mcts_eval_summary.build_cycle_result`` and
+# ``tools.mcts_baseline.read_baseline`` and have the orchestrator pick up the
+# patched callable through the module reference.
+import tools.mcts_baseline as _mcts_baseline  # noqa: E402
+import tools.mcts_escalator as _mcts_escalator  # noqa: E402
+import tools.mcts_eval_summary as _mcts_eval_summary  # noqa: E402
+
 DecKind = Literal[
     "heartbeat_alert",
     "curate",
@@ -89,7 +99,20 @@ DecKind = Literal[
     "reload_request",
     "proposed_args",
     "restart_train",
+    "train_restart_suppressed",
+    "train_reconfig_applied",
     "mcts_health",
+    "mcts_health_refresh",
+    "mcts_gate_pending",
+    "mcts_skip_host",
+    "mcts_refuse_train_advisor",
+    "mcts_baseline_missing",
+    "mcts_escalator_no_data",
+    "mcts_escalator_double",
+    "mcts_escalator_hold",
+    "mcts_escalator_drop_to_off",
+    "mcts_escalator_stop_ask",
+    "mcts_ev_unavailable",
     "fleet_diagnosis",
     "curriculum_proposal",
     "noop",
@@ -167,6 +190,27 @@ def proposed_document_body_sha256(proposed_doc: dict[str, Any]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+# Soft reconfigure: PPO / vec-env geometry only (no policy obs-space change).
+PPO_RECONFIG_ALLOWLIST: frozenset[str] = frozenset(
+    {"--n-envs", "--n-steps", "--batch-size"}
+)
+OPERATOR_TRAIN_ARGS_OVERRIDE_NAME = "operator_train_args_override.json"
+
+
+def _arg_diff_keys(
+    proposed_args: dict[str, Any], applied_args: dict[str, Any]
+) -> set[str]:
+    """Keys where proposed and applied differ (treats missing as unequal)."""
+    pa = proposed_args or {}
+    aa = applied_args or {}
+    if not isinstance(pa, dict):
+        pa = {}
+    if not isinstance(aa, dict):
+        aa = {}
+    keys = set(pa) | set(aa)
+    return {k for k in keys if pa.get(k) != aa.get(k)}
+
+
 def build_train_argv_from_proposed_args(
     proposed_doc: dict[str, Any], *, repo_root: Path
 ) -> list[str]:
@@ -180,6 +224,20 @@ def build_train_argv_from_proposed_args(
 
     def g(key: str, default: Any) -> Any:
         return args_map[key] if key in args_map else default
+
+    def emit_optional(
+        out: list[str], processed_keys: set[str], flag: str, default: Any
+    ) -> None:
+        """
+        If ``args`` does not list *flag*, emit ``default`` (fleet bootstrap).
+        If the value is JSON ``null`` (Python None), **omit** the flag so
+        ``train.py`` uses its default (e.g. all GL Std maps, or random COs).
+        """
+        if flag in args_map and args_map[flag] is None:
+            return
+        val = g(flag, default)
+        out.extend([flag, str(val)])
+        processed_keys.add(flag)
 
     n_envs = int(g("--n-envs", 4))
     n_steps = int(g("--n-steps", 512))
@@ -200,22 +258,6 @@ def build_train_argv_from_proposed_args(
         str(batch_size),
         "--save-every",
         str(save_every),
-        "--map-id",
-        str(g("--map-id", 123858)),
-        "--tier",
-        str(g("--tier", "T3")),
-        "--co-p0",
-        str(g("--co-p0", 1)),
-        "--co-p1",
-        str(g("--co-p1", 1)),
-        "--cold-opponent",
-        str(g("--cold-opponent", "greedy_capture")),
-        "--learner-greedy-mix",
-        str(g("--learner-greedy-mix", 0.3)),
-        "--max-env-steps",
-        str(int(g("--max-env-steps", 8000))),
-        "--max-p1-microsteps",
-        str(int(g("--max-p1-microsteps", 4000))),
     ]
     processed: set[str] = {
         "--iters",
@@ -223,19 +265,41 @@ def build_train_argv_from_proposed_args(
         "--n-steps",
         "--batch-size",
         "--save-every",
-        "--map-id",
-        "--tier",
-        "--co-p0",
-        "--co-p1",
-        "--cold-opponent",
-        "--learner-greedy-mix",
-        "--max-env-steps",
-        "--max-p1-microsteps",
     }
+    emit_optional(head, processed, "--map-id", 123858)
+    emit_optional(head, processed, "--tier", "T3")
+    emit_optional(head, processed, "--co-p0", 1)
+    emit_optional(head, processed, "--co-p1", 1)
+    emit_optional(head, processed, "--cold-opponent", "greedy_capture")
+    emit_optional(head, processed, "--learner-greedy-mix", 0.3)
+    head.extend(
+        [
+            "--max-env-steps",
+            str(int(g("--max-env-steps", 8000))),
+            "--max-p1-microsteps",
+            str(int(g("--max-p1-microsteps", 4000))),
+        ]
+    )
+    processed.update(
+        {
+            "--max-env-steps",
+            "--max-p1-microsteps",
+        }
+    )
+    mid_cli = g("--machine-id", None)
+    if mid_cli is not None and str(mid_cli).strip() != "":
+        head.extend(["--machine-id", str(mid_cli).strip()])
+        processed.add("--machine-id")
+
     cm = g("--capture-move-gate", None)
     if cm is True or cm == _curriculum_advisor.FLAG_PRESENT:
         head.append("--capture-move-gate")
         processed.add("--capture-move-gate")
+
+    lr = g("--log-replay-frames", None)
+    if lr is True or lr == _curriculum_advisor.FLAG_PRESENT:
+        head.append("--log-replay-frames")
+        processed.add("--log-replay-frames")
 
     for key in sorted(args_map.keys()):
         if key in processed:
@@ -244,6 +308,8 @@ def build_train_argv_from_proposed_args(
         if val is True or val == _curriculum_advisor.FLAG_PRESENT:
             head.append(key)
         elif val is False:
+            continue
+        elif val is None:
             continue
         else:
             head.extend([key, str(val)])
@@ -447,6 +513,12 @@ class FleetOrchestrator:
         curriculum_enabled: bool = True,
         curriculum_window_games: int = 100,
         curriculum_state_file_template: str = "fleet/{machine_id}/curriculum_state.json",
+        reconfig_ack_timeout_s: float = 120.0,
+        host_machine_id: str = "pc-b",
+        enable_mcts_here: bool = False,
+        mcts_health_window: int = 200,
+        mcts_health_refresh_every_ticks: int = 1,
+        mcts_gate_required_consecutive: int = 2,
     ) -> None:
         self.shared_root = shared_root.resolve()
         self.pools = sorted(set(pools))
@@ -476,12 +548,33 @@ class FleetOrchestrator:
         self.curriculum_enabled = bool(curriculum_enabled)
         self.curriculum_window_games = int(curriculum_window_games)
         self.curriculum_state_file_template = str(curriculum_state_file_template)
+        self.reconfig_ack_timeout_s = float(reconfig_ack_timeout_s)
+        self.host_machine_id = str(host_machine_id)
+        self.enable_mcts_here = bool(enable_mcts_here)
+        self.mcts_health_window = int(mcts_health_window)
+        self.mcts_health_refresh_every_ticks = int(mcts_health_refresh_every_ticks)
+        self.mcts_gate_required_consecutive = max(1, int(mcts_gate_required_consecutive))
         self._last_apply_at_by_machine: dict[str, float] = {}
         self._train_restart_times_by_machine: dict[str, list[float]] = {}
         self._circuit_open_until_by_machine: dict[str, float] = {}
-        self._laggard_cycles: dict[str, int] = self._load_laggard_state()
+        state_doc = self._load_state()
+        self._laggard_cycles: dict[str, int] = self._coerce_int_dict(
+            state_doc.get("laggard_cycles")
+        )
+        self._mcts_pass_streak_by_machine: dict[str, int] = self._coerce_int_dict(
+            state_doc.get("mcts_pass_streak_by_machine")
+        )
+        self._mcts_health_last_refresh_tick_by_machine: dict[str, int] = (
+            self._coerce_int_dict(
+                state_doc.get("mcts_health_last_refresh_tick_by_machine")
+            )
+        )
+        try:
+            self._tick_counter: int = int(state_doc.get("tick_counter", 0))
+        except (TypeError, ValueError):
+            self._tick_counter = 0
 
-    def _load_laggard_state(self) -> dict[str, int]:
+    def _load_state(self) -> dict[str, Any]:
         p = self.state_file
         if not p.is_file():
             return {}
@@ -489,21 +582,32 @@ class FleetOrchestrator:
             raw = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        lc = raw.get("laggard_cycles")
-        if not isinstance(lc, dict):
+        return raw if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _coerce_int_dict(raw: Any) -> dict[str, int]:
+        if not isinstance(raw, dict):
             return {}
         out: dict[str, int] = {}
-        for k, v in lc.items():
+        for k, v in raw.items():
             try:
                 out[str(k)] = int(v)
             except (TypeError, ValueError):
                 continue
         return out
 
-    def _save_laggard_state(self) -> None:
+    def _save_state(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
-            {"laggard_cycles": self._laggard_cycles, "updated_at": time.time()},
+            {
+                "laggard_cycles": self._laggard_cycles,
+                "mcts_pass_streak_by_machine": self._mcts_pass_streak_by_machine,
+                "mcts_health_last_refresh_tick_by_machine": (
+                    self._mcts_health_last_refresh_tick_by_machine
+                ),
+                "tick_counter": self._tick_counter,
+                "updated_at": time.time(),
+            },
             indent=2,
         )
         self.state_file.write_text(payload, encoding="utf-8")
@@ -576,6 +680,66 @@ class FleetOrchestrator:
             verdicts_dir=fleet,
             tick_started_at=t0,
         )
+
+    def refresh_mcts_health_documents(self, _state: FleetState) -> list[TickDecision]:
+        """
+        For each pool machine, recompute :func:`tools.mcts_health.compute_health`
+        from ``<shared>/logs/<mid>/game_log.jsonl`` and atomically rewrite
+        ``<shared>/fleet/<mid>/mcts_health.json`` (Phase 11d Slice A).
+
+        Skips a machine when fewer than ``mcts_health_refresh_every_ticks`` ticks
+        have elapsed since its last refresh. Setting the cadence to ``<= 0``
+        disables refresh entirely (operator runs ``tools/mcts_health`` manually).
+        Exceptions never crash the tick: they surface as ``applied=False``
+        ``mcts_health_refresh`` rows.
+        """
+        out: list[TickDecision] = []
+        every = self.mcts_health_refresh_every_ticks
+        if every <= 0:
+            return out
+        for mid in self.pools:
+            last = self._mcts_health_last_refresh_tick_by_machine.get(mid)
+            if last is not None and (self._tick_counter - int(last)) < every:
+                continue
+            logs_dir = self.shared_root / "logs" / mid
+            fleet_dir = self.shared_root / "fleet" / mid
+            try:
+                verdict = _mcts_health.compute_health(
+                    mid, logs_dir, window=self.mcts_health_window
+                )
+                dest = _mcts_health.write_health_json(verdict, fleet_dir)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("mcts_health refresh failed for %s: %s", mid, exc)
+                out.append(
+                    TickDecision(
+                        kind="mcts_health_refresh",
+                        machine_id=mid,
+                        details={
+                            "machine_id": mid,
+                            "logs_dir": str(logs_dir.resolve()),
+                            "error": str(exc),
+                        },
+                        applied=False,
+                        reason=f"mcts_health refresh failed for {mid}: {exc}",
+                    )
+                )
+                continue
+            self._mcts_health_last_refresh_tick_by_machine[mid] = self._tick_counter
+            out.append(
+                TickDecision(
+                    kind="mcts_health_refresh",
+                    machine_id=mid,
+                    details={
+                        "machine_id": mid,
+                        "path": str(dest.resolve()),
+                        "window": self.mcts_health_window,
+                        "tick_counter": self._tick_counter,
+                    },
+                    applied=True,
+                    reason=f"mcts_health refresh wrote {dest.name} for {mid}",
+                )
+            )
+        return out
 
     def read_mcts_health_decisions(self) -> list[TickDecision]:
         """Surface ``fleet/<id>/mcts_health.json`` in the audit log (read-only, never apply)."""
@@ -706,29 +870,121 @@ class FleetOrchestrator:
                 curriculum_stage = prop.stage_name
                 metrics_snap = asdict(prop.metrics_snapshot)
 
-            v = read_mcts_health(mid, self.shared_root)
-            if (
-                v is not None
-                and v.pass_overall
-                and str(v.proposed_mcts_mode).strip().lower() != "off"
-            ):
-                merged_args["--mcts-mode"] = v.proposed_mcts_mode
-                merged_args["--mcts-sims"] = int(v.proposed_mcts_sims)
-                merged_mcts = True
+            mh_v = read_mcts_health(mid, self.shared_root)
+            mh_mode_lc = (
+                str(mh_v.proposed_mcts_mode).strip().lower()
+                if mh_v is not None
+                else "off"
+            )
+            mh_passing = (
+                mh_v is not None and mh_v.pass_overall and mh_mode_lc != "off"
+            )
+            if mh_passing:
+                streak = int(self._mcts_pass_streak_by_machine.get(mid, 0)) + 1
+            else:
+                streak = 0
+            self._mcts_pass_streak_by_machine[mid] = streak
+
+            mcts_aux_decisions: list[TickDecision] = []
+            is_host = mid == self.host_machine_id
+            if mh_passing and mh_v is not None:
+                if mh_mode_lc == "train_advisor":
+                    mcts_aux_decisions.append(
+                        TickDecision(
+                            kind="mcts_refuse_train_advisor",
+                            machine_id=mid,
+                            details={
+                                "machine_id": mid,
+                                "proposed_mcts_mode": mh_v.proposed_mcts_mode,
+                                "proposed_mcts_sims": int(mh_v.proposed_mcts_sims),
+                            },
+                            applied=False,
+                            reason=(
+                                "mcts gate refused train_advisor mode "
+                                f"for {mid}"
+                            ),
+                        )
+                    )
+                elif is_host and not self.enable_mcts_here:
+                    mcts_aux_decisions.append(
+                        TickDecision(
+                            kind="mcts_skip_host",
+                            machine_id=mid,
+                            details={
+                                "machine_id": mid,
+                                "reason": (
+                                    "operator-only on host; rerun with "
+                                    "--enable-mcts-here to enable"
+                                ),
+                            },
+                            applied=False,
+                            reason=(
+                                f"mcts merge skipped on host {mid} "
+                                "(operator-only; pass --enable-mcts-here to enable)"
+                            ),
+                        )
+                    )
+                elif streak < self.mcts_gate_required_consecutive:
+                    mcts_aux_decisions.append(
+                        TickDecision(
+                            kind="mcts_gate_pending",
+                            machine_id=mid,
+                            details={
+                                "machine_id": mid,
+                                "streak": streak,
+                                "required": self.mcts_gate_required_consecutive,
+                            },
+                            applied=False,
+                            reason=(
+                                f"mcts gate pending for {mid}: streak "
+                                f"{streak}/{self.mcts_gate_required_consecutive}"
+                            ),
+                        )
+                    )
+                else:
+                    merged_args["--mcts-mode"] = mh_v.proposed_mcts_mode
+                    merged_args["--mcts-sims"] = int(mh_v.proposed_mcts_sims)
+                    merged_mcts = True
+
+            override_path = (
+                self.shared_root / "fleet" / mid / OPERATOR_TRAIN_ARGS_OVERRIDE_NAME
+            )
+            override_doc = _read_json_path(override_path) if override_path.is_file() else None
+            override_args = (
+                (override_doc or {}).get("args")
+                if isinstance(override_doc, dict)
+                else None
+            )
+            applied_overrides: dict[str, Any] = {}
+            if isinstance(override_args, dict):
+                for k, ov in override_args.items():
+                    if not isinstance(k, str) or not k.startswith("--"):
+                        _LOG.warning(
+                            "ignoring non-flag key in %s for %s: %r",
+                            OPERATOR_TRAIN_ARGS_OVERRIDE_NAME,
+                            mid,
+                            k,
+                        )
+                        continue
+                    merged_args[k] = ov
+                    applied_overrides[k] = ov
 
             reasoning_parts = [str(base_doc.get("reasoning") or "")]
             if self.curriculum_enabled and curriculum_reason:
                 reasoning_parts.append(f"curriculum: {curriculum_reason}")
-            if merged_mcts and v is not None:
+            if merged_mcts and mh_v is not None:
                 reasoning_parts.append(
-                    f"mcts: mode={v.proposed_mcts_mode} sims={v.proposed_mcts_sims}"
+                    f"mcts: mode={mh_v.proposed_mcts_mode} sims={mh_v.proposed_mcts_sims}"
                 )
+            if applied_overrides:
+                keys_sorted = ", ".join(sorted(applied_overrides))
+                reasoning_parts.append(f"override: {keys_sorted}")
             reasoning = "; ".join(p for p in reasoning_parts if p)
 
-            prev_auto = False
+            prev_auto = True
             old_doc = read_proposed_args(mid, self.shared_root)
             if isinstance(old_doc, dict):
-                prev_auto = bool(old_doc.get("auto_apply"))
+                prev_auto = bool(old_doc.get("auto_apply", True))
 
             new_doc: dict[str, Any] = {
                 **base_doc,
@@ -772,12 +1028,65 @@ class FleetOrchestrator:
                             "merged_mcts": merged_mcts,
                             "args_changed": args_changed,
                             "path": str(out_path.resolve()),
+                            "operator_overrides": applied_overrides or None,
                         },
                         applied=args_changed and not self.dry_run,
                         reason=f"curriculum tick for {mid}",
                     )
                 )
+            out.extend(mcts_aux_decisions)
         return out
+
+    def _write_train_reconfig_request(
+        self, mid: str, proposed: dict[str, Any], request_id: str
+    ) -> Path:
+        """Write ``fleet/<id>/train_reconfig_request.json`` for the trainer to pick up."""
+        fleet_dir = self.shared_root / "fleet" / mid
+        fleet_dir.mkdir(parents=True, exist_ok=True)
+        args0 = proposed.get("args")
+        pargs: dict[str, Any] = {}
+        for k in PPO_RECONFIG_ALLOWLIST:
+            if isinstance(args0, dict) and k in args0:
+                pargs[k] = args0[k]
+        payload: dict[str, Any] = {
+            "request_id": request_id,
+            "args": pargs,
+            "reason": "orchestrator: proposed vs applied (PPO geometry allowlist)",
+        }
+        final = fleet_dir / "train_reconfig_request.json"
+        tmp = fleet_dir / "train_reconfig_request.json.tmp"
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, final)
+        return final
+
+    def _poll_train_reconfig_ack(
+        self, mid: str, request_id: str, deadline: float
+    ) -> str | None:
+        """Return *applied* / *failed* if a matching ack appears before *deadline*."""
+        fleet_dir = self.shared_root / "fleet" / mid
+        seen_applied: set[Path] = set()
+        seen_failed: set[Path] = set()
+        while time.time() < deadline:
+            for pat in (
+                "train_reconfig_request.applied.*.json",
+                "train_reconfig_request.failed.*.json",
+            ):
+                is_fail = "failed" in pat
+                for p in sorted(fleet_dir.glob(pat)):
+                    if p in seen_applied or p in seen_failed:
+                        continue
+                    body = _read_json_path(p)
+                    if not isinstance(body, dict):
+                        continue
+                    if str(body.get("request_id", "")) != str(request_id):
+                        continue
+                    if is_fail:
+                        seen_failed.add(p)
+                        return "failed"
+                    seen_applied.add(p)
+                    return "applied"
+            time.sleep(0.25)
+        return None
 
     def _respawn_train_from_launch_file(self, launch_path: Path) -> Optional[int]:
         raw = _read_json_path(launch_path)
@@ -802,6 +1111,10 @@ class FleetOrchestrator:
         """
         When ``proposed_args.json`` ``args`` hash differs from ``applied_args.json``,
         optionally terminate and respawn ``train.py`` (Tier 1: machine-probe-driven only).
+
+        Restarts are gated by the orchestrator's ``--auto-apply`` (``self.auto_apply``) plus
+        cooldown / circuit-breaker. The ``auto_apply`` field inside ``proposed_args.json`` is
+        not consulted here (it is preserved for audit/refresh and operator visibility).
         """
         out: list[TickDecision] = []
         now = time.time()
@@ -841,16 +1154,17 @@ class FleetOrchestrator:
             if not self.auto_apply:
                 out.append(
                     TickDecision(
-                        kind="restart_train",
+                        kind="train_restart_suppressed",
                         machine_id=mid,
                         details={
                             "proposed_hash": prop_h,
                             "previous_hash": prev_h,
                             "pid_path": str(pid_path),
                             "launch_path": str(launch_path),
+                            "suppress_reason": "orchestrator_auto_apply_off",
                         },
                         applied=False,
-                        reason="auto-apply disabled",
+                        reason="orchestrator --auto-apply not set",
                     )
                 )
                 continue
@@ -858,10 +1172,12 @@ class FleetOrchestrator:
             if now < self._circuit_open_until_by_machine.get(mid, 0.0):
                 out.append(
                     TickDecision(
-                        kind="restart_train",
+                        kind="train_restart_suppressed",
                         machine_id=mid,
                         details={
+                            "proposed_hash": prop_h,
                             "circuit_open_until": self._circuit_open_until_by_machine[mid],
+                            "suppress_reason": "circuit_breaker",
                         },
                         applied=False,
                         reason="circuit breaker open (3 restarts in 30m)",
@@ -877,11 +1193,13 @@ class FleetOrchestrator:
             if now - last_apply < self.apply_cooldown_s:
                 out.append(
                     TickDecision(
-                        kind="restart_train",
+                        kind="train_restart_suppressed",
                         machine_id=mid,
                         details={
+                            "proposed_hash": prop_h,
                             "seconds_since_last_apply": now - last_apply,
                             "cooldown_s": self.apply_cooldown_s,
+                            "suppress_reason": "cooldown",
                         },
                         applied=False,
                         reason="apply cooldown active",
@@ -955,15 +1273,101 @@ class FleetOrchestrator:
                 )
                 out.append(
                     TickDecision(
-                        kind="restart_train",
+                        kind="train_restart_suppressed",
                         machine_id=mid,
-                        details={"recent_restarts": len(hist)},
+                        details={
+                            "proposed_hash": prop_h,
+                            "recent_restarts": len(hist),
+                            "suppress_reason": "circuit_breaker",
+                        },
                         applied=False,
                         reason="circuit breaker tripped (3 restarts in 30m)",
                     )
                 )
                 continue
 
+            pargs = (
+                proposed.get("args") if isinstance(proposed.get("args"), dict) else {}
+            )
+            aargs = applied.get("args") if isinstance(applied.get("args"), dict) else {}
+            diff_k = _arg_diff_keys(pargs, aargs)
+            attempted_soft = False
+            if (
+                diff_k
+                and diff_k.issubset(PPO_RECONFIG_ALLOWLIST)
+                and not self.dry_run
+            ):
+                attempted_soft = True
+                request_id = str(int(time.time() * 1000))
+                t_req = time.time()
+                self._write_train_reconfig_request(mid, proposed, request_id)
+                ack_deadline = t_req + self.reconfig_ack_timeout_s
+                outcome = self._poll_train_reconfig_ack(mid, request_id, ack_deadline)
+                if outcome == "applied":
+                    applied_doc = {
+                        **proposed,
+                        "applied_at": time.time(),
+                        "args_content_sha256": prop_h,
+                    }
+                    _atomic_write_json(applied_path, applied_doc)
+                    self._last_apply_at_by_machine[mid] = time.time()
+                    out.append(
+                        TickDecision(
+                            kind="train_reconfig_applied",
+                            machine_id=mid,
+                            details={
+                                "proposed_hash": prop_h,
+                                "request_id": request_id,
+                                "applied_path": str(applied_path),
+                            },
+                            applied=True,
+                            reason="in-process PPO geometry reconfig acknowledged",
+                        )
+                    )
+                    append_train_reconfig_line(
+                        self.shared_root,
+                        {
+                            "event": "soft_reconfig",
+                            "machine_id": mid,
+                            "request_id": request_id,
+                            "outcome": "applied",
+                            "soft_reconfig_orchestrator_wait_ms": int(
+                                (time.time() - t_req) * 1000
+                            ),
+                            "old_args": aargs,
+                            "new_args": pargs,
+                        },
+                    )
+                    continue
+                append_train_reconfig_line(
+                    self.shared_root,
+                    {
+                        "event": "soft_reconfig",
+                        "machine_id": mid,
+                        "request_id": request_id,
+                        "outcome": (outcome or "timeout"),
+                    },
+                )
+                # fall through to hard restart
+            if self.dry_run:
+                out.append(
+                    TickDecision(
+                        kind="train_restart_suppressed",
+                        machine_id=mid,
+                        details={
+                            "proposed_hash": prop_h,
+                            "suppress_reason": "dry_run",
+                            "would_soft_reconfig": bool(
+                                diff_k and diff_k.issubset(PPO_RECONFIG_ALLOWLIST)
+                            ),
+                        },
+                        applied=False,
+                        reason="dry-run: no train restart or reconfig",
+                    )
+                )
+                continue
+
+            t_hard0 = time.time()
             try:
                 _terminate_train_process_tree(pid)
             except Exception as exc:  # noqa: BLE001
@@ -1018,6 +1422,24 @@ class FleetOrchestrator:
             hist.append(time.time())
             self._train_restart_times_by_machine[mid] = hist
 
+            t_hard1 = time.time()
+            hrm = int((t_hard1 - t_hard0) * 1000)
+            append_train_reconfig_line(
+                self.shared_root,
+                {
+                    "event": "hard_restart",
+                    "machine_id": mid,
+                    "outcome": (
+                        "hard_fallback"
+                        if attempted_soft
+                        and diff_k.issubset(PPO_RECONFIG_ALLOWLIST)
+                        else "hard_restart"
+                    ),
+                    "hard_restart_ms": hrm,
+                    "old_args": aargs,
+                    "new_args": pargs,
+                },
+            )
             _LOG.info(
                 "restart_train applied: machine_id=%s stopped_pid=%s new_pid=%s",
                 mid,
@@ -1050,6 +1472,315 @@ class FleetOrchestrator:
                     reason="proposed_args content changed",
                 )
             )
+        return out
+
+    def _mcts_changes_allowed_on(self, machine_id: str) -> bool:
+        """Phase 11 Slice D: same host gate used by ``refresh_proposed_train_args_documents``.
+
+        The orchestrator host (``self.host_machine_id``) is operator-only by
+        default; auxiliary machines may always have MCTS args mutated by the
+        escalator. ``--enable-mcts-here`` lifts the host restriction.
+        """
+        if str(machine_id) == str(self.host_machine_id):
+            return bool(self.enable_mcts_here)
+        return True
+
+    def _mutate_proposed_args_for_mcts(
+        self,
+        machine_id: str,
+        *,
+        sims: Optional[int] = None,
+        mode_off: bool = False,
+    ) -> Optional[Path]:
+        """Atomically rewrite ``fleet/<id>/proposed_args.json`` MCTS args.
+
+        Used by :meth:`run_mcts_escalator` for ``DOUBLE`` and
+        ``DROP_TO_OFF``. Preserves every other key in ``args`` and the
+        rest of the document. Returns the path written, or ``None`` if
+        no proposed file exists yet (escalator caller already gated on
+        the presence of a non-``off`` ``--mcts-mode`` so this should
+        not happen in practice).
+        """
+        out_path = self.shared_root / "fleet" / machine_id / "proposed_args.json"
+        if not out_path.is_file():
+            return None
+        doc = _read_json_path(out_path)
+        if not isinstance(doc, dict):
+            return None
+        args = dict(doc.get("args") or {})
+        if not isinstance(args, dict):
+            args = {}
+        if mode_off:
+            args["--mcts-mode"] = "off"
+            args.pop("--mcts-sims", None)
+        if sims is not None:
+            args["--mcts-sims"] = int(sims)
+        new_doc = {
+            **doc,
+            "args": args,
+            "proposed_at": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        }
+        _atomic_write_json(out_path, new_doc)
+        return out_path
+
+    def _run_mcts_escalator_one(self, mid: str) -> list[TickDecision]:
+        """Per-machine escalator step. Exceptions propagate to the wrapper."""
+        out: list[TickDecision] = []
+        proposed = read_proposed_args(mid, self.shared_root)
+        args = proposed.get("args") if isinstance(proposed, dict) else None
+        if not isinstance(args, dict):
+            return out
+        mode_lc = str(args.get("--mcts-mode", "")).strip().lower()
+        if not mode_lc or mode_lc == "off":
+            return out
+
+        if mid == self.host_machine_id and not self.enable_mcts_here:
+            out.append(
+                TickDecision(
+                    kind="mcts_skip_host",
+                    machine_id=mid,
+                    details={
+                        "machine_id": mid,
+                        "stage": "escalator",
+                        "reason": (
+                            "operator-only on host; rerun with "
+                            "--enable-mcts-here to enable escalator"
+                        ),
+                    },
+                    applied=False,
+                    reason=(
+                        f"mcts escalator skipped on host {mid} "
+                        "(operator-only; pass --enable-mcts-here to enable)"
+                    ),
+                )
+            )
+            return out
+
+        baseline = _mcts_baseline.read_baseline(mid, self.shared_root)
+        if baseline is None or _mcts_baseline.is_baseline_stale(baseline):
+            out.append(
+                TickDecision(
+                    kind="mcts_baseline_missing",
+                    machine_id=mid,
+                    details={
+                        "machine_id": mid,
+                        "baseline_present": baseline is not None,
+                        "baseline_path": str(
+                            _mcts_baseline.baseline_path(mid, self.shared_root)
+                        ),
+                    },
+                    applied=False,
+                    reason=(
+                        f"run tools/capture_mcts_baseline.py --machine-id {mid} first"
+                    ),
+                )
+            )
+            return out
+
+        cycle = _mcts_eval_summary.build_cycle_result(
+            mid, self.shared_root, baseline
+        )
+        if cycle is None:
+            out.append(
+                TickDecision(
+                    kind="mcts_escalator_no_data",
+                    machine_id=mid,
+                    details={
+                        "machine_id": mid,
+                        "reason": "no eval verdicts on disk yet",
+                    },
+                    applied=False,
+                    reason=(
+                        f"mcts escalator: no eval data for {mid} "
+                        "(symmetric eval daemon hasn't produced verdicts yet)"
+                    ),
+                )
+            )
+            return out
+
+        # Phase 11d EV scrape: distinguish "EV missing" (None) from "EV
+        # measured at 0.0" (build_cycle_result clamps None -> 0.0). We
+        # re-scrape via the same module attribute so a single test
+        # monkeypatch on _mcts_eval_summary.latest_explained_variance
+        # propagates to both call sites. Informational only — the
+        # cycle still runs and the escalator gate will HOLD on the
+        # min_explained_variance threshold.
+        ev_window = _mcts_eval_summary.DEFAULT_EV_WINDOW_SECONDS
+        ev_scraped = _mcts_eval_summary.latest_explained_variance(
+            str(mid),
+            self.shared_root,
+            recent_window_seconds=ev_window,
+        )
+        if ev_scraped is None:
+            out.append(
+                TickDecision(
+                    kind="mcts_ev_unavailable",
+                    machine_id=mid,
+                    details={
+                        "machine_id": mid,
+                        "scalar_tag": "train/explained_variance",
+                        "window_seconds": float(ev_window),
+                        "logs_dir": str(self.shared_root / "logs"),
+                        "logs_dir_machine": str(
+                            self.shared_root / "logs" / str(mid)
+                        ),
+                    },
+                    applied=False,
+                    reason=(
+                        f"no recent train/explained_variance samples in "
+                        f"{ev_window:.0f}s under {self.shared_root / 'logs'} "
+                        "(escalator will HOLD on EV threshold)"
+                    ),
+                )
+            )
+
+        state_path = _mcts_escalator.default_state_path(mid, self.shared_root)
+        log_path = _mcts_escalator.default_cycle_log_path(self.shared_root)
+        # ``apply=True`` writes ``state_after`` AND appends one JSONL row to
+        # ``logs/mcts_escalator.jsonl`` — the prompt's "Always: append_cycle_log".
+        proposal = _mcts_escalator.compute_sims_proposal(
+            state_path, cycle, log_path=log_path, apply=True
+        )
+        action = proposal.action
+        new_sims = int(proposal.proposed_sims)
+        current_sims = int(cycle.sims)
+        can_mutate = (
+            self.auto_apply
+            and not self.dry_run
+            and self._mcts_changes_allowed_on(mid)
+        )
+
+        base_details: dict[str, Any] = {
+            "machine_id": mid,
+            "current_sims": current_sims,
+            "proposed_sims": new_sims,
+            "winrate_vs_pool": float(cycle.winrate_vs_pool),
+            "mcts_off_baseline": float(cycle.mcts_off_baseline),
+            "games_decided": int(cycle.games_decided),
+            "engine_desyncs_in_cycle": int(cycle.engine_desyncs_in_cycle),
+            "explained_variance": float(cycle.explained_variance),
+            "reason": proposal.reason,
+        }
+
+        if action == _mcts_escalator.EscalatorAction.DOUBLE:
+            if can_mutate:
+                self._mutate_proposed_args_for_mcts(mid, sims=new_sims)
+                out.append(
+                    TickDecision(
+                        kind="mcts_escalator_double",
+                        machine_id=mid,
+                        details=base_details,
+                        applied=True,
+                        reason=(
+                            "mcts escalator: doubled sims "
+                            f"{current_sims}->{new_sims} for {mid}"
+                        ),
+                    )
+                )
+            else:
+                out.append(
+                    TickDecision(
+                        kind="mcts_escalator_double",
+                        machine_id=mid,
+                        details=base_details,
+                        applied=False,
+                        reason=(
+                            "mcts escalator: would double "
+                            f"{current_sims}->{new_sims} for {mid}, "
+                            "but auto_apply/host gate blocks mutation"
+                        ),
+                    )
+                )
+        elif action == _mcts_escalator.EscalatorAction.HOLD:
+            out.append(
+                TickDecision(
+                    kind="mcts_escalator_hold",
+                    machine_id=mid,
+                    details=base_details,
+                    applied=False,
+                    reason=(
+                        "mcts escalator: hold at sims="
+                        f"{current_sims} for {mid} ({proposal.reason})"
+                    ),
+                )
+            )
+        elif action == _mcts_escalator.EscalatorAction.DROP_TO_OFF:
+            # Operator-visible: an engine desync triggered the drop. Reset the
+            # health-gate hysteresis streak so the gate must re-prove itself
+            # over self.mcts_gate_required_consecutive consecutive ticks
+            # before --mcts-mode can be merged back in.
+            if can_mutate:
+                self._mutate_proposed_args_for_mcts(mid, mode_off=True)
+                self._mcts_pass_streak_by_machine[mid] = 0
+                out.append(
+                    TickDecision(
+                        kind="mcts_escalator_drop_to_off",
+                        machine_id=mid,
+                        details=base_details,
+                        applied=True,
+                        reason=(
+                            "mcts escalator: ALERT engine desync detected for "
+                            f"{mid}; --mcts-mode -> off, hysteresis reset"
+                        ),
+                    )
+                )
+            else:
+                out.append(
+                    TickDecision(
+                        kind="mcts_escalator_drop_to_off",
+                        machine_id=mid,
+                        details=base_details,
+                        applied=False,
+                        reason=(
+                            "mcts escalator: ALERT engine desync detected for "
+                            f"{mid} but auto_apply/host gate blocks mutation"
+                        ),
+                    )
+                )
+        elif action == _mcts_escalator.EscalatorAction.STOP_ASK_OPERATOR:
+            out.append(
+                TickDecision(
+                    kind="mcts_escalator_stop_ask",
+                    machine_id=mid,
+                    details=base_details,
+                    applied=False,
+                    reason=(
+                        "mcts escalator: stop+ask operator at sims="
+                        f"{current_sims} for {mid}"
+                    ),
+                )
+            )
+        return out
+
+    def run_mcts_escalator(self, _state: FleetState) -> list[TickDecision]:
+        """Phase 11 Slice D: per-pool-machine sim-budget escalator step.
+
+        Runs *after* ``refresh_proposed_train_args_documents`` (which
+        merges --mcts-mode/--mcts-sims when the health gate passes) and
+        *before* ``maybe_restart_train_for_proposed_args`` so any
+        DOUBLE / DROP_TO_OFF mutation flows through the same restart
+        path the same tick.
+        """
+        out: list[TickDecision] = []
+        for mid in self.pools:
+            try:
+                out.extend(self._run_mcts_escalator_one(mid))
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("mcts escalator failed for %s: %s", mid, exc)
+                out.append(
+                    TickDecision(
+                        kind="mcts_escalator_no_data",
+                        machine_id=mid,
+                        details={
+                            "machine_id": mid,
+                            "error": str(exc),
+                        },
+                        applied=False,
+                        reason=f"mcts escalator failure for {mid}: {exc}",
+                    )
+                )
         return out
 
     def check_heartbeats(self, state: FleetState) -> list[TickDecision]:
@@ -1348,10 +2079,13 @@ class FleetOrchestrator:
 
     def tick(self) -> list[TickDecision]:
         tick_id = str(uuid.uuid4())
+        self._tick_counter += 1
         st = self.read_fleet_state()
         all_d: list[TickDecision] = []
         all_d.extend(self.check_heartbeats(st))
+        all_d.extend(self.refresh_mcts_health_documents(st))
         all_d.extend(self.refresh_proposed_train_args_documents(st))
+        all_d.extend(self.run_mcts_escalator(st))
         all_d.extend(self.read_mcts_health_decisions())
         all_d.extend(self.read_fleet_diagnosis_decisions())
         all_d.extend(self.read_proposed_train_arg_docs())
@@ -1372,7 +2106,7 @@ class FleetOrchestrator:
                 )
             )
         self.append_audit_log(all_d, tick_id=tick_id)
-        self._save_laggard_state()
+        self._save_state()
         return all_d
 
     def append_audit_log(self, decisions: list[TickDecision], *, tick_id: str) -> None:
@@ -1452,6 +2186,12 @@ def main() -> int:
         help="Minimum wall seconds between train restarts per machine (default 600).",
     )
     ap.add_argument(
+        "--reconfig-ack-timeout-s",
+        type=float,
+        default=120.0,
+        help="Wall seconds to wait for train_reconfig_request ack before hard restart.",
+    )
+    ap.add_argument(
         "--train-pid-file",
         type=str,
         default="fleet/{machine_id}/train.pid",
@@ -1494,6 +2234,48 @@ def main() -> int:
     ap.add_argument(
         "--state-file", type=Path, default=Path("logs") / "fleet_orchestrator_state.json"
     )
+    ap.add_argument(
+        "--host-machine-id",
+        type=str,
+        default="pc-b",
+        help=(
+            "Machine id treated as the operator host for the MCTS gate "
+            "(skipped unless --enable-mcts-here)."
+        ),
+    )
+    ap.add_argument(
+        "--enable-mcts-here",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow MCTS args to be merged into proposed_args.json on the host "
+            "machine. Default: skipped (operator-only)."
+        ),
+    )
+    ap.add_argument(
+        "--mcts-health-window",
+        type=int,
+        default=200,
+        help="Rolling-game window for tools/mcts_health compute_health (default 200).",
+    )
+    ap.add_argument(
+        "--mcts-health-refresh-every-ticks",
+        type=int,
+        default=1,
+        help=(
+            "Recompute fleet/<id>/mcts_health.json every N orchestrator ticks "
+            "(default 1)."
+        ),
+    )
+    ap.add_argument(
+        "--mcts-gate-required-consecutive",
+        type=int,
+        default=2,
+        help=(
+            "Require this many consecutive passing MCTS health verdicts before "
+            "merging --mcts-mode/--mcts-sims into proposed_args.json (default 2)."
+        ),
+    )
     args = ap.parse_args()
     pools = [p.strip() for p in str(args.pools).split(",") if p.strip()]
     orch = FleetOrchestrator(
@@ -1525,6 +2307,12 @@ def main() -> int:
         curriculum_enabled=bool(args.curriculum_enabled),
         curriculum_window_games=int(args.curriculum_window_games),
         curriculum_state_file_template=str(args.curriculum_state_file),
+        reconfig_ack_timeout_s=float(args.reconfig_ack_timeout_s),
+        host_machine_id=str(args.host_machine_id),
+        enable_mcts_here=bool(args.enable_mcts_here),
+        mcts_health_window=int(args.mcts_health_window),
+        mcts_health_refresh_every_ticks=int(args.mcts_health_refresh_every_ticks),
+        mcts_gate_required_consecutive=int(args.mcts_gate_required_consecutive),
     )
     if args.once:
         orch.tick()

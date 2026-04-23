@@ -11,6 +11,8 @@ Usage:
   python train.py --watch-only --map-id 133665 --co-p0 7 --co-p1 1
   python train.py --map-id 123858 --tier T3 --co-p0 1 --co-p1 1 --curriculum-tag misery-andy
   python train.py --n-envs 12 --n-steps 2048 --map-id 123858 --tier T3 --co-p0 1 --co-p1 1
+  python train.py --log-replay-frames         # game_log rows include frames for /replay/
+  python train.py --machine-id pc-b           # stamp game_log machine_id (fleet parity)
   python train.py --rank                      # compute CO rankings from game log
   python train.py --features                  # compute map features from CSVs
 """
@@ -197,6 +199,24 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         help="Override AWBW_MACHINE_ROLE: main (default) or auxiliary",
     )
     parser.add_argument(
+        "--machine-id",
+        type=str,
+        default=None,
+        help=(
+            "Stamp AWBW_MACHINE_ID for this process (and SubprocVecEnv workers) before "
+            "training starts. Matches fleet train_launch_cmd.json env; use when running "
+            "train.py outside start_solo_training so game_log.jsonl rows carry machine_id."
+        ),
+    )
+    parser.add_argument(
+        "--log-replay-frames",
+        action="store_true",
+        help=(
+            "Set AWBW_LOG_REPLAY_FRAMES=1 so each game_log row includes a frames[] array "
+            "for the in-repo /replay/ viewer (large logs; default off)."
+        ),
+    )
+    parser.add_argument(
         "--shared-root", type=str, default=None,
         help="Override AWBW_SHARED_ROOT (aux default Z:\\; main must match repo or be unset)",
     )
@@ -227,12 +247,14 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cold-opponent", type=str, default="random",
-        choices=("random", "greedy_capture", "end_turn"),
+        choices=("random", "greedy_capture", "greedy_mix", "end_turn"),
         help=(
             "Cold-start opponent (no checkpoints loaded yet). "
             "'random' (default): uniform random legal action — gives the learner "
             "a chance to discover capture before facing a teacher. "
             "'greedy_capture': pre-fix legacy default; aggressive bootstrap. "
+            "'greedy_mix': half capture-greedy / half random per P1 microstep "
+            "(curriculum stage_b+). "
             "'end_turn': punching bag — picks END_TURN whenever legal. "
             "Used for the smoke gate in plan p0-capture-architecture-fix."
         ),
@@ -434,6 +456,14 @@ def main() -> None:
 
     if args.capture_move_gate:
         os.environ["AWBW_CAPTURE_MOVE_GATE"] = "1"
+
+    if args.log_replay_frames:
+        os.environ["AWBW_LOG_REPLAY_FRAMES"] = "1"
+
+    if args.machine_id is not None:
+        mid = str(args.machine_id).strip()
+        if mid:
+            os.environ["AWBW_MACHINE_ID"] = mid
 
     _env_flags = [
         ("AWBW_TIME_COST", os.environ.get("AWBW_TIME_COST")),

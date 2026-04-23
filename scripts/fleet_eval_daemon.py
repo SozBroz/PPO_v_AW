@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,16 @@ from rl.fleet_env import (  # noqa: E402
     verdict_summary_from_symmetric_json,
     write_status_json,
 )
+from tools.mcts_baseline import (  # noqa: E402
+    DEFAULT_MAX_AGE_HOURS,
+    is_baseline_stale,
+    read_baseline,
+)
+
+# Subprocess timeout for the per-machine MCTS-off baseline capture (seconds).
+# 30 minutes is enough for a 200-game capture on a slow aux box; on timeout we
+# log and return "failed" rather than tearing down the daemon.
+_MCTS_BASELINE_CAPTURE_TIMEOUT_S: float = 1800.0
 
 
 def _try_lock(path: Path) -> object | None:
@@ -58,6 +69,97 @@ def _release_lock(fd: object | None, path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+def _maybe_capture_mcts_baseline(
+    *,
+    machine_id: str,
+    shared_root: Path,
+    enabled: bool,
+    stale_hours: float = DEFAULT_MAX_AGE_HOURS,
+    games: int = 200,
+    seed: int = 0,
+    extra_args: str = "",
+    timeout_s: float = _MCTS_BASELINE_CAPTURE_TIMEOUT_S,
+) -> str:
+    """Capture per-machine ``mcts_off_baseline.json`` once at daemon startup.
+
+    Decision matrix:
+
+    * ``enabled=False``                                         -> ``"skipped"``
+    * baseline present and not stale                            -> ``"present"``
+    * baseline missing                                          -> attempt capture
+    * baseline present but ``is_baseline_stale`` is ``True``    -> attempt capture
+
+    The capture shells out to ``python -m tools.capture_mcts_baseline`` with
+    ``--machine-id`` / ``--shared-root`` / ``--games`` / ``--seed`` plus any
+    operator-provided ``extra_args`` (split via :func:`shlex.split`). On
+    success we re-read the freshly written baseline and return
+    ``"captured"`` (was missing) or ``"stale-recaptured"`` (was stale). Any
+    non-zero exit, timeout, or unexpected exception is logged and the
+    function returns ``"failed"`` — never raises into the eval loop.
+    """
+    if not enabled:
+        return "skipped"
+    if not machine_id:
+        print("[fleet_eval_daemon] mcts baseline capture skipped: no machine_id")
+        return "skipped"
+
+    existing = read_baseline(machine_id, shared_root)
+    was_stale = False
+    if existing is not None:
+        if not is_baseline_stale(existing, max_age_hours=stale_hours):
+            return "present"
+        was_stale = True
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "tools.capture_mcts_baseline",
+        "--machine-id",
+        str(machine_id),
+        "--shared-root",
+        str(shared_root),
+        "--games",
+        str(int(games)),
+        "--seed",
+        str(int(seed)),
+    ]
+    if extra_args:
+        try:
+            cmd.extend(shlex.split(extra_args))
+        except ValueError as exc:
+            print(f"[fleet_eval_daemon] mcts baseline capture failed: bad extra-args ({exc})")
+            return "failed"
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_s),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[fleet_eval_daemon] mcts baseline capture failed: timeout after {timeout_s:.0f}s"
+        )
+        return "failed"
+    except OSError as exc:
+        print(f"[fleet_eval_daemon] mcts baseline capture failed: {exc}")
+        return "failed"
+
+    if result.returncode != 0:
+        tail = (result.stderr or "").strip().splitlines()
+        tail_str = " | ".join(tail[-5:]) if tail else "(no stderr)"
+        print(f"[fleet_eval_daemon] mcts baseline capture failed: {tail_str}")
+        return "failed"
+
+    from tools.mcts_baseline import baseline_path  # local import to avoid cycle at module load
+
+    out_path = baseline_path(machine_id, shared_root)
+    print(f"[fleet_eval_daemon] mcts baseline captured -> {out_path}")
+    return "stale-recaptured" if was_stale else "captured"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", type=Path, default=None, help="Repo root (default: parent of scripts/)")
@@ -75,6 +177,44 @@ def main() -> int:
     ap.add_argument("--min-margin", type=float, default=0.05, help="winrate must exceed 0.5 + margin")
     ap.add_argument("--baseline-zip", type=Path, default=None, help="Default: checkpoints/promoted/best.zip then latest.zip")
     ap.add_argument("--one-shot", action="store_true", help="Process at most one new checkpoint then exit")
+    ap.add_argument(
+        "--capture-mcts-baseline-on-start",
+        action="store_true",
+        default=False,
+        help=(
+            "Before the first eval iteration, run tools/capture_mcts_baseline.py "
+            "for this machine if mcts_off_baseline.json is missing or stale. "
+            "Disabled by default; opt in to silence orchestrator "
+            "'mcts_baseline_missing' audit rows without an operator step."
+        ),
+    )
+    ap.add_argument(
+        "--mcts-baseline-stale-hours",
+        type=float,
+        default=DEFAULT_MAX_AGE_HOURS,
+        help=f"Stale window passed to is_baseline_stale; default {DEFAULT_MAX_AGE_HOURS:.0f}h (one week).",
+    )
+    ap.add_argument(
+        "--mcts-baseline-games",
+        type=int,
+        default=200,
+        help="Games forwarded to tools/capture_mcts_baseline.py --games (default 200).",
+    )
+    ap.add_argument(
+        "--mcts-baseline-seed",
+        type=int,
+        default=0,
+        help="Seed forwarded to tools/capture_mcts_baseline.py --seed (default 0).",
+    )
+    ap.add_argument(
+        "--mcts-baseline-extra-args",
+        type=str,
+        default="",
+        help=(
+            "Extra args forwarded verbatim (shlex-split) to "
+            "tools/capture_mcts_baseline.py, e.g. '--map-id 123858 --tier T3'."
+        ),
+    )
     args = ap.parse_args()
 
     repo = Path(args.repo).resolve() if args.repo else REPO_ROOT
@@ -93,6 +233,18 @@ def main() -> int:
     fleet_dir = repo / "fleet" / mid / "eval" if mid else repo / "fleet" / "_anon" / "eval"
     status_path = repo / "fleet" / mid / "status.json" if mid else repo / "fleet" / "_anon" / "status.json"
     bootstrap_fleet_layout(repo, machine_id=mid, role=role)
+
+    if args.capture_mcts_baseline_on_start:
+        status = _maybe_capture_mcts_baseline(
+            machine_id=mid or "",
+            shared_root=Path(shared) if shared else repo,
+            enabled=True,
+            stale_hours=float(args.mcts_baseline_stale_hours),
+            games=int(args.mcts_baseline_games),
+            seed=int(args.mcts_baseline_seed),
+            extra_args=str(args.mcts_baseline_extra_args or ""),
+        )
+        print(f"[fleet_eval_daemon] mcts baseline status: {status}")
 
     backoff = 5.0
     max_backoff = 300.0

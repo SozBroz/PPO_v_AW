@@ -287,6 +287,7 @@ def calculate_damage(
     luck_roll: Optional[int] = None,
     *,
     counter_amp: float = 1.0,
+    luck_rng: Optional[random.Random] = None,
 ) -> Optional[int]:
     """
     Calculate damage dealt by attacker to defender.
@@ -295,6 +296,8 @@ def calculate_damage(
     attacker cannot attack the defender (missing table entry).
 
     luck_roll: explicit 0–9 value for deterministic tests; random if None.
+    luck_rng: when ``luck_roll`` is None and this is set, draw 0–9 from here;
+        otherwise fall back to the process-global ``random`` module (legacy).
     counter_amp: multiplier applied to the raw damage before AWBW rounding.
         Used by ``calculate_counterattack`` to inject Sonja's D2D counter ×1.5
         (https://awbw.amarriner.com/co.php Sonja row, "counterattacks do
@@ -335,7 +338,10 @@ def calculate_damage(
 
     # --- Luck ---
     if luck_roll is None:
-        luck_roll = random.randint(0, 9)
+        if luck_rng is not None:
+            luck_roll = luck_rng.randint(0, 9)
+        else:
+            luck_roll = random.randint(0, 9)
     luck_val = _get_luck(attacker_co.co_id, luck_roll, attacker_co.cop_active, attacker_co.scop_active)
     l_val  = max(0, luck_val)
     lb_val = max(0, -luck_val)
@@ -442,6 +448,8 @@ def calculate_counterattack(
     defender_co: COState,
     attack_damage: int,
     luck_roll: Optional[int] = None,
+    *,
+    luck_rng: Optional[random.Random] = None,
 ) -> Optional[int]:
     """
     Calculate the defender's counterattack against the attacker.
@@ -495,4 +503,5 @@ def calculate_counterattack(
         defender_co, attacker_co,
         luck_roll=luck_roll,
         counter_amp=counter_amp,
+        luck_rng=luck_rng,
     )

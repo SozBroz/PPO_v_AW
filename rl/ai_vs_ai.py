@@ -49,6 +49,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+# Windows: without CREATE_NO_WINDOW + hidden STARTUPINFO + detached stdio, GUI or
+# .NET children can briefly allocate/inherit a console (black ``cmd`` flash).
+_WIN32_CREATE_NO_WINDOW = 0x08000000
+
+
+def _win32_hidden_subprocess_kwargs() -> dict[str, Any]:
+    """Keyword args for ``subprocess.{run,Popen}`` so children do not open a console."""
+    if sys.platform != "win32":
+        return {}
+    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", _WIN32_CREATE_NO_WINDOW))
+    out: dict[str, Any] = {"creationflags": flags}
+    if hasattr(subprocess, "STARTUPINFO"):
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0x1)
+        si.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        out["startupinfo"] = si
+    return out
+
 # ---------------------------------------------------------------------------
 # Ensure repo root is on sys.path so we can import engine/rl modules
 # ---------------------------------------------------------------------------
@@ -84,22 +102,42 @@ def _log(msg: str) -> None:
     print(f"[ai_vs_ai] {ts} | {msg}", flush=True)
 
 
+def _is_ai_vs_ai_script_argv_token(arg: str) -> bool:
+    """True if *arg* is a path to this file (direct ``python path/to/ai_vs_ai.py``)."""
+    base = arg.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    return base == "ai_vs_ai.py"
+
+
 def _argv_for_this_module() -> list[str]:
-    """Arguments after ``python -m rl.ai_vs_ai`` or ``python .../ai_vs_ai.py``."""
+    """Arguments meant for :mod:`rl.ai_vs_ai` after the interpreter / launcher tokens.
+
+    Must not pass ``ai_vs_ai.py`` through to :mod:`argparse` (unrecognized argument),
+    which previously aborted the run before export — especially with
+    ``python -u …/ai_vs_ai.py …`` where the old logic left the script path in *user*.
+    """
     a = sys.argv[1:]
-    # Walk for ``-m <module>`` so this works with ``-X`` / ``-3`` / ``-E`` and other
-    # CPython preflags (the old head-only check missed flags when ``-m`` was not argv[1]).
-    for i, arg in enumerate(a):
-        if arg == "-m" and i + 1 < len(a):
-            return a[i + 2 :]
     if not a:
         return []
     if a[0] == "-c":
         return []
+
+    for i, arg in enumerate(a):
+        if arg == "-m" and i + 1 < len(a):
+            return a[i + 2 :]
+
+    for i, arg in enumerate(a):
+        if _is_ai_vs_ai_script_argv_token(arg):
+            return a[i + 1 :]
+
     if not a[0].startswith("-"):
         return a[1:]
-    if a:
-        return a[1:]
+
+    i = 0
+    while i < len(a) and a[i].startswith("-") and a[i] not in ("-", "--"):
+        i += 1
+    if i < len(a) and _is_ai_vs_ai_script_argv_token(a[i]):
+        return a[i + 1 :]
+
     return []
 
 
@@ -125,6 +163,29 @@ def _list_train_py_argv_processes() -> list[tuple[int, list[str]]]:
     me = os.getpid()
     out: list[tuple[int, list[str]]] = []
     if sys.platform == "win32":
+        # Prefer psutil: no PowerShell subprocess, so no extra console window and
+        # all logging stays in the shell that launched ai_vs_ai.
+        try:
+            import psutil
+        except ImportError:
+            psutil = None  # type: ignore[assignment]
+        if psutil is not None:
+            for proc in psutil.process_iter(["pid", "cmdline"]):
+                try:
+                    info = proc.info
+                    pid = info.get("pid")
+                    if pid is None or pid == me:
+                        continue
+                    parts = info.get("cmdline")
+                    if not parts:
+                        continue
+                    if not _argv_contains_train_py(parts):
+                        continue
+                    out.append((pid, list(parts)))
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            return out
+
         ps_cmd = (
             "Get-CimInstance Win32_Process | Where-Object { "
             "$_.CommandLine -and ($_.CommandLine -match 'train\\.py') "
@@ -140,6 +201,8 @@ def _list_train_py_argv_processes() -> list[tuple[int, list[str]]]:
                 timeout=45,
                 encoding="utf-8",
                 errors="replace",
+                stdin=subprocess.DEVNULL,
+                **_win32_hidden_subprocess_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             _log(f"follow-train: PowerShell process scan failed: {exc}")
@@ -358,11 +421,15 @@ def _open_replay_in_desktop_viewer(replay_zip: Path) -> None:
         _open_replay_output_folder(replay_zip)
         return
     try:
-        subprocess.Popen(
-            [str(exe), str(zp)],
+        popen_kw: dict[str, Any] = dict(
             cwd=str(exe.parent),
             close_fds=sys.platform != "win32",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
+        popen_kw.update(_win32_hidden_subprocess_kwargs())
+        subprocess.Popen([str(exe), str(zp)], **popen_kw)
         _log(f"viewer: AWBW Replay Player - {exe.name} loaded {zp}")
     except OSError as exc:
         _log(f"viewer: could not start {exe}: {exc}")
@@ -400,7 +467,16 @@ def _open_replay_output_folder(replay_zip: Path) -> None:
     )
     try:
         if sys.platform == "win32":
-            os.startfile(str(folder))
+            # ``os.startfile`` can route through a visible console on some setups;
+            # ``explorer.exe`` with hidden creation flags keeps I/O in this terminal only.
+            subprocess.Popen(
+                ["explorer.exe", str(folder)],
+                close_fds=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **_win32_hidden_subprocess_kwargs(),
+            )
         elif sys.platform == "darwin":
             subprocess.run(["open", str(folder)], check=False)
         else:
@@ -572,7 +648,9 @@ def run_game(
 
     # ---- Initial state ----
     _log("engine: building initial GameState")
-    state = make_initial_state(map_data, co0, co1, starting_funds=0, tier_name=tier)
+    state = make_initial_state(
+        map_data, co0, co1, starting_funds=0, tier_name=tier, luck_seed=seed
+    )
     _log(
         f"engine: ready  active_player=P{state.active_player}  day={state.turn}  "
         f"done={state.done}"
@@ -694,6 +772,7 @@ def run_game(
             co1=co1,
             tier=tier,
             map_name=map_data.name,
+            luck_seed=seed,
         )
         if open_viewer:
             pz = Path(out_dir) / f"{gid}.partial.zip"
@@ -742,6 +821,8 @@ def run_game(
         "full_trace": full_trace_copy,
         "game_log": list(state.game_log),
     }
+    if seed is not None:
+        trace_record["luck_seed"] = int(seed)
 
     export_error: list[BaseException | None] = [None]
 
@@ -762,6 +843,7 @@ def run_game(
                 game_name=game_name,
                 start_date=start_date_str,
                 full_trace=full_trace_copy,
+                luck_seed=seed,
             )
             _log(f"export: zip + p: stream done in {time.monotonic() - t_zip:.1f}s -> {out_path}")
             trace_path = out_path.with_suffix(".trace.json")
@@ -886,6 +968,7 @@ def _dump_partial_replay_on_failure(
     co1: int,
     tier: str,
     map_name: str,
+    luck_seed: Optional[int] = None,
 ) -> None:
     """Best-effort dump of an in-flight game that crashed mid-loop.
 
@@ -941,6 +1024,8 @@ def _dump_partial_replay_on_failure(
         "error":                str(exc),
         "diagnostics":          diagnostics,
     }
+    if luck_seed is not None:
+        record["luck_seed"] = int(luck_seed)
 
     try:
         _write_trace_record(record, trace_path)
@@ -965,6 +1050,7 @@ def _dump_partial_replay_on_failure(
             game_name=partial_game_name,
             start_date=start_date_str,
             full_trace=full_trace_copy,
+            luck_seed=luck_seed,
         )
         _log(f"partial: replay zip (with p: stream) -> {zip_path.resolve()}")
     except Exception as zip_exc:

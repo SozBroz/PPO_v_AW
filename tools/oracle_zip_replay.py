@@ -7587,6 +7587,7 @@ def replay_oracle_zip(
     co0: int,
     co1: int,
     tier_name: str,
+    luck_seed: Optional[int] = None,
     on_skip: Optional[Callable[[str], None]] = None,
     before_engine_step: EngineStepHook = None,
 ) -> OracleReplayResult:
@@ -7609,6 +7610,7 @@ def replay_oracle_zip(
         starting_funds=0,
         tier_name=tier_name,
         replay_first_mover=first_mover,
+        luck_seed=luck_seed,
     )
     n_act = 0
     for env_i, (_pid, _day, actions) in enumerate(envs):

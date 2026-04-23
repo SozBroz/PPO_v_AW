@@ -25,9 +25,10 @@ Emits these action types, compatible with the viewer's ReplayActionDatabase:
   * Move   — every WAIT (move+wait).
 
 For CAPTURE / LOAD, we emit only the Move sub-action: the unit visibly
-walks to the capture/load tile. The Capt/Load wrappers are **not** emitted,
-so the viewer won't animate those side-effects, but the next turn snapshot
-will sync state correctly.
+walks to the capture/load tile. The Capt/Load wrappers are **not** emitted.
+
+For CAPTURE, we emit **Capt** with nested **Move** (not a bare Move+WAIT), or the
+oracle never applies capture ticks and later **Build** actions see neutral tiles.
 
 For ATTACK, we emit a full `Fire` envelope whose nested `Move` shows the
 attacker **pre-combat** (full HP/ammo walking to the firing tile), and
@@ -49,7 +50,11 @@ Strategy
 1. Rebuild the GameState deterministically by replaying `state.full_trace`.
 2. On each atomic action, inspect the live state before/after and emit the
    appropriate JSON; group by (active_player_id, day).
-3. Write the gzipped stream into the existing replay zip as entry
+3. ``Move.paths.global`` uses :func:`engine.action.reconstruct_shortest_move_path`
+   (same BFS as movement) so oracle replay and the C# viewer see a path whose
+   tail matches the committed ``move_pos`` (Manhattan-only polylines are not
+   generally walkable hex-by-hex in-engine).
+4. Write the gzipped stream into the existing replay zip as entry
    `a<game_id>` so `AWBWJsonReplayParser.ParseReplayZip` picks it up and
    sets `ReplayVersion = 2`.
 
@@ -71,7 +76,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from engine.action import Action, ActionStage, ActionType
+from engine.action import Action, ActionStage, ActionType, reconstruct_shortest_move_path
 from engine.game import GameState, IllegalActionError, make_initial_state
 from engine.map_loader import MapData, load_map
 from engine.unit import Unit, UnitType, UNIT_STATS
@@ -181,26 +186,33 @@ def _wrap_per_player(obj: dict[str, Any], p0_id: int, p1_id: int) -> dict[str, A
     }
 
 
-def _manhattan_path(
+def _manhattan_path_cells(
     start: tuple[int, int],
-    end:   tuple[int, int],
-) -> list[dict[str, Any]]:
-    """Produce a simple L-shaped (Manhattan) path of `unit_visible=true` steps.
-
-    Full AWBW paths are Dijkstra-traced from the engine, but for the viewer's
-    animation a monotonic Manhattan path from start→end suffices. Length is
-    |dx| + |dy| + 1 (inclusive of both endpoints)."""
+    end: tuple[int, int],
+) -> list[tuple[int, int]]:
+    """L-shaped polyline (row, col); fallback when engine path reconstruction fails."""
     sr, sc = start
     er, ec = end
-    path: list[dict[str, Any]] = [{"x": sc, "y": sr, "unit_visible": True}]
+    out: list[tuple[int, int]] = [(sr, sc)]
     r, c = sr, sc
     while c != ec:
         c += 1 if ec > c else -1
-        path.append({"x": c, "y": r, "unit_visible": True})
+        out.append((r, c))
     while r != er:
         r += 1 if er > r else -1
-        path.append({"x": c, "y": r, "unit_visible": True})
-    return path
+        out.append((r, c))
+    return out
+
+
+def _manhattan_path(
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> list[dict[str, Any]]:
+    """Fallback viewer path when :func:`reconstruct_shortest_move_path` is unavailable."""
+    return [
+        {"x": c, "y": r, "unit_visible": True}
+        for r, c in _manhattan_path_cells(start, end)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +241,16 @@ def _move_action_json(
     p0_id: int,
     p1_id: int,
     trapped: bool = False,
+    *,
+    path_cells: Optional[list[tuple[int, int]]] = None,
 ) -> dict[str, Any]:
     unit_json = _unit_to_json(moved_unit, player_id)
-    path = _manhattan_path(path_start, path_end)
+    cells = (
+        path_cells
+        if path_cells is not None
+        else _manhattan_path_cells(path_start, path_end)
+    )
+    path = [{"x": c, "y": r, "unit_visible": True} for r, c in cells]
     return {
         "action":  "Move",
         "unit":    _wrap_per_player(unit_json, p0_id, p1_id),
@@ -507,9 +526,11 @@ def _emit_move_or_fire(
     if moving_unit is not None:
         attacker_pre = copy.copy(moving_unit)
     if atype == ActionType.ATTACK and action.target_pos is not None:
-        defender_pre = state.get_unit_at_oracle_id(
-            action.target_pos[0], action.target_pos[1], action.select_unit_id
-        )
+        # ``select_unit_id`` in ``full_trace`` pins the *attacker* on stacked
+        # tiles, not the defender. Using it here can pick the wrong unit at
+        # ``target_pos`` (or miss), corrupting ``Fire`` JSON and crashing the
+        # AWBW Replay Player on step.
+        defender_pre = state.get_unit_at(*action.target_pos)
         # Track whether this is a seam strike (empty tile w/ terrain 113/114).
         # The post-step terrain flip decides the AttackSeam envelope shape.
         if defender_pre is None:
@@ -520,6 +541,14 @@ def _emit_move_or_fire(
         repaired_pre = state.get_unit_at_oracle_id(
             action.target_pos[0], action.target_pos[1], action.select_unit_id
         )
+
+    path_cells: Optional[list[tuple[int, int]]] = None
+    if moving_unit is not None and start is not None and end is not None:
+        path_cells = reconstruct_shortest_move_path(state, moving_unit, end)
+        if path_cells is None:
+            path_cells = _manhattan_path_cells(start, end)
+
+    capt_building_info: Optional[dict[str, Any]] = None
 
     step_failed = False
     try:
@@ -548,6 +577,33 @@ def _emit_move_or_fire(
             state._move_unit_forced(moving_unit, end)
             state._finish_action(moving_unit)
 
+    # ``Capt.buildingInfo`` must satisfy ``ReplayActionHelper.ParseJObjectIntoReplayBuilding``
+    # (desktop viewer): ``buildings_team`` and ``terrain_id`` are required — a partial
+    # dict previously crashed parsing with ``ArgumentNullException`` on ``buildings_team``.
+    if (
+        atype == ActionType.CAPTURE
+        and not step_failed
+        and end is not None
+        and moving_unit is not None
+    ):
+        er, ec = int(end[0]), int(end[1])
+        prop_after = state.get_property_at(er, ec)
+        if prop_after is not None:
+            ow = prop_after.owner
+            if ow is not None:
+                awbw_owner_pid = int(pid_of[int(ow)])
+            else:
+                awbw_owner_pid = int(pid_of[int(moving_unit.player)])
+            capt_building_info = {
+                "buildings_id": 1_000_000_000 + er * 10_000 + ec,
+                "terrain_id": int(prop_after.terrain_id),
+                "buildings_capture": int(prop_after.capture_points),
+                "buildings_x": ec,
+                "buildings_y": er,
+                "buildings_team": str(awbw_owner_pid),
+                "buildings_players_id": awbw_owner_pid,
+            }
+
     if moving_unit is None or end is None:
         return None
 
@@ -559,8 +615,13 @@ def _emit_move_or_fire(
     move_unit_snapshot.pos = end
     move_unit_snapshot.moved = True
     move_sub = _move_action_json(
-        move_unit_snapshot, start, end,
-        pid_of[moving_unit.player], p0_id, p1_id,
+        move_unit_snapshot,
+        start,
+        end,
+        pid_of[moving_unit.player],
+        p0_id,
+        p1_id,
+        path_cells=path_cells,
     )
 
     # --- REPAIR: emit Repair envelope wrapping the boat's Move ---
@@ -598,6 +659,18 @@ def _emit_move_or_fire(
             p1_id=p1_id,
         )
 
+    if (
+        atype == ActionType.CAPTURE
+        and not step_failed
+        and capt_building_info is not None
+    ):
+        return {
+            "action": "Capt",
+            "Move": move_sub,
+            "Capt": {"buildingInfo": capt_building_info},
+            "discovered": {str(p0_id): None, str(p1_id): None},
+        }
+
     if atype != ActionType.ATTACK or defender_pre is None or step_failed:
         return move_sub
 
@@ -632,9 +705,12 @@ def _rebuild_and_emit(
     tier_name: str = "T2",
     p0_id: int = P0_PLAYER_ID,
     p1_id: int = P1_PLAYER_ID,
+    luck_seed: Optional[int] = None,
 ) -> list[_TurnBucket]:
     """Replay `full_trace` against a fresh GameState and collect per-turn envelopes."""
-    state = make_initial_state(map_data, co0, co1, starting_funds=0, tier_name=tier_name)
+    state = make_initial_state(
+        map_data, co0, co1, starting_funds=0, tier_name=tier_name, luck_seed=luck_seed
+    )
     pid_of = {0: p0_id, 1: p1_id}
 
     buckets: list[_TurnBucket] = []
@@ -682,6 +758,13 @@ def _rebuild_and_emit(
                 current.actions.append(payload)
             continue
 
+        if atype == ActionType.UNLOAD:
+            try:
+                state.step(action, oracle_mode=True)
+            except Exception:
+                pass
+            continue
+
         if atype == ActionType.END_TURN:
             state.step(action, oracle_mode=True)
             next_player = state.active_player
@@ -717,6 +800,7 @@ def _rebuild_and_emit_with_snapshots(
     tier_name: str = "T2",
     p0_id: int = P0_PLAYER_ID,
     p1_id: int = P1_PLAYER_ID,
+    luck_seed: Optional[int] = None,
 ) -> tuple[list[GameState], list[_TurnBucket]]:
     """Single-pass variant that returns both turn-start snapshots and buckets.
 
@@ -731,7 +815,9 @@ def _rebuild_and_emit_with_snapshots(
     Snapshots are taken at the start of every player-turn and once more at
     the final state.
     """
-    state = make_initial_state(map_data, co0, co1, starting_funds=0, tier_name=tier_name)
+    state = make_initial_state(
+        map_data, co0, co1, starting_funds=0, tier_name=tier_name, luck_seed=luck_seed
+    )
     pid_of = {0: p0_id, 1: p1_id}
 
     snapshots: list[GameState] = [copy.deepcopy(state)]
@@ -774,6 +860,13 @@ def _rebuild_and_emit_with_snapshots(
             payload = _emit_move_or_fire(state, action, pid_of, p0_id, p1_id)
             if payload is not None:
                 current.actions.append(payload)
+            continue
+
+        if atype == ActionType.UNLOAD:
+            try:
+                state.step(action, oracle_mode=True)
+            except Exception:
+                pass
             continue
 
         if atype == ActionType.END_TURN:
@@ -865,10 +958,11 @@ def build_action_stream_text(
     tier_name: str = "T2",
     p0_id: int = P0_PLAYER_ID,
     p1_id: int = P1_PLAYER_ID,
+    luck_seed: Optional[int] = None,
 ) -> str:
     """Full `p:` stream as a single newline-separated string."""
     buckets = _rebuild_and_emit(
-        full_trace, map_data, co0, co1, tier_name, p0_id, p1_id,
+        full_trace, map_data, co0, co1, tier_name, p0_id, p1_id, luck_seed,
     )
     lines = [
         _envelope_player_turn(b.player_id, b.day, b.turn_number, b.actions)
@@ -891,6 +985,7 @@ def append_action_stream_to_zip(
     tier_name: str = "T2",
     p0_id: int = P0_PLAYER_ID,
     p1_id: int = P1_PLAYER_ID,
+    luck_seed: Optional[int] = None,
 ) -> Path:
     """Open `replay_zip` and add/overwrite the `a<game_id>` action-stream entry.
 
@@ -902,7 +997,7 @@ def append_action_stream_to_zip(
         raise FileNotFoundError(f"Replay zip not found: {replay_zip}")
 
     text = build_action_stream_text(
-        full_trace, map_data, co0, co1, tier_name, p0_id, p1_id,
+        full_trace, map_data, co0, co1, tier_name, p0_id, p1_id, luck_seed,
     )
     if not text:
         # Nothing to emit — likely an empty trace. Leave the zip untouched.

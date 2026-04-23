@@ -54,6 +54,7 @@ def _orch(tmp_path: Path, *, pools: list[str], **kw: object) -> object:
         "state_file": tmp_path / "state.json",
         "eval_timeout_seconds": 1800.0,
         "eval_seed": 0,
+        "mcts_health_refresh_every_ticks": 0,
     }
     defaults.update(kw)
     return FleetOrchestrator(**defaults)  # type: ignore[misc]

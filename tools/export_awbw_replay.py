@@ -122,7 +122,9 @@ _AWBW_UNIT_NAMES: dict[UnitType, str] = {
     UnitType.ARTILLERY:  "Artillery",
     UnitType.ROCKET:     "Rockets",
     UnitType.ANTI_AIR:   "Anti-Air",
-    UnitType.MISSILES:   "Missile",
+    # AWBW PHP / damage.php row is "Missiles" (plural). "Missile" breaks some
+    # desktop viewer lookups and drifts from site-pulled replays.
+    UnitType.MISSILES:   "Missiles",
     UnitType.FIGHTER:    "Fighter",
     UnitType.BOMBER:     "Bomber",
     UnitType.STEALTH:    "Stealth",
@@ -654,6 +656,7 @@ def write_awbw_replay(
     game_name: str = "AI vs AI",
     start_date: str = "2026-01-01 00:00:00",
     full_trace: Optional[list[dict]] = None,
+    luck_seed: Optional[int] = None,
 ) -> Path:
     """
     Serialize a list of turn-start GameState snapshots into an AWBW Replay Player
@@ -670,6 +673,11 @@ def write_awbw_replay(
     ``units_id`` values stay aligned (matching ``write_awbw_replay_from_trace``).
     The first element of *snapshots* is still used for map/CO/tier metadata.
     Passing `full_trace=None` keeps the legacy single-entry zip from *snapshots*.
+
+    When ``full_trace`` is set, pass ``luck_seed`` if the producing game used
+    :func:`engine.game.make_initial_state` with the same seed so combat luck
+    during the trace replay matches the live match (PHP snapshots and ``p:``
+    envelopes stay consistent).
 
     Returns the resolved output path.
     """
@@ -695,6 +703,7 @@ def write_awbw_replay(
             tier_name=first.tier_name,
             p0_id=P0_PLAYER_ID,
             p1_id=P1_PLAYER_ID,
+            luck_seed=luck_seed,
         )
     else:
         snapshots_for_zip = snapshots
@@ -812,6 +821,7 @@ def write_awbw_replay_from_trace(
 
     map_data = load_map(map_id, Path(map_pool_path), Path(maps_dir))
 
+    _ls = trace_record.get("luck_seed")
     snapshots, buckets = _rebuild_and_emit_with_snapshots(
         full_trace=full_trace,
         map_data=map_data,
@@ -820,6 +830,7 @@ def write_awbw_replay_from_trace(
         tier_name=tier,
         p0_id=P0_PLAYER_ID,
         p1_id=P1_PLAYER_ID,
+        luck_seed=int(_ls) if _ls is not None else None,
     )
 
     action_text = build_action_stream_text_from_buckets(buckets)

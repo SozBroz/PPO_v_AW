@@ -20,6 +20,7 @@ Training loop
 from __future__ import annotations
 
 import atexit
+import gc
 import json
 import os
 import random
@@ -35,6 +36,7 @@ from engine.unit import UnitType
 
 from rl.env import SESSION_GAME_COUNTER_DB_ENV
 from rl.paths import GAME_LOG_PATH, LOGS_DIR
+from rl.train_reconfig_log import append_train_reconfig_line
 
 WATCH_LOG_PATH = LOGS_DIR / "watch_log.jsonl"
 FPS_DIAG_PATH = LOGS_DIR / "fps_diag.jsonl"
@@ -279,7 +281,7 @@ def pick_capture_greedy_flat(state: GameState, mask: np.ndarray) -> int:
     return int(random.choice(best))
 
 
-_VALID_COLD_OPPONENTS = ("random", "greedy_capture", "end_turn")
+_VALID_COLD_OPPONENTS = ("random", "greedy_capture", "greedy_mix", "end_turn")
 
 
 def _passive_cold_action(state: GameState, mask: np.ndarray) -> int | None:
@@ -354,6 +356,9 @@ class _CheckpointOpponent:
     - ``"greedy_capture"``: pre-fix legacy default; uses
       :func:`pick_capture_greedy_flat`. Strong, asymmetric — manufactures
       a property-skew gradient if the learner has no matching teacher.
+    - ``"greedy_mix"``: each microstep, 50% capture-greedy / 50% uniform
+      random legal — curriculum stage_b+ ``--cold-opponent``; softens pure
+      teacher without going fully random.
     - ``"end_turn"``: punching-bag opponent; picks END_TURN whenever
       legal so P0 has the entire map to itself. Used for the smoke gate
       in plan p0-capture-architecture-fix.
@@ -486,6 +491,14 @@ class _CheckpointOpponent:
             st: GameState | None = getattr(env, "state", None) if env is not None else None
             if st is not None:
                 return pick_capture_greedy_flat(st, mask)
+            legal = np.where(mask)[0]
+            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+        if self._cold_opponent == "greedy_mix":
+            if random.random() < 0.5:
+                env = self._env_ref() if self._env_ref is not None else None
+                st = getattr(env, "state", None) if env is not None else None
+                if st is not None:
+                    return pick_capture_greedy_flat(st, mask)
             legal = np.where(mask)[0]
             return int(np.random.choice(legal)) if len(legal) > 0 else 0
         # default: random legal action
@@ -1235,9 +1248,9 @@ class SelfPlayTrainer:
     def _maybe_handle_rollout_boundary(
         self,
         model: Any,
-        _vec_env: Any,
+        vec_env: Any,
         steps_done: int,
-    ) -> None:
+    ) -> tuple[Any, Any]:
         """Phase 10c + 10d: between-rollout fleet hooks.
 
         Safe to call unconditionally — does nothing when both features are
@@ -1247,6 +1260,9 @@ class SelfPlayTrainer:
         Opponent pool refresh uses ``model.env`` (the SB3 :class:`VecEnv`),
         not the pre-wrap ``_vec_env`` — when ``n_envs==1`` the local ref is
         a raw :class:`gymnasium.Wrapper` without ``env_method``.
+
+        Returns ``(model, vec_env)`` so in-process reconfig can swap the
+        learner and the vectorized environment.
         """
         self._rollout_index += 1
 
@@ -1268,6 +1284,8 @@ class SelfPlayTrainer:
 
         if self.hot_reload_enabled and self.fleet_cfg is not None:
             self._maybe_apply_reload_request(model, steps_done)
+
+        return self._maybe_apply_train_reconfig_request(model, vec_env, steps_done)
 
     def _maybe_apply_reload_request(self, model: Any, steps_done: int) -> None:
         """Phase 10d: check for and apply a fleet reload request.
@@ -1339,6 +1357,183 @@ class SelfPlayTrainer:
             os.replace(str(request_path), str(ack_path))
         except OSError as exc:
             print(f"[hot-reload] Ack rename failed (non-fatal): {exc}")
+
+    def _maybe_apply_train_reconfig_request(
+        self, model: Any, vec_env: Any, steps_done: int
+    ) -> tuple[Any, Any]:
+        """In-process PPO/VecEnv geometry swap (``train_reconfig_request.json``)."""
+        cfg = self.fleet_cfg
+        if cfg is None or not getattr(cfg, "shared_root", None):
+            return model, vec_env
+        machine_id = (
+            cfg.machine_id
+            if getattr(cfg, "machine_id", None)
+            else os.environ.get("AWBW_MACHINE_ID")
+        )
+        if not machine_id:
+            return model, vec_env
+
+        fleet_dir = Path(cfg.shared_root) / "fleet" / str(machine_id)
+        request_path = fleet_dir / "train_reconfig_request.json"
+        if not request_path.is_file():
+            return model, vec_env
+
+        t0 = time.time()
+        try:
+            with open(request_path, encoding="utf-8") as f:
+                req = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[train_reconfig] Could not read {request_path}: {exc}")
+            return model, vec_env
+
+        if not isinstance(req, dict):
+            return model, vec_env
+        request_id = str(req.get("request_id", "") or "")
+
+        def _fail(msg: str) -> tuple[Any, Any]:
+            print(f"[train_reconfig] Failed: {msg}")
+            failed = fleet_dir / f"train_reconfig_request.failed.{int(time.time())}.json"
+            try:
+                payload = {
+                    "request_id": request_id,
+                    "error": msg,
+                    "steps_done": steps_done,
+                }
+                failed.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                try:
+                    request_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            except OSError as exc2:
+                print(f"[train_reconfig] failed ack write: {exc2}")
+            try:
+                append_train_reconfig_line(
+                    Path(cfg.shared_root),
+                    {
+                        "event": "soft_reconfig",
+                        "source": "trainer",
+                        "machine_id": str(machine_id),
+                        "request_id": request_id,
+                        "outcome": "failed",
+                        "message": msg,
+                    },
+                )
+            except OSError:
+                pass
+            return model, vec_env
+
+        raw = req.get("args")
+        if not isinstance(raw, dict):
+            return _fail("args must be a dict")
+
+        def _pi(key: str) -> int:
+            v = raw.get(key)
+            if v is None:
+                raise KeyError(key)
+            return int(v)
+
+        try:
+            if "--n-envs" in raw:
+                self.n_envs = _pi("--n-envs")
+            if "--n-steps" in raw:
+                self.n_steps = _pi("--n-steps")
+            if "--batch-size" in raw:
+                self.batch_size = _pi("--batch-size")
+        except (KeyError, TypeError, ValueError) as exc:
+            return _fail(f"int parse: {exc}")
+
+        n_e, n_s, b_s = self.n_envs, self.n_steps, self.batch_size
+        if n_e < 1 or n_s < 1 or b_s < 1:
+            return _fail("n_envs, n_steps, batch_size must be positive")
+        if b_s > n_s * n_e:
+            return _fail(f"batch_size {b_s} > n_steps*n_envs ({n_s * n_e})")
+
+        from rl.ckpt_compat import load_maskable_ppo_compat
+
+        new_vec = self._build_vec_env()
+        try:
+            if new_vec.observation_space != vec_env.observation_space:
+                new_vec.close()
+                return _fail("observation_space mismatch after reconfig (hard restart required)")
+        except Exception as exc:  # noqa: BLE001
+            try:
+                new_vec.close()
+            except OSError:
+                pass
+            return _fail(f"obs check: {exc}")
+
+        _fd, _tp = tempfile.mkstemp(suffix=".zip", prefix="awbw_reconfig_")
+        os.close(_fd)
+        tmp_path = Path(_tp)
+        try:
+            model.save(str(tmp_path))
+        except Exception as exc:  # noqa: BLE001
+            new_vec.close()
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return _fail(f"model.save: {exc}")
+
+        try:
+            new_model = load_maskable_ppo_compat(
+                tmp_path,
+                env=new_vec,
+                device=self.device,
+                custom_objects={"n_steps": n_s, "batch_size": b_s},
+            )
+            new_model.tensorboard_log = str(LOGS_DIR)
+        except Exception as exc:  # noqa: BLE001
+            new_vec.close()
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return _fail(f"load: {exc}")
+
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        try:
+            vec_env.close()
+        except OSError as exc:
+            print(f"[train_reconfig] old vec_env.close: {exc}")
+
+        del model
+        gc.collect()
+
+        ts = int(time.time())
+        ack_path = fleet_dir / f"train_reconfig_request.applied.{ts}.json"
+        try:
+            ack_body = {**req, "ack_at": ts, "steps_done": steps_done}
+            ack_path.write_text(json.dumps(ack_body, indent=2), encoding="utf-8")
+            request_path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"[train_reconfig] applied ack rename: {exc}")
+
+        dt_ms = int((time.time() - t0) * 1000)
+        print(
+            f"[train_reconfig] Applied request_id={request_id} "
+            f"n_envs={n_e} n_steps={n_s} batch_size={b_s} ({dt_ms}ms)"
+        )
+        try:
+            append_train_reconfig_line(
+                Path(cfg.shared_root),
+                {
+                    "event": "soft_reconfig",
+                    "source": "trainer",
+                    "machine_id": str(machine_id),
+                    "request_id": request_id,
+                    "outcome": "applied",
+                    "soft_reconfig_ms": dt_ms,
+                    "steps_done": steps_done,
+                },
+            )
+        except OSError:
+            pass
+        return new_model, new_vec
 
     # ── Main training loop ────────────────────────────────────────────────────
 
@@ -1557,7 +1752,9 @@ class SelfPlayTrainer:
 
                     self._write_trainer_status(steps_done=steps_done, rate=rate)
 
-                    self._maybe_handle_rollout_boundary(model, vec_env, steps_done)
+                    model, vec_env = self._maybe_handle_rollout_boundary(
+                        model, vec_env, steps_done
+                    )
 
                     if self.checkpoint_curate:
                         summary = prune_checkpoint_zip_curated(

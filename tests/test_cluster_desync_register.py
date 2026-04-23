@@ -1,6 +1,9 @@
 """Regression tests for ``desync_subtype`` prefix routing (`tools/cluster_desync_register.py`)."""
 
-from tools.cluster_desync_register import desync_subtype
+import json
+from pathlib import Path
+
+from tools.cluster_desync_register import cluster, desync_subtype, load_jsonl
 
 
 def test_oracle_gap_build_supply_power_buckets():
@@ -94,3 +97,56 @@ def test_unsupported_kind_stable():
         )
         == "oracle_unsupported_kind"
     )
+
+
+def test_desync_subtype_tolerates_schema_v2_fields():
+    """Phase 11d schema_version 2 added ``machine_id`` / ``recorded_at`` /
+    ``schema_version``. ``desync_subtype`` only reads ``class`` + ``message``
+    via ``row.get`` so the new keys must be transparent."""
+    row = {
+        "schema_version": 2,
+        "machine_id": "pc-b",
+        "recorded_at": "2026-04-23T12:00:00Z",
+        "class": "engine_bug",
+        "message": "AssertionError boom",
+        "games_id": 7,
+    }
+    assert desync_subtype(row) == "engine_other"
+
+
+def test_cluster_handles_mixed_legacy_and_v2_rows(tmp_path: Path) -> None:
+    """``cluster`` indexes by ``games_id`` and routes via ``class``/``message``;
+    rows missing the new attribution fields must coexist with ones that
+    have them, both in-memory and via ``load_jsonl``."""
+    reg = tmp_path / "mixed.jsonl"
+    rows = [
+        # legacy (no schema_version, no machine_id, no recorded_at)
+        {"games_id": 100, "class": "ok"},
+        # v2 row
+        {
+            "games_id": 200,
+            "schema_version": 2,
+            "machine_id": "pc-b",
+            "recorded_at": "2026-04-23T12:00:00Z",
+            "class": "engine_bug",
+            "message": "kaboom",
+        },
+        # v2 row, different machine
+        {
+            "games_id": 300,
+            "schema_version": 2,
+            "machine_id": "pc-c",
+            "recorded_at": "2026-04-23T12:01:00Z",
+            "class": "oracle_gap",
+            "message": "Build no-op",
+        },
+    ]
+    reg.write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+    loaded = load_jsonl(reg)
+    assert len(loaded) == 3
+    clusters = cluster(loaded)
+    assert clusters["ok"] == [100]
+    assert clusters["engine_other"] == [200]
+    assert clusters["oracle_build"] == [300]

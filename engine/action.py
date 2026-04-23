@@ -341,6 +341,124 @@ def compute_reachable_costs(
     return result
 
 
+def reconstruct_shortest_move_path(
+    state: GameState,
+    unit: Unit,
+    destination: tuple[int, int],
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
+) -> Optional[list[tuple[int, int]]]:
+    """Return one shortest MP path (tile centers) from ``unit.pos`` to ``destination``.
+
+    Uses the same BFS costs, neighbour order, fuel cap, CO bonuses, and
+    stop-tile filter as :func:`compute_reachable_costs` so replay export can
+    emit ``paths.global`` that :func:`tools.oracle_zip_replay._nearest_reachable_along_path`
+    walks consistently (Manhattan-only polylines are not engine-reachable).
+
+    ``None`` when ``destination`` is not a legal stop hex for ``unit`` in
+    ``state`` (same condition as :meth:`engine.game.GameState._move_unit`).
+    """
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
+
+    stats = UNIT_STATS[unit.unit_type]
+    move_range = stats.move_range
+    co = state.co_states[unit.player]
+
+    if co.co_id == 11:
+        move_range += 1
+        if co.cop_active:
+            move_range += 1
+        if co.scop_active:
+            move_range += 2
+
+    if co.co_id == 8:
+        if stats.unit_class == "infantry":
+            if co.scop_active:
+                move_range += 2
+            elif co.cop_active:
+                move_range += 1
+
+    if co.co_id == 20 and co.scop_active:
+        if stats.unit_class in ("infantry", "mech", "vehicle", "pipe"):
+            move_range += 3
+
+    if co.co_id == 14 and (co.cop_active or co.scop_active):
+        if stats.unit_class == "vehicle":
+            move_range += 2
+
+    if co.co_id == 1 and co.scop_active:
+        move_range += 1
+
+    if co.co_id == 21 and co.cop_active:
+        move_range += 1
+
+    move_range = min(move_range, unit.fuel)
+
+    start = unit.pos
+    if start == destination:
+        return [start]
+
+    visited: dict[tuple[int, int], int] = {start: 0}
+    prev: dict[tuple[int, int], tuple[int, int]] = {}
+    queue: collections.deque[tuple[tuple[int, int], int]] = collections.deque([(start, 0)])
+    _cost_cache: dict[int, int] = {}
+
+    while queue:
+        (r, c), fuel_used = queue.popleft()
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < state.map_data.height and 0 <= nc < state.map_data.width):
+                continue
+            tid = state.map_data.terrain[nr][nc]
+            cost = _cost_cache.get(tid)
+            if cost is None:
+                cost = effective_move_cost(state, unit, tid)
+                _cost_cache[tid] = cost
+            if cost >= INF_PASSABLE:
+                continue
+            new_fuel = fuel_used + cost
+            if new_fuel > move_range:
+                continue
+
+            occupant = occupancy.get((nr, nc))
+            if occupant is not None and occupant.player != unit.player:
+                continue
+
+            if (nr, nc) not in visited or visited[(nr, nc)] > new_fuel:
+                visited[(nr, nc)] = new_fuel
+                prev[(nr, nc)] = (r, c)
+                queue.append(((nr, nc), new_fuel))
+
+    result: dict[tuple[int, int], int] = {}
+    for pos, cost in visited.items():
+        occ2 = occupancy.get(pos)
+        if occ2 is None or pos == unit.pos:
+            result[pos] = cost
+        elif occ2.player == unit.player:
+            cap = UNIT_STATS[occ2.unit_type].carry_capacity
+            if cap > 0 and unit.unit_type in get_loadable_into(occ2.unit_type):
+                if len(occ2.loaded_units) < cap:
+                    result[pos] = cost
+            elif units_can_join(unit, occ2):
+                result[pos] = cost
+
+    if destination not in result:
+        return None
+
+    path_rev: list[tuple[int, int]] = []
+    cur: Optional[tuple[int, int]] = destination
+    while cur is not None:
+        path_rev.append(cur)
+        if cur == start:
+            break
+        cur = prev.get(cur)
+    if not path_rev or path_rev[-1] != start:
+        return None
+    path_rev.reverse()
+    return path_rev
+
+
 def get_reachable_tiles(state: GameState, unit: Unit) -> set[tuple[int, int]]:
     """Backwards-compatible wrapper around :func:`compute_reachable_costs`."""
     return set(compute_reachable_costs(state, unit).keys())
@@ -629,9 +747,12 @@ def _get_move_actions(
             capturable.add(pos)
         if capturable:
             reachable = capturable
+    # ``reachable`` is a set — iterate in deterministic (row, col) order so
+    # ``rng.choice(get_legal_actions(...))`` and RL masks are stable across
+    # PYTHONHASHSEED / process boundaries (ai_vs_ai + replay exports).
     return [
         Action(ActionType.SELECT_UNIT, unit_pos=unit.pos, move_pos=pos)
-        for pos in reachable
+        for pos in sorted(reachable)
     ]
 
 
