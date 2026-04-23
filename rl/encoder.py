@@ -106,8 +106,8 @@ _TIER_MAP: dict[str, float] = {
 }
 
 
-def _get_terrain_category(terrain_id: int) -> int:
-    """Map a raw terrain tile id to a TERRAIN_CATEGORIES index."""
+def _compute_terrain_category_uncached(terrain_id: int) -> int:
+    """Map a raw terrain tile id to a TERRAIN_CATEGORIES index (ground truth for table build)."""
     info = get_terrain(terrain_id)
     # Property sub-types first (most specific)
     if info.is_hq:
@@ -128,6 +128,30 @@ def _get_terrain_category(terrain_id: int) -> int:
         if cat in name:
             return idx
     return TERRAIN_CATEGORIES["plain"]  # default fallback
+
+
+# Precomputed terrain_id -> category index. Built once at module import from
+# the static TERRAIN_TABLE in engine/terrain.py. Phase 2a hot-path optimization:
+# encode_state calls _get_terrain_category up to GRID_SIZE*GRID_SIZE = 900 times
+# per observation; substring scan + str.lower() per call dominated cProfile.
+def _build_terrain_category_table() -> dict[int, int]:
+    from engine.terrain import TERRAIN_TABLE  # local import to avoid cycles
+
+    table: dict[int, int] = {}
+    for tid in TERRAIN_TABLE.keys():
+        table[tid] = _compute_terrain_category_uncached(tid)
+    return table
+
+
+_TERRAIN_CATEGORY_TABLE = _build_terrain_category_table()
+
+
+def _get_terrain_category(terrain_id: int) -> int:
+    """Map a raw terrain tile id to a TERRAIN_CATEGORIES index."""
+    cached = _TERRAIN_CATEGORY_TABLE.get(terrain_id)
+    if cached is not None:
+        return cached
+    return _compute_terrain_category_uncached(terrain_id)
 
 
 def encode_state(
