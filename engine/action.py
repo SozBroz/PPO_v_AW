@@ -292,13 +292,10 @@ def compute_reachable_costs(
     # for this BFS; the same tid is hit many times during neighbor expansion.
     # Cache lives only inside this function call's stack frame -> no cross-call
     # invalidation risk (weather/CO changes invalidate by re-entering this fn).
+    # Phase 2e: lookup inlined into the BFS loop body to remove ~200 closure
+    # invocations per BFS call (1M+ over a single-proc 5000-step microbench);
+    # behavior is byte-identical to the prior _cached_cost helper.
     _cost_cache: dict[int, int] = {}
-    def _cached_cost(tid: int) -> int:
-        c = _cost_cache.get(tid)
-        if c is None:
-            c = effective_move_cost(state, unit, tid)
-            _cost_cache[tid] = c
-        return c
 
     while queue:
         (r, c), fuel_used = queue.popleft()
@@ -307,7 +304,10 @@ def compute_reachable_costs(
             if not (0 <= nr < state.map_data.height and 0 <= nc < state.map_data.width):
                 continue
             tid  = state.map_data.terrain[nr][nc]
-            cost = _cached_cost(tid)
+            cost = _cost_cache.get(tid)
+            if cost is None:
+                cost = effective_move_cost(state, unit, tid)
+                _cost_cache[tid] = cost
             if cost >= INF_PASSABLE:
                 continue
             new_fuel = fuel_used + cost
