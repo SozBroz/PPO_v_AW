@@ -26,7 +26,7 @@ from gymnasium import spaces
 
 from engine.game import GameState, make_initial_state, MAX_TURNS
 from engine.map_loader import MapData, load_map
-from engine.action import Action, ActionType, get_legal_actions
+from engine.action import Action, ActionStage, ActionType, get_legal_actions
 from engine.unit import UnitType, UNIT_STATS
 from engine.terrain import get_terrain
 from engine.combat import damage_range
@@ -1032,6 +1032,23 @@ class AWBWEnv(gym.Env):
         authoritative on the engine's exact HP.
         """
         beliefs = list(self._beliefs.values())
+
+        # Phase 5: belief diff early-exit. SELECT_UNIT in SELECT or MOVE stages
+        # only advances state.action_stage and sets selected_*_pos -- no unit
+        # list, HP, or position mutation. Skip the snapshot/diff/sync_own_units
+        # overhead for these (~2/3 of all engine steps). Still invalidate the
+        # legal cache because action_stage flips. Also still capture pre-step
+        # attack range info for ATTACK actions (those are ACTION stage anyway,
+        # so they take the full path below).
+        _pre_stage = self.state.action_stage
+        if (
+            action.action_type == ActionType.SELECT_UNIT
+            and _pre_stage in (ActionStage.SELECT, ActionStage.MOVE)
+        ):
+            # Fast path: no unit mutation possible.
+            self.state, reward, done = self.state.step(action)
+            self._invalidate_legal_cache()
+            return self.state, reward, done
 
         # Pre-step snapshot + optional attack range.
         pre = self._snapshot_units()
