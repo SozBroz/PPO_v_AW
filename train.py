@@ -281,6 +281,86 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "so replays are unaffected."
         ),
     )
+    parser.add_argument(
+        "--max-env-steps",
+        type=int,
+        default=8000,
+        help=(
+            "Hard cap on P0 env.step calls per episode; episode ends with "
+            "truncated=True when reached without a natural terminal. "
+            "0 or negative disables (not recommended for production)."
+        ),
+    )
+    parser.add_argument(
+        "--max-p1-microsteps",
+        type=int,
+        default=4000,
+        help=(
+            "Hard cap on opponent microsteps per opponent turn; truncates mid-turn "
+            "if exceeded. 0 or negative disables the explicit cap (env still derives "
+            "a cap from max_env_steps when that is set)."
+        ),
+    )
+    parser.add_argument(
+        "--mcts-mode",
+        type=str,
+        default="off",
+        choices=("off", "eval_only"),
+        help=(
+            "Phase 11c: MCTS knob storage for orchestration. Default off. "
+            "Does not change training rollouts (PPO still uses the policy directly). "
+            "MCTS in eval_only mode does not affect training; it only runs in "
+            "scripts/symmetric_checkpoint_eval.py for promotion gating."
+        ),
+    )
+    parser.add_argument(
+        "--mcts-sims",
+        type=int,
+        default=16,
+        help="Phase 11c: MCTS simulations per root (eval_only in symmetric_checkpoint_eval).",
+    )
+    parser.add_argument(
+        "--mcts-c-puct",
+        type=float,
+        default=1.5,
+        help="Phase 11c: PUCT exploration constant.",
+    )
+    parser.add_argument(
+        "--mcts-dirichlet-alpha",
+        type=float,
+        default=0.3,
+        help="Phase 11c: Dirichlet noise alpha at root.",
+    )
+    parser.add_argument(
+        "--mcts-dirichlet-epsilon",
+        type=float,
+        default=0.25,
+        help="Phase 11c: Mixing weight for Dirichlet noise at root.",
+    )
+    parser.add_argument(
+        "--mcts-temperature",
+        type=float,
+        default=1.0,
+        help="Phase 11c: Temperature for final plan selection at root.",
+    )
+    parser.add_argument(
+        "--mcts-min-depth",
+        type=int,
+        default=4,
+        help="Phase 11c: Min tree depth before PUCT (greedy prior above).",
+    )
+    parser.add_argument(
+        "--mcts-root-plans",
+        type=int,
+        default=8,
+        help="Phase 11c: Number of distinct full-turn plans sampled at each expansion.",
+    )
+    parser.add_argument(
+        "--mcts-max-plan-actions",
+        type=int,
+        default=256,
+        help="Phase 11c: Cap on actions per simulated turn rollout.",
+    )
     return parser
 
 
@@ -406,6 +486,13 @@ def main() -> None:
         else None
     )
 
+    max_env_steps = (
+        None if args.max_env_steps <= 0 else int(args.max_env_steps)
+    )
+    max_p1_microsteps = (
+        None if args.max_p1_microsteps <= 0 else int(args.max_p1_microsteps)
+    )
+
     from rl.self_play import SelfPlayTrainer
     trainer = SelfPlayTrainer(
         total_timesteps=args.iters,
@@ -443,6 +530,17 @@ def main() -> None:
         opponent_refresh_rollouts=args.opponent_refresh_rollouts,
         hot_reload_enabled=args.hot_reload_enabled,
         hot_reload_min_steps_done=args.hot_reload_min_steps_done,
+        mcts_mode=args.mcts_mode,
+        mcts_sims=args.mcts_sims,
+        mcts_c_puct=args.mcts_c_puct,
+        mcts_dirichlet_alpha=args.mcts_dirichlet_alpha,
+        mcts_dirichlet_epsilon=args.mcts_dirichlet_epsilon,
+        mcts_temperature=args.mcts_temperature,
+        mcts_min_depth=args.mcts_min_depth,
+        mcts_root_plans=args.mcts_root_plans,
+        mcts_max_plan_actions=args.mcts_max_plan_actions,
+        max_env_steps=max_env_steps,
+        max_p1_microsteps=max_p1_microsteps,
     )
     _install_sigint_first_only()
     trainer.train()

@@ -6,26 +6,50 @@ todos:
     content: "Phase 0a (lands BEFORE the multi-day bake): three additive diagnostics — (1) SB3 callback splitting env-collect vs PPO-update wall to TensorBoard, (2) per-episode wall_p0_s / wall_p1_s in game_log.jsonl, (3) worker_rss_mb in game_log.jsonl. No engine touch, no behavior change. Schema bump to 1.6. CONFIRMED LIVE 2026-04-22: 215 rows of schema 1.6 with all three fields; diag/env_collect_s + diag/ppo_update_s + diag/env_steps_per_s_* publishing from rl/self_play.py:_build_diagnostics_callback (line 485)."
     status: completed
   - id: baseline-profile
-    content: "Phase 0 (after bake completes): mine new wall_p0_s/wall_p1_s/RSS + TB env-vs-learn split, then py-spy on cold-opponent run (n_envs in {1,4,6}). Build tools/_train_microbench.py for repeatable re-measures."
-    status: pending
+    content: "Phase 0 SHIPPED 2026-04-22: baselines mined — 215 schema-1.6 game_log rows (wall_p0_s / wall_p1_s / worker_rss_mb) + TB env-vs-learn split from Phase 0a callback; n_envs sweep complete (Phase 6: pc-b n_envs=4 stable, n_envs=6 iter-5 cliff). tools/_train_microbench.py for repeatable re-measures."
+    status: completed
   - id: free-wins
-    content: "Phase 1: Free wins (zero behavioral risk). (a) Skip _get_obs in opponent loop when opponent declares it doesn't need obs. (b) Per-env preallocated mask + spatial buffers. (c) Set torch/OMP/MKL thread caps in SubprocVecEnv worker init BEFORE torch import."
-    status: pending
+    content: "Phase 1 SHIPPED 2026-04-22–23: (1a) skip cold-opponent _get_obs when mask-only path; (1b) per-instance preallocated buffers + AWBW_PREALLOCATED_BUFFERS (Composer L 2026-04-23, tests/test_phase1b_golden_buffers.py); (1c) torch/OMP/MKL thread caps in SubprocVecEnv worker init before torch import."
+    status: completed
   - id: spatial-index
-    content: "Phase 2: Engine spatial index — dict[(r,c)->Unit] and dict[(r,c)->Property] on GameState, invalidated on move/build/kill/capture/load/unload. Behind a feature flag, full pytest + targeted oracle re-run, then default-on. Single biggest cascade win across get_legal_actions / encode / BFS."
-    status: pending
+    content: "Phase 2 SHIPPED 2026-04-22–23: occupancy / tile grids + invalidation (2a/2c/2d/2e); BFS reachable-cost cache (2b); threading + inlining — wins documented in plan body."
+    status: completed
   - id: encoder-hotpath
-    content: "Phase 3: Encoder. Precomputed terrain_id->category LUT at import. Cache per-MapData terrain channels (15 of 63). Fuse the three state.properties walks into one. Lean on the Phase 2 grids for unit lookups."
-    status: pending
+    content: "Phase 3 SHIPPED 2026-04-22–23: (3a) terrain_id→category LUT at rl/encoder.py:_TERRAIN_CATEGORY_TABLE; (3b/3c) map-static terrain-channel cache + fused property walks."
+    status: completed
   - id: dedupe-legal
-    content: "Phase 4: Single-pass legal enumeration shared across mask + decode + infantry-only strip (kills 3x get_legal_actions per P0 step). Tier on top of Phase 2 so the per-call work is already cheap."
-    status: pending
+    content: "Phase 4 SHIPPED 2026-04-22–23: env-scoped legal-action cache — single-pass enumeration shared across mask + decode + infantry strip (removes redundant get_legal_actions per P0 step; aligns with phase-4 legal-cache landing)."
+    status: completed
   - id: phi-belief-overhead
-    content: "Phase 5: Phi/level shaping fusion (one units-and-properties pass), belief diff trims (avoid re-snapshotting unchanged HP), small-object reuse in _engine_step_with_belief."
-    status: pending
+    content: "Phase 5 SHIPPED 2026-04-22: belief diff early-exit + small-object reuse in _engine_step_with_belief; Phase 5b (Composer A) extends early-exit to ACTION-stage SELECT_UNIT — see phase-5b-belief-extend."
+    status: completed
   - id: vec-scale
-    content: "Phase 6: n_envs sweep with cold opponent + straggler diagnosis from slow_games.jsonl. Consider per-microstep cap tightening for chronic long P1 turns."
-    status: pending
+    content: "Phase 6: n_envs sweep COMPLETE on pc-b (2026-04-22). Result: n_envs=4 stable at ~720 collect / ~165 total fps over 15 iters; n_envs=6 cliff-dies at iter 5 (process death, no Windows OOM event). Cap n_envs<=4 on pc-b. Other machines TBD via Phase 10f probe. Real-run improvement vs Phase 0: 6.3x."
+    status: completed
+  - id: phase-6b-iter5-cliff-hunt
+    content: "Phase 6b cliff hunt CLOSED 2026-04-23 (Composer H): NON-REPRO on current tree; verdict docs/perf_audit/phase6b_iter5_cliff_findings.md — monitor if n_envs=6 iter-5 death recurs."
+    status: completed
+  - id: phase-5b-belief-extend
+    content: "Phase 5b SHIPPED 2026-04-22 (Composer A): extended belief early-exit to SELECT_UNIT in ACTION stage (was missing from Phase 5). Audited END_TURN, ACTIVATE_COP/SCOP, ATTACK, CAPTURE, WAIT, LOAD, UNLOAD, BUILD, REPAIR, JOIN, DIVE_HIDE — all ruled out as unsafe (mutate unit state). Added AWBW_BELIEF_EARLY_EXIT_FULL feature flag (default on). Microbench: -9.7% _engine_step_with_belief cumtime. 4 new tests in test_belief_diff_early_exit.py (12 total). Caveat: ACTION-stage SELECT_UNIT not produced by get_legal_actions today — defensive optimization with patched-legal test coverage."
+    status: completed
+  - id: phase-11b-mcts-search
+    content: "Phase 11b SHIPPED 2026-04-22 (Composer C): rl/mcts.py 399 lines — TurnNode, MCTSConfig, run_mcts, plan_key (SHA-256 over actions + property state), principal_variation_depth, sign-flip across actor changes, root-only Dirichlet noise, min-depth guarantee, make_callables_from_sb3_policy adapter for MaskablePPO. Single-process. 6 tests passing. Default off everywhere — 11c wires into train.py."
+    status: completed
+  - id: phase-11c-mcts-wire
+    content: "Phase 11c SHIPPED 2026-04-22 (Composer E): --mcts-mode {off, eval_only} + 8 knob flags in train.py and scripts/symmetric_checkpoint_eval.py. Default OFF. Train rollouts unchanged (no MCTS in model.learn — avoids train_advisor trap). MCTS runs only in symmetric eval; per-decision wall stats in eval JSON. 7 new tests."
+    status: completed
+  - id: phase-11d-mcts-health-gate
+    content: "Phase 11d SHIPPED 2026-04-22 (Composer G): tools/mcts_health.py (472 lines) reads schema 1.7 game_log.jsonl over rolling 200-game window, computes capture_sense (proxy via captures_completed_p0), terrain_usage_p0, army_value_lead via losses_hp delta, win_rate, episode quality. Conservative thresholds (capture ≥0.4, terrain ≥0.5, win ≥0.4, ep ≥25 turns, early_resign ≤0.3). Sims escalator 8→16→32 by win_rate tier. Stale-verdict (>24h) downgrade to off. Orchestrator wiring (read_mcts_health DecKind) — audit-log only, never auto-flips MCTS. 14 new tests. Today returns 'off' (no training data on pc-b yet)."
+    status: completed
+  - id: phase-6b-instrumentation
+    content: "Phase 6b instrumentation SHIPPED 2026-04-22 (Composer D): rl/self_play.py extended with main_proc_rss / sum_worker_rss / system_ram_used_pct / worker_step_time_p99_max+min → TensorBoard scalars + logs/fps_diag.jsonl. Per-worker step-time ring buffer in rl/env.py gated by AWBW_TRACK_PER_WORKER_TIMES=1. Reproducer driver tools/_repro_iter5_cliff.py (235 lines). 4 new tests. Investigation (Composer H) in flight; verdict doc forthcoming at docs/perf_audit/phase6b_iter5_cliff_findings.md."
+    status: completed
+  - id: phase-stale-test-cleanup
+    content: "Stale-test cleanup SHIPPED 2026-04-22 (Composer F): test_heal_never_exceeds_max_hp updated to match engine GL 1635742 PHP evidence (display-cap residue is $0); added companion test_heal_below_display_cap_charges_cost; test_full_trace_replays_without_error xfailed with full citation chain (phase11c + phase10f). Bare pytest gate now lives at 910 passed / 0 failed / 3 xfailed / 3 xpassed / 7 skipped / 4005 subtests, no --ignore flags needed."
+    status: completed
+  - id: native-compilation-shelved
+    content: "SHELVED to MASTERPLAN section 12 (2026-04-22). Cython/Numba/mypyc/AsyncVectorEnv are multi-week investments. Re-entry conditions: (a) Phase 6 sweep formalized in orchestrator, (b) real-run cProfile shows engine cost > 30% of wall, (c) sustained 2-week budget, (d) AsyncVectorEnv tried first. Training data preserved if encoder/action-space layout unchanged (np.array_equal regression test mandatory before merge)."
+    status: cancelled
   - id: opponent-deferred
     content: "Phase 7 (DEFERRED — cold today): When checkpoint opponent comes back, profile model.predict CPU cost; consider TorchScript / ONNX / smaller distilled net. NOT in this campaign unless we re-enable checkpoints."
     status: pending
@@ -36,38 +60,38 @@ todos:
     content: "Phase 9: Local/nightly bench script (NOT default CI) — loose threshold, separate from desync gate."
     status: pending
   - id: fleet-local-publish
-    content: "Phase 10a: Local-disk checkpoint writes + async background publisher to shared root. Removes Samba/HDD stop-the-world per save. Behind --local-checkpoint-mirror flag; default off until verified on Main's share."
-    status: pending
+    content: "Phase 10a SHIPPED 2026-04-23: --local-checkpoint-mirror fast local write + async publisher to shared checkpoint dir; removes Samba/HDD stop-the-world on aux pool saves (default off until operator verifies share)."
+    status: completed
   - id: fleet-pool-curation
-    content: "Phase 10b: Quality-curated pool pruning replacing FIFO checkpoint_zip_cap=100. Keep K newest + M top-by-verdict-winrate + D diversity slots. Sources verdicts from existing fleet/<id>/eval/*.json. New prune_checkpoint_zip_curated() in rl/fleet_env.py."
-    status: pending
+    content: "Phase 10b SHIPPED 2026-04-23: prune_checkpoint_zip_curated() in rl/fleet_env.py — K newest + M top-by-verdict-winrate + D diversity vs FIFO checkpoint_zip_cap."
+    status: completed
   - id: fleet-opp-refresh
-    content: "Phase 10c: In-process opponent pool refresh between rollouts via env_method('reload_opponent_pool'). New aux exports become visible without train.py restart. --opponent-refresh-rollouts default 4."
-    status: pending
+    content: "Phase 10c SHIPPED 2026-04-23: env_method('reload_opponent_pool') between rollouts; --opponent-refresh-rollouts (default 4); new pool zips visible without train restart."
+    status: completed
   - id: fleet-hot-reload
-    content: "Phase 10d: Hot weight reload between rollouts driven by fleet/<id>/reload_request.json. model.set_parameters() at rollout boundary; ack via rename. PPO on-policy makes optimizer-state drift acceptable. Conservative defaults to protect fleet diversity."
-    status: pending
+    content: "Phase 10d SHIPPED 2026-04-23: fleet/<id>/reload_request.json → model.set_parameters at rollout boundary; ack via rename; conservative thresholds in orchestrator."
+    status: completed
   - id: fleet-orchestrator
-    content: "Phase 10e: scripts/fleet_orchestrator.py — single passwordless-SSH driver running from this dev box. Curates pools, runs symmetric evals (already-built scripts/symmetric_checkpoint_eval.py), publishes winners to root latest, writes laggard reload requests. --dry-run first week."
-    status: pending
+    content: "Phase 10e SHIPPED 2026-04-23: scripts/fleet_orchestrator.py — dry-run default, file-system-first ops, 16 tests; curates pools, symmetric evals, promotion + reload_request rails (SSH where needed)."
+    status: completed
   - id: fleet-autotune
-    content: "Phase 10f: Per-machine auto-tuning. tools/probe_machine_caps.py emits CPU/RAM/GPU/disk JSON; orchestrator picks n_envs / n_steps / batch_size per host with hard cap n_envs<=6 on this dev box. Proposes, never silently applies — writes fleet/<id>/proposed_args.json, then issues reload+restart only after operator confirm (or --auto-apply on aux-only)."
-    status: pending
+    content: "Phase 10f SHIPPED 2026-04-22 (Composer B): tools/probe_machine_caps.py + tools/propose_train_args.py emit fleet/<id>/probe.json and fleet/<id>/proposed_args.json. Hard cap n_envs<=4 on pc-b (operator-validated; n_envs=6 cliffs at iter 5 per FPS plan). Heuristic for other machines: n_envs = min(physical_cores // 2, ram_gb // 4, 12). Orchestrator surfaces proposals in audit log, never auto-applies. 26 targeted tests + integration test green."
+    status: completed
   - id: fleet-bootstrap-schedule
-    content: "Phase 10g: Competence-gated bootstrap + arg schedule. New machine starts with --learner-greedy-mix 0.3, --capture-move-gate, --cold-opponent end_turn, narrow tier, BC warmstart if available. Orchestrator decays each knob when rolling-200-game medians cross health thresholds (first_p0_capture_step, captures_completed_p0, loss-HP ratio). Tracks state in fleet/<id>/curriculum_state.json. Hard rule: never re-enable greedy_mix mid-run unless winrate collapses."
-    status: pending
+    content: "Phase 10g SHIPPED 2026-04-23 (Composer K): tools/curriculum_advisor.py + orchestrator integration — proposed_args.json each tick, fleet/<id>/curriculum_state.json, CLI --curriculum-enabled / --curriculum-window-games / --curriculum-state-file; 17 tests. See body §10g Composer K shipped."
+    status: completed
   - id: mcts-engine-api
-    content: "Phase 11a: Turn-level rollout interface in engine/game.py — apply_full_turn(state, plan_or_policy) -> GameState that runs an entire side's turn without surfacing microsteps as RL decisions. Hard budget <5ms/turn (Masterplan §4.2). Tested in tests/test_engine_turn_rollout.py against existing replay fixtures."
-    status: pending
+    content: "Phase 11a: Turn-level rollout interface in engine/game.py — GameState.apply_full_turn(plan_or_policy, *, copy, max_actions, rng_seed, on_step) -> (final_state, actions, total_reward, done). Accepts list[Action] OR Callable[[GameState], Action]; deep-copies by default; deterministic via rng_seed (saves/restores global RNG state); enforces SELECT-stage entry; raises on plan exhaustion or max_actions cap. SHIPPED commit 003c837 — 10 tests in tests/test_apply_full_turn.py covering random policy, plan replay equivalence, copy semantics, stage validation, exhaustion, max cap, RNG determinism + restoration, on_step callback. Foundation for Phase 11b MCTS expansion."
+    status: completed
   - id: mcts-search
-    content: "Phase 11b: rl/mcts.py — PUCT tree at turn boundaries; policy-head -> action prior, value-head -> leaf evaluator. Configurable --mcts-sims, --mcts-c-puct, --mcts-dirichlet-alpha, --mcts-temperature. Single-process implementation first; vectorize later only if Phase 11d perf gate fails."
-    status: pending
+    content: "Phase 11b SHIPPED 2026-04-22 (Composer C): rl/mcts.py (399 lines) — PUCT at turn boundaries; 6 tests; default off — duplicate track of phase-11b-mcts-search."
+    status: completed
   - id: mcts-train-integration
-    content: "Phase 11c: train.py and rl/self_play.py wire --mcts-mode {off,eval_only,train_advisor}. eval_only runs MCTS only inside scripts/symmetric_checkpoint_eval.py; train_advisor wraps action selection in self-play (deferred until 11d gate). Default off — orchestrator flips per-machine."
-    status: pending
+    content: "Phase 11c SHIPPED 2026-04-22 (Composer E): --mcts-mode {off, eval_only} + knob flags in train.py + symmetric_checkpoint_eval.py; train rollouts unchanged; 7 tests — duplicate track of phase-11c-mcts-wire."
+    status: completed
   - id: mcts-activation-gate
-    content: "Phase 11d: Health gate before orchestrator turns on --mcts-mode eval_only. Reads logs/game_log.jsonl rolling-200-game window: capture sense, engagement quality (loss-HP ratio), terrain usage (new metric, see 11d), explained_variance>0.6 from TensorBoard. Single tripwire JSON in fleet/<id>/mcts_health.json. Production train_advisor mode requires Masterplan Phase 1 Full Go separately — not unlocked here."
-    status: pending
+    content: "Phase 11d SHIPPED 2026-04-22 (Composer G): tools/mcts_health.py + orchestrator read path; 14 tests; audit-only MCTS gate — duplicate track of phase-11d-mcts-health-gate."
+    status: completed
   - id: log-machine-id
     content: "PREREQ for Phase 10g/10h/11d (BLOCKING). Add machine_id to every game_log.jsonl row by reading os.environ['AWBW_MACHINE_ID'] in _append_game_log_line (rl/env.py:98-142). Without this the orchestrator cannot filter games per machine. Combine schema bump with terrain_usage_p0 (single 1.6 -> 1.7 jump)."
     status: completed
@@ -89,6 +113,27 @@ todos:
   - id: mcts-bigly-escalator
     content: "Phase 11f: MCTS sim-budget escalator. Start eval_only at sims=16; on each cycle that the value-head EV stays above gate AND winrate-vs-pool is positive at current budget, double sims (16->32->64->128). Caps at 128 unless operator approves higher. Tree depth budget tuned so a 2-turn capture decision is fully expanded (depth>=4 turn-nodes from root). Records sim-vs-winrate curve in logs/mcts_escalator.jsonl so we know when search stops paying."
     status: pending
+  - id: phase-1-free-wins
+    content: "Phase 1 free-wins (dup track) SHIPPED 2026-04-22–23: same landing as free-wins — 1a cold-opp obs skip, 1b preallocated buffers (Composer L), 1c thread caps."
+    status: completed
+  - id: phase-1b-buffers
+    content: "Phase 1b SHIPPED 2026-04-23 (Composer L): per-instance preallocated buffers in rl/env.py + AWBW_PREALLOCATED_BUFFERS=1 default; golden A→B→A bytes-equality in tests/test_phase1b_golden_buffers.py (turn boundary, ACTION stage, end-of-game, post-capture) + aliasing guard; bare pytest green."
+    status: completed
+  - id: composer-l-phase-1b
+    content: "Phase 1b SHIPPED 2026-04-23 (Composer L): per-instance preallocated buffers in rl/env.py + AWBW_PREALLOCATED_BUFFERS env flag (default ON); golden A→B→A bytes-equality test in tests/test_phase1b_golden_buffers.py covering turn boundary, ACTION stage, end-of-game, post-capture scenarios; aliasing test guards caller-side mutation. Bare pytest 953 passed."
+    status: completed
+  - id: composer-j-tier1-bootstrap
+    content: "Tier 1 walk-away bootstrap SHIPPED 2026-04-22 (Composer J): scripts/start_solo_training.py + scripts/fleet_orchestrator.py --auto-apply / --apply-cooldown-s / --train-pid-file / --train-launch-cmd-file. Windows CTRL_BREAK_EVENT for clean SB3 shutdown. 16 new tests."
+    status: completed
+  - id: composer-k-curriculum-advisor
+    content: "Phase 10g curriculum advisor SHIPPED 2026-04-23 (Composer K): tools/curriculum_advisor.py with DEFAULT_SCHEDULE (stage_a_capture_bootstrap → stage_b → stage_c → stage_d_self_play_pure); orchestrator re-writes proposed_args.json each tick (probe base + curriculum overrides + mcts_health merge when pass_overall); fleet/<id>/curriculum_state.json persisted; CLI flags --curriculum-enabled / --curriculum-window-games / --curriculum-state-file. 17 new tests across test_curriculum_advisor.py + test_orchestrator_curriculum_wire.py + test_orchestrator_mcts_merge.py."
+    status: completed
+  - id: composer-n-multi-machine-design
+    content: "Multi-machine weight & strength sync DESIGN SHIPPED 2026-04-23 (Composer N): docs/multi_machine_weight_sync_design.md — recommendation, comparison table, silent-sync criteria, phased rollout for 4-machine fleet. No code; doc-only thread."
+    status: completed
+  - id: composer-o-mcts-iteration
+    content: "MCTS iteration SHIPPED 2026-04-23 (Composer O): tests/test_mcts_smoke_e2e.py end-to-end smoke for --mcts-mode alphazero + eval_only via train.py subprocess; rl/mcts.py audit notes in docs/mcts_review_composer_o.md."
+    status: completed
 isProject: false
 ---
 
@@ -589,9 +634,23 @@ Each machine has different CPU / RAM / GPU. Today the operator hand-picks `--n-e
 
 **Risk:** auto-tuning that lies about RAM headroom OOMs the host mid-rollout. Mitigation: `proposed_args.json` includes a `safety_margin_gb` and the wrapper script verifies `ram_gb_avail >= safety_margin_gb` at launch; bails if not.
 
-### 10g. Competence-gated bootstrap and arg scheduling (orchestrator owns the curriculum)
+### 10g. Competence-gated bootstrap and arg scheduling (orchestrator owns the curriculum) — **completed**
 
 Applies to **any machine the diagnosis classifier (10h) puts in `fresh` or `bootstrapping` state** — typically new pool members or a machine whose `latest` got reloaded into a weak baseline by 10d. The orchestrator boots them with **strong training wheels**, then **decays each knob on telemetry** — not on a wall-clock timer. Decisions are written to `<shared>/fleet/<MACHINE_ID>/curriculum_state.json`; the trainer reads on each rollout boundary along with the reload check from 10d.
+
+#### Composer K shipped (2026-04-23)
+
+Fleet orchestrator now **re-writes** `fleet/<machine_id>/proposed_args.json` each tick (probe base + DRAFT curriculum schedule in `tools/curriculum_advisor.py` + merge of `read_mcts_health` when `pass_overall` and mode ≠ `off`). Atomic writes; body fingerprint skips no-op updates; `train_launch_cmd.json` is refreshed from merged `proposed_args` immediately before auto-apply respawn so new flags reach `train.py`. CLI: `--curriculum-enabled` / `--no-curriculum`, `--curriculum-window-games`, `--curriculum-state-file`.
+
+| Deliverable | Role |
+|-------------|------|
+| `tools/curriculum_advisor.py` | Metrics from `game_log.jsonl`, `DEFAULT_SCHEDULE`, `curriculum_state.json` persistence, `--help` CLI |
+| `scripts/fleet_orchestrator.py` | `refresh_proposed_train_args_documents`, `build_train_argv_from_proposed_args`, `proposed_document_body_sha256`, DecKind `curriculum_proposal` |
+| `tests/test_curriculum_advisor.py` | 10 tests |
+| `tests/test_orchestrator_curriculum_wire.py` | 4 tests |
+| `tests/test_orchestrator_mcts_merge.py` | 3 tests |
+
+Regression: full `python -m pytest -q` green on ship machine (953 passed, 7 skipped, 3 xfailed, 3 xpassed, 4005 subtests; ~166s). New tests in these three files: **17**.
 
 For machines already classified `competent`, `stuck`, or `regressing` see 10h — those have separate intervention rules.
 
@@ -887,3 +946,48 @@ Skill `awbw-regression-then-ship-main` is the post-merge sync ritual once the sl
 ## Plan file
 
 When this plan is saved by Cursor, the tool returns an absolute path — use that path as the canonical artifact (per project create-plan skill).
+
+---
+
+## Status update — 2026-04-22 — FPS validation outcomes + native-compilation shelved
+
+### Real train.py FPS measured (cold-opp random, narrow curriculum, pc-b)
+
+| Config | env_steps/s collect (steady) | env_steps/s total | Stability | Notes |
+|---|---|---|---|---|
+| **n_envs=4** | **~720** | **~165** | ✅ 15+ iters clean | **OPERATIONAL SWEET SPOT on pc-b** |
+| n_envs=6 (fresh) | 600-650 → 30 (cliff at iter 5) | 100 → 24 | ❌ Process died silently after iter 5 | Unusable as-is |
+| n_envs=6 (resumed) | 31 → 19.5 (monotonic decline) | 27 → 17.9 | ❌ Same cliff pattern | Unusable as-is |
+
+**Headline:** real train.py at n_envs=4 sustains **~165 env_steps/s end-to-end** vs Phase 0 baseline of 26 fps at n_envs=6 = **6.3× real-run improvement**. Cumulative microbench gains (Phases 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3b, 3c, 4, 5, 8a) are *enabling* this — without them per-step cost would be too high for n_envs=4 cleanly either — but the operational lever (cap n_envs at 4) is the bigger immediate win.
+
+### Why n_envs=6 dies at iter 5 (open investigation)
+
+Not CPU oversubscription — pc-b is 16C/24T. Suspects, in order: (1) `SubprocVecEnv` Windows pipe contention growing superlinearly past some threshold, (2) Pytorch + GIL contention in main proc with more pickle round-trips/s, (3) memory pressure (RAM was 76% used during run; games inside long episodes accumulate state, and 6 workers cross some pagefile threshold the GC can't recover from), (4) background process collision (home PC). No Windows OOM event log entry — silent death. New pending todo: `phase-6b-iter5-cliff-hunt`.
+
+### Where the wall time actually goes at n_envs=4
+
+`env_steps_per_s_total / env_steps_per_s_collect = 165 / 720 = 23%`. **77% of wall is non-engine** (PPO update + IPC pickle + lockstep wait). Microbench-style optimizations cannot recover this — they can only chip at the 23%.
+
+### Native compilation (Cython / Numba / mypyc / shared-mem VecEnv) — SHELVED
+
+Moved to MASTERPLAN §12 with full ROI table and training-data compatibility note. **Most native-compilation work preserves trained weights** (Cython/Numba/mypyc operate on pure functions; AsyncVectorEnv is just IPC). What invalidates weights is changes to the **observation channel layout** in `rl/encoder.py` or the **35k action space layout** — those are shape-locked into the policy/value heads. Any future rewrite must clear `np.array_equal` encoder regression test on a fixed `GameState` fixture before merging.
+
+Shelved because: (a) re-entry conditions in MASTERPLAN §12.3 are not met, (b) tokens are constrained, (c) we have higher-ROI pure-Python wins still on the table (Phase 5b extension, iter-5 cliff hunt) and the orchestrator + MCTS are the user's higher priority right now.
+
+### Updated execution priorities (this session and next)
+
+1. **Composer A — Phase 5b** — extend belief diff early-exit to more action types. END_TURN already triggers full belief reset, so the pre-snapshot is wasted. BUILD_UNIT and JOIN may also be skip-able. Pure-Python, no engine touch, ~5% additional perf with low risk.
+2. **Composer B — Phase 10f autotune** — `tools/probe_machine_caps.py` + `fleet/<id>/proposed_args.json` writer. Hard cap `n_envs ≤ 4` on pc-b baked in. Orchestrator reads proposed_args.json on next planning cycle.
+3. **Composer C — Phase 11b MCTS** — `rl/mcts.py` PUCT tree at turn boundaries using `apply_full_turn` (Phase 11a, shipped). Single-process; vectorize later only if needed. CLI args: `--mcts-sims --mcts-c-puct --mcts-dirichlet-alpha --mcts-temperature --mcts-min-depth --mcts-root-plans`. Default off everywhere.
+4. **Phase 6 formalize** — n_envs=4 finding lands in proposed_args.json automatically via Composer B's work. Documented here.
+5. **Phase 6b iter-5 cliff hunt** — after Composer B, instrument the diag callback with per-rollout RSS + per-step time variance, re-run n_envs=6, capture moment-of-death. Cheap diagnostic, potentially unlocks +50% fps if we identify the leak.
+
+### Deferred (acknowledged but not in this session)
+
+- Phase 5b further (after first sweep): per-action-type belief-cost profiling
+- Phase 10g curriculum schedule (depends on Phase 10f landing first)
+- Phase 10h diagnosis classifier (depends on 10f + 10g)
+- Phase 11d MCTS health gate (depends on 11b shipping + initial measurement)
+- Phase 11f sim escalator (post-11d)
+- Cython/Numba/native compilation (MASTERPLAN §12 — multi-week, do not start)

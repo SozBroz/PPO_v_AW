@@ -37,6 +37,10 @@ from rl.env import SESSION_GAME_COUNTER_DB_ENV
 from rl.paths import GAME_LOG_PATH, LOGS_DIR
 
 WATCH_LOG_PATH = LOGS_DIR / "watch_log.jsonl"
+FPS_DIAG_PATH = LOGS_DIR / "fps_diag.jsonl"
+# Rotate before append when the log grows large (mirrors ad-hoc JSONL hygiene elsewhere).
+_FPS_DIAG_MAX_BYTES = 32 * 1024 * 1024
+_WORKER_RSS_RESAMPLE_S = 5.0
 
 import numpy as np
 
@@ -90,6 +94,56 @@ def log_game(
     }
     with open(WATCH_LOG_PATH, "a") as fh:
         fh.write(json.dumps(record) + "\n")
+
+
+def _append_fps_diag_line(record: dict) -> None:
+    """Append one JSON object line to ``logs/fps_diag.jsonl`` (size-capped rotation)."""
+    FPS_DIAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if FPS_DIAG_PATH.is_file() and FPS_DIAG_PATH.stat().st_size > _FPS_DIAG_MAX_BYTES:
+        rotated = FPS_DIAG_PATH.with_name(FPS_DIAG_PATH.name + ".1")
+        if rotated.is_file():
+            rotated.unlink()
+        FPS_DIAG_PATH.rename(rotated)
+    with open(FPS_DIAG_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _sum_python_children_rss_mb() -> float:
+    """Sum RSS (MiB) for this process's descendants whose executable looks like Python."""
+    try:
+        import psutil  # type: ignore[import]
+
+        main = psutil.Process()
+        total_b = 0
+        for p in main.children(recursive=True):
+            try:
+                name = (p.name() or "").lower()
+                if "python" not in name:
+                    continue
+                total_b += int(p.memory_info().rss)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return float(total_b) / (1024.0 * 1024.0)
+    except Exception:
+        return 0.0
+
+
+def _main_proc_rss_mb() -> float:
+    try:
+        import psutil  # type: ignore[import]
+
+        return float(psutil.Process().memory_info().rss) / (1024.0 * 1024.0)
+    except Exception:
+        return 0.0
+
+
+def _system_ram_used_pct() -> float:
+    try:
+        import psutil  # type: ignore[import]
+
+        return float(psutil.virtual_memory().percent)
+    except Exception:
+        return 0.0
 
 
 def update_elo(
@@ -500,6 +554,8 @@ def _make_env_factory(
     pool_from_fleet: bool = False,
     cold_opponent: str = "random",
     fleet_opponent_root: str | None = None,
+    max_env_steps: int | None = None,
+    max_p1_microsteps: int | None = None,
 ) -> Callable:
     """Return a picklable env factory for SubprocVecEnv."""
     def _init():
@@ -538,6 +594,8 @@ def _make_env_factory(
             tier_name=tier_name,
             curriculum_broad_prob=curriculum_broad_prob,
             curriculum_tag=curriculum_tag,
+            max_env_steps=max_env_steps,
+            max_p1_microsteps=max_p1_microsteps,
         )
         opponent.attach_env(env)
         return ActionMasker(env, _mask_fn)
@@ -589,6 +647,20 @@ def _build_diagnostics_callback():
             self._last_ppo_update_s: float | None = None
             # Per-env step count for env_steps_per_s_collect; sized lazily.
             self._steps_in_rollout: int = 0
+            # Phase 6b (FPS / iter-5 cliff): baseline RSS and elapsed — set once
+            # across the first ``learn()`` chunk only (``_on_training_start`` fires
+            # every chunk in ``SelfPlayTrainer``).
+            self._diag_perf_t0: float | None = None
+            self._diag_initial_rss_mb: float | None = None
+            self._diag_rollout_seq: int = 0
+            self._diag_last_worker_scan_mono: float = 0.0
+            self._diag_cached_sum_worker_rss_mb: float = 0.0
+
+        def _on_training_start(self) -> None:
+            if self._diag_perf_t0 is None:
+                self._diag_perf_t0 = time.perf_counter()
+            if self._diag_initial_rss_mb is None:
+                self._diag_initial_rss_mb = _main_proc_rss_mb()
 
         def _on_step(self) -> bool:
             dones = self.locals.get("dones")
@@ -633,22 +705,112 @@ def _build_diagnostics_callback():
             # collect + previous rollout's update) — that pair represents one
             # full env+learn cycle, which is the steady-state FPS the user
             # actually feels.
+            env_collect_s = 0.0
+            env_steps_per_s_collect = 0.0
+            env_steps_per_s_total = 0.0
+            ppo_update_s_out: float | None = None
             if self._t_rollout_start is not None:
                 env_collect_s = max(0.0, now - self._t_rollout_start)
                 self.logger.record("diag/env_collect_s", env_collect_s)
                 if env_collect_s > 0 and self._steps_in_rollout > 0:
+                    env_steps_per_s_collect = self._steps_in_rollout / env_collect_s
                     self.logger.record(
                         "diag/env_steps_per_s_collect",
-                        self._steps_in_rollout / env_collect_s,
+                        env_steps_per_s_collect,
                     )
                 if self._last_ppo_update_s is not None:
+                    ppo_update_s_out = self._last_ppo_update_s
                     self.logger.record("diag/ppo_update_s", self._last_ppo_update_s)
                     cycle_s = env_collect_s + self._last_ppo_update_s
                     if cycle_s > 0 and self._steps_in_rollout > 0:
+                        env_steps_per_s_total = self._steps_in_rollout / cycle_s
                         self.logger.record(
                             "diag/env_steps_per_s_total",
-                            self._steps_in_rollout / cycle_s,
+                            env_steps_per_s_total,
                         )
+
+            # ── Phase 6b: memory + per-worker step skew (rate-limited where needed) ──
+            main_rss = _main_proc_rss_mb()
+            base = self._diag_initial_rss_mb
+            delta_mb = main_rss - base if base is not None else 0.0
+            self.logger.record("diag/main_proc_rss_mb", main_rss)
+            self.logger.record("diag/main_proc_rss_delta_mb", delta_mb)
+
+            sys_pct = _system_ram_used_pct()
+            self.logger.record("diag/system_ram_used_pct", sys_pct)
+
+            if now - self._diag_last_worker_scan_mono >= _WORKER_RSS_RESAMPLE_S:
+                self._diag_cached_sum_worker_rss_mb = _sum_python_children_rss_mb()
+                self._diag_last_worker_scan_mono = now
+            sum_worker = self._diag_cached_sum_worker_rss_mb
+            self.logger.record("diag/sum_worker_rss_mb", sum_worker)
+
+            track_steps = os.environ.get("AWBW_TRACK_PER_WORKER_TIMES") == "1"
+            p99_max = 0.0
+            p99_min = 0.0
+            mean_p99 = 0.0
+            if track_steps and self.training_env is not None:
+                try:
+                    raw_list = self.training_env.env_method("get_step_time_stats")
+                except Exception:
+                    raw_list = []
+                p99_vals: list[float] = []
+                for row in raw_list or []:
+                    if not isinstance(row, dict):
+                        continue
+                    if int(row.get("count", 0)) <= 0:
+                        continue
+                    p99_vals.append(float(row.get("p99", 0.0)))
+                if p99_vals:
+                    p99_max = max(p99_vals)
+                    p99_min = min(p99_vals)
+                    mean_p99 = sum(p99_vals) / len(p99_vals)
+            self.logger.record("diag/per_worker_step_time_s_p99", mean_p99)
+            self.logger.record(
+                "diag/worker_step_time_p99_max_across_envs", p99_max
+            )
+            self.logger.record(
+                "diag/worker_step_time_p99_min_across_envs", p99_min
+            )
+
+            self._diag_rollout_seq += 1
+            t_elapsed = (
+                now - self._diag_perf_t0
+                if self._diag_perf_t0 is not None
+                else 0.0
+            )
+            n_envs_tb = 0
+            if self.training_env is not None:
+                try:
+                    n_envs_tb = int(self.training_env.num_envs)
+                except Exception:
+                    n_envs_tb = 0
+
+            json_row = {
+                "schema_version": "1.0",
+                "iteration": int(self._diag_rollout_seq),
+                "total_timesteps": int(getattr(self, "num_timesteps", 0) or 0),
+                "time_elapsed_s": float(t_elapsed),
+                "env_collect_s": float(env_collect_s),
+                "ppo_update_s": float(ppo_update_s_out)
+                if ppo_update_s_out is not None
+                else None,
+                "env_steps_per_s_collect": float(env_steps_per_s_collect),
+                "env_steps_per_s_total": float(env_steps_per_s_total),
+                "main_proc_rss_mb": float(main_rss),
+                "main_proc_rss_delta_mb": float(delta_mb),
+                "sum_worker_rss_mb": float(sum_worker),
+                "system_ram_used_pct": float(sys_pct),
+                "worker_step_time_p99_max_s": float(p99_max),
+                "worker_step_time_p99_min_s": float(p99_min),
+                "n_envs": int(n_envs_tb),
+                "machine_id": os.environ.get("AWBW_MACHINE_ID"),
+            }
+            try:
+                _append_fps_diag_line(json_row)
+            except Exception:
+                pass
+
             self._t_prev_rollout_end = now
             self._last_ppo_update_s = None
 
@@ -771,6 +933,17 @@ class SelfPlayTrainer:
         opponent_refresh_rollouts: int = 4,
         hot_reload_enabled: bool = False,
         hot_reload_min_steps_done: int = 0,
+        mcts_mode: str = "off",
+        mcts_sims: int = 16,
+        mcts_c_puct: float = 1.5,
+        mcts_dirichlet_alpha: float = 0.3,
+        mcts_dirichlet_epsilon: float = 0.25,
+        mcts_temperature: float = 1.0,
+        mcts_min_depth: int = 4,
+        mcts_root_plans: int = 8,
+        mcts_max_plan_actions: int = 256,
+        max_env_steps: int | None = 8000,
+        max_p1_microsteps: int | None = 4000,
     ) -> None:
         roll = n_steps * n_envs
         if batch_size > roll:
@@ -819,6 +992,26 @@ class SelfPlayTrainer:
         self.opponent_refresh_rollouts = max(0, int(opponent_refresh_rollouts))
         self.hot_reload_enabled = bool(hot_reload_enabled)
         self.hot_reload_min_steps_done = int(hot_reload_min_steps_done)
+        _mm = str(mcts_mode or "off").strip().lower()
+        if _mm not in ("off", "eval_only"):
+            raise ValueError("mcts_mode must be 'off' or 'eval_only'")
+        self.mcts_mode = _mm
+        self.mcts_sims = int(mcts_sims)
+        self.mcts_c_puct = float(mcts_c_puct)
+        self.mcts_dirichlet_alpha = float(mcts_dirichlet_alpha)
+        self.mcts_dirichlet_epsilon = float(mcts_dirichlet_epsilon)
+        self.mcts_temperature = float(mcts_temperature)
+        self.mcts_min_depth = int(mcts_min_depth)
+        self.mcts_root_plans = int(mcts_root_plans)
+        self.mcts_max_plan_actions = int(mcts_max_plan_actions)
+        def _cap_or_none(val: int | None) -> int | None:
+            if val is None:
+                return None
+            iv = int(val)
+            return None if iv <= 0 else iv
+
+        self.max_env_steps = _cap_or_none(max_env_steps)
+        self.max_p1_microsteps = _cap_or_none(max_p1_microsteps)
         self._rollout_index: int = 0
         self._applied_reload_requests: set[tuple[str, str | int | None]] = set()
         self.local_checkpoint_mirror = (
@@ -944,6 +1137,8 @@ class SelfPlayTrainer:
             pool_from_fleet=self.pool_from_fleet,
             cold_opponent=self.cold_opponent,
             fleet_opponent_root=self.fleet_opponent_root,
+            max_env_steps=self.max_env_steps,
+            max_p1_microsteps=self.max_p1_microsteps,
         )
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
@@ -973,6 +1168,8 @@ class SelfPlayTrainer:
                 tier_name=self.tier_name,
                 curriculum_broad_prob=self.curriculum_broad_prob,
                 curriculum_tag=self.curriculum_tag,
+                max_env_steps=self.max_env_steps,
+                max_p1_microsteps=self.max_p1_microsteps,
             )
             opponent.attach_env(env)
             return ActionMasker(env, _mask_fn)

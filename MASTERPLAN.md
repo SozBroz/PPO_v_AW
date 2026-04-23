@@ -473,6 +473,10 @@ Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second
 - **Do not:** “Shared pagefile” or mmap-as-RAM across PCs for weights—wrong layer, no coherency.
 - **Checkpoint contract:** Same repo revision / encoder on all machines; see §8 for fog vs std separation.
 
+### 10.1b Episode bounds and logging (train.py / `AWBWEnv`)
+
+Long-run training assumes episodes eventually finish so PPO sees `dones`, TensorBoard episode diagnostics move, and `logs/game_log.jsonl` receives rows. A pathological policy can otherwise avoid `END_TURN` forever when caps are unset. **`train.py` now defaults `--max-env-steps 8000` and `--max-p1-microsteps 4000`** (disable with `0` or negative — not recommended for unattended runs). The env truncates when hit; **`game_log.jsonl` records both natural and truncated ends** (`log_schema_version` **1.8**: `terminated`, `truncated`, `truncation_reason` of `max_env_steps` / `max_p1_microsteps` / `null`). `scripts/start_solo_training.py` and `fleet_orchestrator.build_train_argv_from_proposed_args` always emit these flags so fleet restarts do not drop them.
+
 ### 10.2 Phase 1 — implementation backlog (code)
 
 *Implement in Agent mode; paths reference repo root.*
@@ -542,6 +546,64 @@ After scratch + slice metrics look healthy:
 
 - Slice **win rate / game length / captures** by `curriculum_tag` and by `AWBW_REWARD_SHAPING` value in run notes (env is not logged in `game_log` today — add a tag or env echo in launch scripts).
 - Phase 1 **Full Go** gates (§3) still apply; reward switch does **not** replace distribution or replay qualitative bars.
+
+---
+
+## 12. Native compilation & low-level perf (SHELVED — multi-week)
+
+**Status:** Deferred. Shelved 2026-04-22 after train.py FPS validation showed engine code is no longer the dominant cost. Expected revisit window: only after the FPS campaign Phase 6 (`n_envs` sweep) is finalized AND a real-run cProfile shows engine cost > 30% of wall.
+
+**Why shelved:** At n_envs=4 / cold-opp random on pc-b, real `env_steps_per_s_total` is ~165 vs `env_steps_per_s_collect` ~720 — the **77% non-engine fraction** (PPO update + IPC + lockstep wait) cannot be reduced by Python→native compilation. Even a 10× engine speedup would only lift total fps from ~165 to ~200-250.
+
+### 12.1 Options (ordered by ROI per week of work)
+
+| Option | Effort | Expected total-fps gain | Training-data safe? |
+|---|---|---|---|
+| Shared-memory `AsyncVectorEnv` (replace `SubprocVecEnv`) | 1 week | +10-30% | ✅ Yes |
+| `cProfile` train.py end-to-end (decision input only) | 2 hours | (informational) | ✅ Yes |
+| Flat-array engine refactor (occupancy/terrain as `np.int8`) | 3-5 days | +5-15% on engine, **enables Numba** | ⚠️ See §12.2 |
+| Numba `@njit` on `compute_reachable_costs` after flat-array | 1-2 days | 5-10× on engine, ~3-5% total | ✅ Yes |
+| mypyc compile of typed engine module | 1 week | 1.5-3× on engine, ~5% total | ✅ Yes |
+| Cython `cdef class` rewrite of `Unit`/`GameState` | 2-3 weeks | 3-10× on engine, ~10-15% total | ⚠️ See §12.2 |
+| PyPy alternative interpreter | — | (incompatible with PyTorch + spawn) | N/A — skip |
+| Nuitka whole-program compile | — | (poor fit for hot loops) | N/A — skip |
+
+### 12.2 Training-data compatibility (CRITICAL)
+
+**Most native-compilation options preserve trained weights.** Model weights (`AWBWFeaturesExtractor` + policy head + value head) depend only on the **observation tensor shape, action-space layout, and network architecture** — not on how the engine internally computes things.
+
+**Safe (no weight invalidation, training data fully reusable):**
+- Cython compilation of pure functions (preserves Python semantics)
+- Numba `@njit` on numeric kernels (operates on the same arrays)
+- mypyc compilation
+- `AsyncVectorEnv` / shared-memory IPC swap
+- BFS / pathfinding rewrites that produce byte-identical outputs (we have equivalence tests for this from Phases 2b/2c/2d)
+
+**UNSAFE (would force a fresh training run from scratch):**
+- Any change to the **observation channel layout** in `rl/encoder.py` (channel order, channel count, scalar vector shape) — `AWBWFeaturesExtractor` first conv layer is shape-locked
+- Any change to the **35k action space layout** (`_flat_to_action` index mapping) — the policy head output dim is shape-locked
+- Replacing `Unit` with a struct-of-arrays IF that change leaks into the encoder output — pure-internal refactors are safe
+
+**Conditional (depends on implementation discipline):**
+- Flat-array engine refactor (§12.1 row 3): SAFE if we keep `Unit` as a Python view object that the encoder consumes through the same interface; UNSAFE if we change what `encode_state` writes into the spatial buffer
+- Cython `cdef class` rewrite of `Unit`/`GameState`: SAFE if encoder still receives the same numerical observation; the bigger risk is breaking pickle for `SubprocVecEnv` (would need `__reduce__`)
+
+**Operational rule:** before any native-compilation work lands, run the encoder equivalence test:
+```python
+# quick regression: encode N states pre/post change, np.array_equal both
+# obs tensors. If equal, weights survive.
+```
+If we cannot make that test pass, the change forces a fresh training run — quote the cost up front.
+
+### 12.3 Re-entry conditions
+
+Revisit this section ONLY when ALL hold:
+- [ ] Phase 6 `n_envs` sweep formalized in orchestrator (`proposed_args.json` with hard caps per machine)
+- [ ] Real-run cProfile (Phase 0 redux on `train.py`, not microbench) shows engine cost > 30% of wall
+- [ ] We have a 2-week sustained engineering budget AND a clean checkpoint we want to preserve
+- [ ] AsyncVectorEnv swap (option 1 above) has been tried first
+
+Until then: extract pure-Python wins, hold the line on per-step cost, keep the orchestrator and MCTS the priority.
 
 ---
 

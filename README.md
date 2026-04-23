@@ -27,6 +27,8 @@ Optional **auxiliary** machines mount the main repo as `Z:\` (same tree: `checkp
 | `checkpoints/pool/<MACHINE_ID>/checkpoint_*.zip` | Pool aux → main `--pool-from-fleet` |
 | `fleet/<MACHINE_ID>/status.json`, `eval/*.json` | Heartbeat + eval verdicts |
 
+**Solo aux / walk-away (Tier 1):** `python scripts/start_solo_training.py --machine-id pc-b --auto-apply` probes the box, writes proposed args, launches `train.py` + `fleet_orchestrator.py`, and coordinates defensive restarts when probe-driven args change. See **`docs/SOLO_TRAINING.md`**.
+
 **Scripts:** `scripts/fleet_eval_daemon.py` (symmetric eval loop), `scripts/promote.py` (manual or `--auto-promote` best swap). **Deferred:** `--shared-training` / MASTERPLAN §10 async weight sync (mount already removes file-copy friction).
 
 ## Human vs bot (Play UI)

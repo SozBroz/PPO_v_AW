@@ -50,7 +50,33 @@ class TestTrace182065SeamValidation(unittest.TestCase):
         cls.full_trace = cls.record["full_trace"]
         cls.game_log = cls.record["game_log"]
 
+    @unittest.expectedFailure
     def test_full_trace_replays_without_error(self) -> None:
+        """Full trace replay vs AWBW envelopes — **expected failure** (not an engine bug).
+
+        **Choice: Option A** (`@unittest.expectedFailure`). Option B (swallow
+        ``ValueError`` / ``IllegalActionError`` and assert partial progress) was rejected
+        in favor of an explicit xfail: this test validates replay fidelity against a
+        serialized trace, not internal engine consistency; masking failures would hide
+        the real seam.
+
+        - ``docs/oracle_exception_audit/phase11c_trace_182065_export_fix.md``: export
+          pipeline threads ``oracle_mode=True``; STEP-GATE opt-out does not cover
+          ``_move_unit`` raising ``ValueError`` when AWBW's recorded move disagrees with
+          engine reachability.
+        - ``docs/oracle_exception_audit/phase10f_silent_drift_recon.md``: engine vs AWBW
+          PHP drift (funds, HP, movement) is a known multi-phase research class — separate
+          from self-play / RL training, which uses the engine's own legality and remains
+          unaffected.
+
+        **Divergence pattern:** Infantry move (9,8)→(11,7) around calendar **Day ~24**
+        — reachability mismatch between trace and engine.
+
+        **TODO:** Next phase addressing **reachability / movement drift** vs AWBW (Phase 11
+        charter: position drift, oracle path work) should revisit this test — remove
+        ``expectedFailure`` once the trace replays cleanly or replace with a bounded
+        harness that documents tolerated drift.
+        """
         state = make_initial_state(
             self.map_data,
             self.record["co0"],

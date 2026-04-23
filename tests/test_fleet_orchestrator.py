@@ -28,6 +28,7 @@ def _fo():
 fo = _fo()
 FleetOrchestrator = fo.FleetOrchestrator
 main = fo.main
+read_proposed_args = fo.read_proposed_args
 
 
 def _orch(tmp_path: Path, *, pools: list[str], **kw: object) -> object:
@@ -346,9 +347,10 @@ def test_audit_log_one_row_per_decision(
     )
     o.tick()
     lines = o.audit_log.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 5
+    assert len(lines) == 7
     kinds = {json.loads(L)["kind"] for L in lines}
     assert "heartbeat_alert" in kinds
+    assert "fleet_diagnosis" in kinds
     for L in lines:
         row = json.loads(L)
         for k in ("kind", "machine_id", "applied", "reason", "details", "tick_id"):
@@ -441,3 +443,51 @@ def test_main_one_tick_runs_without_real_fleet(
     assert alog.is_file()
     line = alog.read_text(encoding="utf-8").strip().splitlines()
     assert line and json.loads(line[0])["kind"] == "noop"
+
+
+def test_read_proposed_args_missing_returns_none(tmp_path: Path) -> None:
+    assert read_proposed_args("nope", tmp_path) is None
+
+
+def test_read_proposed_args_loads_json(tmp_path: Path) -> None:
+    p = tmp_path / "fleet" / "m1" / "proposed_args.json"
+    p.parent.mkdir(parents=True)
+    payload = {"machine_id": "m1", "args": {"--n-envs": 2}}
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    got = read_proposed_args("m1", tmp_path)
+    assert got == payload
+
+
+def test_proposed_args_row_in_audit_when_file_present(
+    tmp_path: Path,
+) -> None:
+    prop = {
+        "machine_id": "a",
+        "proposed_at": "2026-04-22T00:00:00Z",
+        "based_on_probe_at": "2026-04-22T00:00:00Z",
+        "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256},
+        "reasoning": "test fixture",
+        "auto_apply": False,
+    }
+    (tmp_path / "fleet" / "a" / "proposed_args.json").parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    (tmp_path / "fleet" / "a" / "proposed_args.json").write_text(
+        json.dumps(prop), encoding="utf-8"
+    )
+    (tmp_path / "checkpoints").mkdir(parents=True)
+    o = _orch(
+        tmp_path, pools=["a"], curator_min_age_minutes=0.0
+    )
+    o.tick()
+    lines = o.audit_log.read_text(encoding="utf-8").strip().splitlines()
+    rows = [json.loads(L) for L in lines]
+    kinds = [r["kind"] for r in rows]
+    assert "proposed_args" in kinds
+    pr = [r for r in rows if r["kind"] == "proposed_args"]
+    assert len(pr) == 1
+    row = pr[0]
+    assert row["machine_id"] == "a"
+    assert row["applied"] is False
+    assert row["details"]["proposed"] == prop
+    assert "path" in row["details"]

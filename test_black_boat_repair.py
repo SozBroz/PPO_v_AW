@@ -113,6 +113,12 @@ class TestBlackBoatRepairBehaviour(unittest.TestCase):
         self.assertEqual(state.funds[0], funds_before - expected_cost)
 
     def test_heal_never_exceeds_max_hp(self) -> None:
+        """Residue band: internal 91–99 shows 10/10 bars; AWBW charges $0 but tops HP to 100.
+
+        GL **1635742** (env 38): Md.Tank @ 97 internal — PHP ``Repair.funds`` unchanged while
+        internal HP reaches 100. Engine matches that **display-cap residue** policy; see
+        ``engine/game.py`` ``_apply_repair`` (~lines 1787–1798).
+        """
         state, bb = _state_with_boat()
         inf = _make_unit(state, UnitType.INFANTRY, 0, (2, 2), hp=95)
         funds_before = state.funds[0]
@@ -123,7 +129,26 @@ class TestBlackBoatRepairBehaviour(unittest.TestCase):
             unit_pos=bb.pos, move_pos=bb.pos, target_pos=inf.pos,
         ))
         self.assertEqual(inf.hp, 100)
-        # Heal happened (95 → 100), so full heal cost was charged.
+        # Display-cap residue: no gold charged (bars already read 10/10 at 95 internal).
+        self.assertEqual(state.funds[0], funds_before)
+
+    def test_heal_below_display_cap_charges_cost(self) -> None:
+        """Guard: only the maxed-bar residue band is $0; normal ticks still charge 10% cost.
+
+        50→60 internal is 5→6 bars — well below the display cap — so full Black Boat heal
+        cost must apply (pairs with ``test_heal_never_exceeds_max_hp`` / GL 1635742 residue).
+        """
+        state, bb = _state_with_boat()
+        inf = _make_unit(state, UnitType.INFANTRY, 0, (2, 2), hp=50)
+        funds_before = state.funds[0]
+
+        _select_and_move(state, bb, bb.pos)
+        state.step(Action(
+            ActionType.REPAIR,
+            unit_pos=bb.pos, move_pos=bb.pos, target_pos=inf.pos,
+        ))
+
+        self.assertEqual(inf.hp, 60)
         expected_cost = max(1, UNIT_STATS[UnitType.INFANTRY].cost // 10)
         self.assertEqual(state.funds[0], funds_before - expected_cost)
 

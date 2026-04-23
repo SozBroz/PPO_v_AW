@@ -3,8 +3,12 @@ that do not mutate units (stages SELECT / MOVE)."""
 
 from __future__ import annotations
 
+import random
+
 import numpy as np
 import pytest
+
+import engine.game as game_mod
 
 from engine.action import Action, ActionStage, ActionType, get_legal_actions
 from engine.game import make_initial_state
@@ -75,6 +79,16 @@ def test_select_unit_in_select_stage_skips_snapshot(monkeypatch):
     assert n[0] == 0
 
 
+def _belief_digest(env: AWBWEnv):
+    return {
+        pl: tuple(
+            (uid, b.hp_min, b.hp_max, b.display_bucket, b.player)
+            for uid, b in sorted(env._beliefs[pl]._beliefs.items())
+        )
+        for pl in (0, 1)
+    }
+
+
 def test_select_unit_in_move_stage_skips_snapshot(monkeypatch):
     env = AWBWEnv()
     _reset_env_with_select_unit(env, monkeypatch)
@@ -91,6 +105,55 @@ def test_select_unit_in_move_stage_skips_snapshot(monkeypatch):
     monkeypatch.setattr(env, "_snapshot_units", count_snap)
     env._engine_step_with_belief(move_acts[0])
     assert n[0] == 0
+
+
+def test_select_unit_in_action_stage_skips_snapshot(monkeypatch):
+    """SELECT_UNIT in ACTION is a step() no-op (no elif branch); early-exit safe."""
+    env = AWBWEnv()
+    _reset_env_with_select_unit(env, monkeypatch)
+    _to_action_wait(env)
+    unit = env.state.selected_unit
+    move_pos = env.state.selected_move_pos
+    assert unit is not None and move_pos is not None
+    fake = Action(ActionType.SELECT_UNIT, unit_pos=unit.pos, move_pos=move_pos)
+    real_get = game_mod.get_legal_actions
+
+    def patched_get(state):
+        out = real_get(state)
+        return out + [fake]
+
+    monkeypatch.setattr(game_mod, "get_legal_actions", patched_get)
+    n = [0]
+
+    def count_snap(*_a, **_k):
+        n[0] += 1
+        return {}
+
+    monkeypatch.setattr(env, "_snapshot_units", count_snap)
+    pre_digest = _belief_digest(env)
+    env._engine_step_with_belief(fake)
+    assert n[0] == 0
+    assert env.state.action_stage == ActionStage.ACTION
+    assert env.state.selected_unit is unit
+    assert env.state.selected_move_pos == move_pos
+    assert _belief_digest(env) == pre_digest
+
+
+def test_early_exit_disabled_runs_snapshot_for_select(monkeypatch):
+    monkeypatch.setenv("AWBW_BELIEF_EARLY_EXIT_FULL", "0")
+    env = AWBWEnv()
+    legal = _reset_env_with_select_unit(env, monkeypatch)
+    a = _first_select_unit(legal)
+    n = [0]
+    real = env._snapshot_units
+
+    def count_snap(*_a, **_k):
+        n[0] += 1
+        return real()
+
+    monkeypatch.setattr(env, "_snapshot_units", count_snap)
+    env._engine_step_with_belief(a)
+    assert n[0] > 0
 
 
 def test_action_stage_runs_full_belief_diff(monkeypatch):
@@ -171,6 +234,65 @@ def test_legal_cache_invalidated_on_select_unit(monkeypatch):
     a = _first_select_unit(get_legal_actions(env.state))
     env._engine_step_with_belief(a)
     assert env._legal_cache is None
+
+
+def test_legal_cache_invalidated_on_select_unit_action_stage(monkeypatch):
+    env = AWBWEnv()
+    _reset_env_with_select_unit(env, monkeypatch)
+    _to_action_wait(env)
+    unit = env.state.selected_unit
+    move_pos = env.state.selected_move_pos
+    fake = Action(ActionType.SELECT_UNIT, unit_pos=unit.pos, move_pos=move_pos)
+    real_get = game_mod.get_legal_actions
+
+    def patched_get(state):
+        return real_get(state) + [fake]
+
+    monkeypatch.setattr(game_mod, "get_legal_actions", patched_get)
+    env._get_legal()
+    assert env._legal_cache is not None
+    env._engine_step_with_belief(fake)
+    assert env._legal_cache is None
+
+
+def test_belief_parity_early_exit_flag_vs_disabled(monkeypatch):
+    """Same RNG trajectory: beliefs and outcomes match with early-exit on vs off."""
+    _rng_snapshot = random.getstate()
+    try:
+        traces = []
+        for flag in ("1", "0"):
+            # Combat uses ``random.randint`` (global). Reset before each trace so
+            # the first loop iteration does not advance luck rolls consumed by the second.
+            random.seed(12_345)
+            monkeypatch.setenv("AWBW_BELIEF_EARLY_EXIT_FULL", flag)
+            env = AWBWEnv(max_env_steps=120, max_p1_microsteps=50)
+            monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+            rng = np.random.default_rng(123)
+            env.reset(seed=7, options={"map_id": MAP_WITH_P0_UNITS})
+            seq = []
+            for _ in range(200):
+                m = env.action_masks()
+                idxs = np.flatnonzero(m)
+                if len(idxs) == 0:
+                    break
+                a = int(rng.choice(idxs))
+                env.step(a)
+                seq.append(
+                    (
+                        env.state.turn,
+                        int(env.state.active_player),
+                        env.state.action_stage.name,
+                        bool(env.state.done),
+                        int(env.state.winner) if env.state.winner is not None else None,
+                        _belief_digest(env),
+                    )
+                )
+                if env.state.done:
+                    break
+            traces.append(seq)
+        assert traces[0] == traces[1]
+    finally:
+        random.setstate(_rng_snapshot)
 
 
 def test_belief_state_consistency_full_episode(monkeypatch):

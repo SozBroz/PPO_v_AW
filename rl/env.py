@@ -10,6 +10,7 @@ The agent always controls player 0 (red seat: first mover on symmetric starts).
 Player 1 (blue seat) is stepped automatically using either a provided opponent
 policy or a random fallback.
 """
+import collections
 import json
 import os
 import random
@@ -67,6 +68,16 @@ BUILD_MASK_INFANTRY_ONLY_ENV = "AWBW_BUILD_MASK_INFANTRY_ONLY"
 # value to decay. See plan p0-capture-architecture-fix Tier 1.
 LEARNER_GREEDY_MIX_ENV = "AWBW_LEARNER_GREEDY_MIX"
 
+# When ``1``, each ``AWBWEnv`` records wall time per ``step()`` in a small ring
+# buffer for FPS / straggler diagnostics (SubprocVecEnv). Default off — zero deque
+# allocation and no extra timers in the hot path.
+TRACK_PER_WORKER_TIMES_ENV = "AWBW_TRACK_PER_WORKER_TIMES"
+
+# Phase 1b: reuse env-owned numpy buffers for ``encode_state`` and ``_get_action_mask``
+# in the hot path. Set to ``0`` to use fresh allocations (parity / A–B). Default on.
+# Read once per :class:`AWBWEnv` instance (set before spawn in training).
+PREALLOCATED_BUFFERS_ENV = "AWBW_PREALLOCATED_BUFFERS"
+
 # Reward shaping mode (plan rl_capture-combat_recalibration).
 #   "level" (default) — legacy: per-step (p0_val − p1_val) × 2e-6 + asymmetric
 #                       property-diff term. Persists every step → cumulative
@@ -108,7 +119,7 @@ def _append_game_log_line(record: dict) -> None:
     """
     GAME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     db_path = os.environ.get(SESSION_GAME_COUNTER_DB_ENV)
-    # Phase 10/11 prereq (schema 1.7): stamp every row with the writer's
+    # Phase 10/11 prereq (game_log schema ≥1.7): stamp every row with the writer's
     # machine identity. Read at write time so a single dev box without the env
     # var emits None and the orchestrator's per-machine slicing degrades
     # cleanly. Held at the writer boundary (not plumbed through log_record)
@@ -531,12 +542,15 @@ class AWBWEnv(gym.Env):
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
 
         # Phase 1b (FPS campaign): reuse numpy buffers for mask + obs to cut allocator churn.
-        # Golden tests in tests/test_env_buffer_reuse_golden.py guard against stale reuse.
+        # Golden tests: tests/test_env_buffer_reuse_golden.py, tests/test_phase1b_golden_buffers.py
         self._action_mask_buf = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
         self._spatial_obs_buf = np.zeros(
             (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32
         )
         self._scalars_obs_buf = np.zeros((N_SCALARS,), dtype=np.float32)
+        self._use_preallocated_buffers: bool = (
+            os.environ.get(PREALLOCATED_BUFFERS_ENV, "1") == "1"
+        )
 
         # Phase 4: env-scoped legal-action cache. Populated lazily by
         # self._get_legal(); invalidated after every state.step in
@@ -582,6 +596,37 @@ class AWBWEnv(gym.Env):
         self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, p_alpha)
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
+
+        self._step_times: collections.deque[float] | None = (
+            collections.deque(maxlen=100)
+            if os.environ.get(TRACK_PER_WORKER_TIMES_ENV) == "1"
+            else None
+        )
+
+    def get_step_time_stats(self) -> dict[str, float]:
+        """Return percentile summary of recent ``step()`` wall times, or ``{}`` if tracking is off.
+
+        Enabled only when ``AWBW_TRACK_PER_WORKER_TIMES=1`` at env construction
+        (SubprocVecEnv workers inherit env at spawn).
+        """
+        if self._step_times is None:
+            return {}
+        if not self._step_times:
+            return {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "max": 0.0,
+                "count": 0.0,
+            }
+        arr = np.fromiter(self._step_times, dtype=np.float64, count=len(self._step_times))
+        return {
+            "p50": float(np.percentile(arr, 50)),
+            "p95": float(np.percentile(arr, 95)),
+            "p99": float(np.percentile(arr, 99)),
+            "max": float(arr.max()),
+            "count": float(arr.size),
+        }
 
     def reload_opponent_pool(self) -> Optional[int]:
         """Phase 10c: refresh the underlying opponent's checkpoint pool.
@@ -702,6 +747,9 @@ class AWBWEnv(gym.Env):
         self._invalid_action_count: int = 0
         self._max_p1_microsteps: int = 0
         self._p1_truncated_mid_turn = False
+        # Episode-end log metadata (set in step() immediately before _log_finished_game).
+        self._log_episode_truncated: bool = False
+        self._log_episode_truncation_reason: str | None = None
         # Phase 0a.2 (FPS campaign): per-episode wall-time split between the
         # P0 step path and the P1 microstep loop. Bounded by perf_counter()
         # at episode boundary; never read during the hot path. Surfaced as
@@ -755,6 +803,10 @@ class AWBWEnv(gym.Env):
         if self.state is None:
             raise RuntimeError("Call reset() before step().")
 
+        _track_step_wall = self._step_times is not None
+        if _track_step_wall:
+            _t_wall_track = time.perf_counter()
+
         # Phase 0a.2: per-step wall accounting. _t_step_start brackets the entire
         # step; _p1_delta is added to _wall_p1_s and subtracted from the P0 share.
         # perf_counter() calls are at episode/section boundaries only, so they
@@ -775,9 +827,8 @@ class AWBWEnv(gym.Env):
         # for the final on-policy phase.
         if self._learner_greedy_mix > 0.0 and random.random() < self._learner_greedy_mix:
             from rl.self_play import pick_capture_greedy_flat
-            mask = _get_action_mask(
-                self.state, out=self._action_mask_buf, legal=self._get_legal()
-            )
+            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+            mask = _get_action_mask(self.state, out=_mout, legal=self._get_legal())
             action_idx = pick_capture_greedy_flat(self.state, mask)
             self._learner_teacher_overrides += 1
 
@@ -788,6 +839,8 @@ class AWBWEnv(gym.Env):
             obs = self._get_obs()
             # Phase 0a.2: invalid-action early return is still P0 work; account it.
             self._wall_p0_s += time.perf_counter() - _t_step_start
+            if _track_step_wall:
+                self._step_times.append(time.perf_counter() - _t_wall_track)
             return obs, -0.1, False, False, {"invalid_action": True}
 
         # Φ-shaping snapshot (plan rl_capture-combat_recalibration). Bracketed
@@ -854,14 +907,20 @@ class AWBWEnv(gym.Env):
 
         obs = self._get_obs()
         terminated = bool(self.state.done)
-        truncated = bool(self._p1_truncated_mid_turn)
+        p1_cap_trunc = bool(self._p1_truncated_mid_turn)
         self._p1_truncated_mid_turn = False
-        if (
+        env_step_trunc = (
             self._max_env_steps is not None
             and self._p0_env_steps >= self._max_env_steps
             and not self.state.done
-        ):
-            truncated = True
+        )
+        truncated = p1_cap_trunc or env_step_trunc
+        truncation_reason: str | None = None
+        if truncated:
+            if env_step_trunc:
+                truncation_reason = "max_env_steps"
+            elif p1_cap_trunc:
+                truncation_reason = "max_p1_microsteps"
         info = {
             **self._episode_info,
             "turn": self.state.turn,
@@ -896,22 +955,30 @@ class AWBWEnv(gym.Env):
         self._wall_p1_s += _p1_delta
         self._wall_p0_s += max(0.0, _step_total - _p1_delta)
 
-        # Log finished game (Phase A requirement)
-        if terminated:
+        # Log finished game (Phase A requirement) — natural end or forced truncation.
+        if terminated or truncated:
+            self._log_episode_truncated = truncated
+            self._log_episode_truncation_reason = truncation_reason
             self._log_finished_game()
 
         if self.render_mode == "ansi":
             print(self.state.render_ascii())
+
+        if _track_step_wall:
+            self._step_times.append(time.perf_counter() - _t_wall_track)
 
         return obs, float(reward), terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
         """Return valid-action bool mask. Required by MaskablePPO wrappers."""
         if self.state is None:
-            self._action_mask_buf.fill(False)
-            return self._action_mask_buf
+            if self._use_preallocated_buffers:
+                self._action_mask_buf.fill(False)
+                return self._action_mask_buf
+            return np.zeros(ACTION_SPACE_SIZE, dtype=bool)
         legal = self._get_legal()
-        mask = _get_action_mask(self.state, out=self._action_mask_buf, legal=legal)
+        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+        mask = _get_action_mask(self.state, out=_mout, legal=legal)
         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
         if flag in ("1", "true", "yes", "on"):
             _strip_non_infantry_builds(mask, self.state, legal=legal)
@@ -982,16 +1049,34 @@ class AWBWEnv(gym.Env):
         interval information — never exact HP.
         """
         belief = self._beliefs.get(observer) if hasattr(self, "_beliefs") else None
-        encode_state(
+        if self._use_preallocated_buffers:
+            encode_state(
+                self.state,
+                observer=observer,
+                belief=belief,
+                out_spatial=self._spatial_obs_buf,
+                out_scalars=self._scalars_obs_buf,
+            )
+            return {
+                "spatial": self._spatial_obs_buf,
+                "scalars": self._scalars_obs_buf,
+            }
+        spatial, scalars = encode_state(
             self.state,
             observer=observer,
             belief=belief,
-            out_spatial=self._spatial_obs_buf,
-            out_scalars=self._scalars_obs_buf,
+            out_spatial=None,
+            out_scalars=None,
         )
-        return {"spatial": self._spatial_obs_buf, "scalars": self._scalars_obs_buf}
+        return {"spatial": spatial, "scalars": scalars}
 
     # -- Belief bookkeeping ----------------------------------------------------
+    def _belief_early_exit_enabled(self) -> bool:
+        """When false (``AWBW_BELIEF_EARLY_EXIT_FULL=0``), every step runs the
+        snapshot/diff/sync_own_units path — for A/B tests and parity checks."""
+        v = os.environ.get("AWBW_BELIEF_EARLY_EXIT_FULL", "1").strip().lower()
+        return v not in ("0", "false", "no", "off")
+
     def _snapshot_units(self) -> dict[int, dict]:
         """Per-unit snapshot keyed by ``unit_id`` before an engine step.
 
@@ -1035,19 +1120,26 @@ class AWBWEnv(gym.Env):
 
         # Phase 5: belief diff early-exit. SELECT_UNIT in SELECT or MOVE stages
         # only advances state.action_stage and sets selected_*_pos -- no unit
-        # list, HP, or position mutation. Skip the snapshot/diff/sync_own_units
-        # overhead for these (~2/3 of all engine steps). Still invalidate the
-        # legal cache because action_stage flips. Also still capture pre-step
-        # attack range info for ATTACK actions (those are ACTION stage anyway,
-        # so they take the full path below).
+        # list, HP, or position mutation. In ACTION stage, ``GameState.step``
+        # has no branch for SELECT_UNIT (only SELECT/MOVE are handled) so the
+        # step is a legal-mask no-op if ever emitted — same skip applies.
+        # Skip snapshot/diff/enemy-event overhead; still sync_own_units above.
+        # Invalidate the legal cache because the mask can change. ATTACK and all
+        # real ACTION terminators take the full path below.
         _pre_stage = self.state.action_stage
         if (
-            action.action_type == ActionType.SELECT_UNIT
-            and _pre_stage in (ActionStage.SELECT, ActionStage.MOVE)
+            self._belief_early_exit_enabled()
+            and action.action_type == ActionType.SELECT_UNIT
+            and _pre_stage
+            in (ActionStage.SELECT, ActionStage.MOVE, ActionStage.ACTION)
         ):
-            # Fast path: no unit mutation possible.
+            # Fast path: no unit mutation from this action — skip snapshot/diff
+            # and enemy belief events. Still sync own units (cheap): they must
+            # stay hp_min=hp_max=engine HP every step (see belief parity tests).
             self.state, reward, done = self.state.step(action)
             self._invalidate_legal_cache()
+            for b in beliefs:
+                b.sync_own_units(self.state)
             return self.state, reward, done
 
         # Pre-step snapshot + optional attack range.
@@ -1184,7 +1276,8 @@ class AWBWEnv(gym.Env):
             needs_obs = True if needs_obs_fn is None else bool(needs_obs_fn())
             obs = self._get_obs(observer=1) if needs_obs else None
             legal = self._get_legal()
-            mask = _get_action_mask(self.state, out=self._action_mask_buf, legal=legal)
+            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+            mask = _get_action_mask(self.state, out=_mout, legal=legal)
             try:
                 opp_idx = int(self.opponent_policy(obs, mask))
             except Exception:
@@ -1388,9 +1481,12 @@ class AWBWEnv(gym.Env):
 
             # Schema version for future compatibility
             # 1.6: Phase 0a (FPS campaign) — added wall_p0_s / wall_p1_s / worker_rss_mb.
-            # 1.7: Phase 10/11 prereq — added machine_id (writer-stamped, see
-            #      _append_game_log_line) and terrain_usage_p0 (computed above).
-            "log_schema_version": "1.7",
+            # 1.7: Phase 10/11 prereq — machine_id (writer-stamped) + terrain_usage_p0.
+            # 1.8: terminated / truncated / truncation_reason (forced episode caps).
+            "terminated": bool(self.state.done),
+            "truncated": bool(getattr(self, "_log_episode_truncated", False)),
+            "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
+            "log_schema_version": "1.8",
         }
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag

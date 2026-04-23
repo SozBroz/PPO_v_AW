@@ -24,9 +24,14 @@ engine calendar tiebreak above ``engine.game.MAX_TURNS`` (default 100).
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import logging
 import os
+import statistics
 import sys
+import traceback
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -34,72 +39,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-
-def _worker_game(payload: dict) -> tuple[int, int, bool]:
-    """Return (game_index, winner, truncated_flag)."""
-    from sb3_contrib.common.wrappers import ActionMasker
-
-    from rl.ckpt_compat import load_maskable_ppo_compat
-    from rl.env import AWBWEnv
-
-    game_i = int(payload["game_i"])
-    seed = int(payload["seed"])
-    ch = Path(payload["challenger"])
-    df = Path(payload["defender"])
-    map_pool = json.loads(payload["map_pool_json"])
-    tier = payload["tier"]
-    co_p0 = payload["co_p0"]
-    co_p1 = payload["co_p1"]
-    deterministic = bool(payload["deterministic"])
-    max_env_steps = payload.get("max_env_steps")
-    max_p1_microsteps = payload.get("max_p1_microsteps")
-    max_turns = payload.get("max_turns")
-
-    class _Opp:
-        def __init__(self) -> None:
-            self._m = None
-
-        def __call__(self, obs, mask):
-            if self._m is None:
-                self._m = load_maskable_ppo_compat(str(df), device="cpu", cache=True)
-            a, _ = self._m.predict(obs, action_masks=mask, deterministic=deterministic)
-            return int(a)
-
-    opp = _Opp()
-    env_kw: dict = dict(
-        map_pool=map_pool,
-        opponent_policy=opp,
-        co_p0=co_p0,
-        co_p1=co_p1,
-        tier_name=tier,
-        curriculum_tag="symmetric_eval",
-    )
-    if max_env_steps is not None:
-        env_kw["max_env_steps"] = int(max_env_steps)
-    if max_p1_microsteps is not None:
-        env_kw["max_p1_microsteps"] = int(max_p1_microsteps)
-    if max_turns is not None:
-        env_kw["max_turns"] = int(max_turns)
-    env = ActionMasker(
-        AWBWEnv(**env_kw),
-        lambda e: e.action_masks(),
-    )
-    p0 = load_maskable_ppo_compat(str(ch), device="cpu", cache=True)
-    obs, _ = env.reset(seed=seed)
-    done = False
-    last_trunc = False
-    while not done:
-        mask = env.action_masks()
-        act, _ = p0.predict(obs, action_masks=mask, deterministic=bool(deterministic))
-        obs, _r, term, trunc, info = env.step(int(act))
-        last_trunc = bool(trunc or info.get("truncated"))
-        done = bool(term or trunc)
-    w_raw = env.unwrapped.state.winner
-    w = -1 if w_raw is None else int(w_raw)
-    return game_i, w, last_trunc
+_LOG = logging.getLogger(__name__)
 
 
-def main() -> int:
+def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
+    """Argparse for symmetric eval (used by main and tests)."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--candidate", type=Path, required=True, help="Fork / BC zip (evaluated as P0 then P1)")
     ap.add_argument("--baseline", type=Path, required=True, help="Baseline zip e.g. latest.zip")
@@ -156,6 +100,232 @@ def main() -> int:
         default="balanced",
         help="Φ preset (α,β,κ) when using phi shaping; default balanced. Sets AWBW_PHI_PROFILE for this run.",
     )
+    ap.add_argument(
+        "--mcts-mode",
+        type=str,
+        default="off",
+        choices=("off", "eval_only"),
+        help=(
+            "Phase 11c: turn-boundary MCTS for P0 only (challenger zip). "
+            "P1 keeps the existing opponent policy. Default off."
+        ),
+    )
+    ap.add_argument("--mcts-sims", type=int, default=16, help="MCTS simulations per root.")
+    ap.add_argument("--mcts-c-puct", type=float, default=1.5, help="PUCT c_puct.")
+    ap.add_argument("--mcts-dirichlet-alpha", type=float, default=0.3, help="Root Dirichlet alpha.")
+    ap.add_argument("--mcts-dirichlet-epsilon", type=float, default=0.25, help="Root Dirichlet mix.")
+    ap.add_argument("--mcts-temperature", type=float, default=1.0, help="Root plan selection temperature.")
+    ap.add_argument("--mcts-min-depth", type=int, default=4, help="Min depth before PUCT.")
+    ap.add_argument("--mcts-root-plans", type=int, default=8, help="Root expansion plan samples.")
+    ap.add_argument(
+        "--mcts-max-plan-actions",
+        type=int,
+        default=256,
+        help="Max actions per simulated turn in MCTS expansion.",
+    )
+    return ap
+
+
+def _mcts_fields_from_args(ns: argparse.Namespace) -> dict:
+    """Subset passed to workers (JSON-serializable)."""
+    return {
+        "mcts_mode": str(ns.mcts_mode),
+        "mcts_sims": int(ns.mcts_sims),
+        "mcts_c_puct": float(ns.mcts_c_puct),
+        "mcts_dirichlet_alpha": float(ns.mcts_dirichlet_alpha),
+        "mcts_dirichlet_epsilon": float(ns.mcts_dirichlet_epsilon),
+        "mcts_temperature": float(ns.mcts_temperature),
+        "mcts_min_depth": int(ns.mcts_min_depth),
+        "mcts_root_plans": int(ns.mcts_root_plans),
+        "mcts_max_plan_actions": int(ns.mcts_max_plan_actions),
+    }
+
+
+def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
+    """Return (game_index, winner, truncated_flag, mcts_telemetry)."""
+    import numpy as np
+    from sb3_contrib.common.wrappers import ActionMasker
+
+    from engine.action import ActionStage, ActionType
+
+    from rl.ckpt_compat import load_maskable_ppo_compat
+    from rl.env import AWBWEnv, _action_to_flat, _flat_to_action
+    from rl.mcts import MCTSConfig, make_callables_from_sb3_policy, run_mcts
+
+    game_i = int(payload["game_i"])
+    seed = int(payload["seed"])
+    ch = Path(payload["challenger"])
+    df = Path(payload["defender"])
+    map_pool = json.loads(payload["map_pool_json"])
+    tier = payload["tier"]
+    co_p0 = payload["co_p0"]
+    co_p1 = payload["co_p1"]
+    deterministic = bool(payload["deterministic"])
+    max_env_steps = payload.get("max_env_steps")
+    max_p1_microsteps = payload.get("max_p1_microsteps")
+    max_turns = payload.get("max_turns")
+
+    mcts_mode = str(payload.get("mcts_mode") or "off").strip().lower()
+    mcts_telemetry: dict = {
+        "mcts_decision_wall_s": [],
+        "mcts_pv_depths": [],
+        "mcts_total_wall_s": 0.0,
+        "mcts_failures": 0,
+        "mcts_total_decisions": 0,
+    }
+    mcts_cfg = MCTSConfig(
+        num_sims=int(payload.get("mcts_sims", 16)),
+        c_puct=float(payload.get("mcts_c_puct", 1.5)),
+        dirichlet_alpha=float(payload.get("mcts_dirichlet_alpha", 0.3)),
+        dirichlet_epsilon=float(payload.get("mcts_dirichlet_epsilon", 0.25)),
+        temperature=float(payload.get("mcts_temperature", 1.0)),
+        min_depth=int(payload.get("mcts_min_depth", 4)),
+        root_plans=int(payload.get("mcts_root_plans", 8)),
+        max_plan_actions=int(payload.get("mcts_max_plan_actions", 256)),
+    )
+    use_mcts = mcts_mode == "eval_only" and mcts_cfg.num_sims > 0
+    zero_warned = False
+
+    def _pred_int(act: object) -> int:
+        if isinstance(act, int | np.integer):
+            return int(act)
+        return int(np.asarray(act, dtype=np.int64).reshape(-1)[0])
+
+    class _Opp:
+        def __init__(self) -> None:
+            self._m = None
+
+        def __call__(self, obs, mask):
+            if self._m is None:
+                self._m = load_maskable_ppo_compat(str(df), device="cpu", cache=True)
+            a, _ = self._m.predict(obs, action_masks=mask, deterministic=deterministic)
+            return _pred_int(a)
+
+    opp = _Opp()
+    env_kw: dict = dict(
+        map_pool=map_pool,
+        opponent_policy=opp,
+        co_p0=co_p0,
+        co_p1=co_p1,
+        tier_name=tier,
+        curriculum_tag="symmetric_eval",
+    )
+    if max_env_steps is not None:
+        env_kw["max_env_steps"] = int(max_env_steps)
+    if max_p1_microsteps is not None:
+        env_kw["max_p1_microsteps"] = int(max_p1_microsteps)
+    if max_turns is not None:
+        env_kw["max_turns"] = int(max_turns)
+    env = ActionMasker(
+        AWBWEnv(**env_kw),
+        lambda e: e.action_masks(),
+    )
+    p0 = load_maskable_ppo_compat(str(ch), device="cpu", cache=True)
+    obs, _ = env.reset(seed=seed)
+    done = False
+    last_trunc = False
+
+    uenv = env.unwrapped
+    cached_plan: deque = deque()
+    mid_turn_plan_exhausted = False
+    mcts_decision_ix = 0
+
+    def _p0_flat_direct() -> int:
+        m = env.action_masks()
+        act, _ = p0.predict(obs, action_masks=m, deterministic=bool(deterministic))
+        return _pred_int(act)
+
+    while not done:
+        st = uenv.state
+        act_idx: int | None = None
+        chosen_by_mcts_queue = False
+
+        if mcts_mode == "eval_only" and mcts_cfg.num_sims == 0 and not zero_warned:
+            _LOG.warning(
+                "[sym] --mcts-mode eval_only but mcts_sims=0; using direct policy for P0"
+            )
+            zero_warned = True
+
+        if not use_mcts:
+            act_idx = _p0_flat_direct()
+        elif len(cached_plan) > 0:
+            act_obj = cached_plan.popleft()
+            act_idx = _action_to_flat(act_obj)
+            chosen_by_mcts_queue = True
+        elif mid_turn_plan_exhausted:
+            act_idx = _p0_flat_direct()
+        elif st.action_stage == ActionStage.SELECT:
+            try:
+                root = copy.deepcopy(st)
+                pol_c, val_c, prior_c = make_callables_from_sb3_policy(p0, uenv)
+                mcts_cfg_run = MCTSConfig(
+                    num_sims=mcts_cfg.num_sims,
+                    c_puct=mcts_cfg.c_puct,
+                    dirichlet_alpha=mcts_cfg.dirichlet_alpha,
+                    dirichlet_epsilon=mcts_cfg.dirichlet_epsilon,
+                    temperature=mcts_cfg.temperature,
+                    min_depth=mcts_cfg.min_depth,
+                    root_plans=mcts_cfg.root_plans,
+                    max_plan_actions=mcts_cfg.max_plan_actions,
+                    rng_seed=int(seed) ^ (mcts_decision_ix * 0x9E3779B9),
+                )
+                mcts_decision_ix += 1
+                plan, stats = run_mcts(
+                    root,
+                    policy_callable=pol_c,
+                    value_callable=val_c,
+                    prior_callable=prior_c,
+                    config=mcts_cfg_run,
+                )
+                mcts_telemetry["mcts_decision_wall_s"].append(float(stats["wall_time_s"]))
+                mcts_telemetry["mcts_pv_depths"].append(int(stats["principal_variation_depth"]))
+                mcts_telemetry["mcts_total_wall_s"] += float(stats["wall_time_s"])
+                mcts_telemetry["mcts_total_decisions"] += 1
+                if plan:
+                    cached_plan.extend(plan)
+            except Exception:
+                mcts_telemetry["mcts_failures"] += 1
+                _LOG.error("[sym] MCTS failed; falling back to direct policy for this step\n%s", traceback.format_exc())
+                cached_plan.clear()
+                mid_turn_plan_exhausted = False
+                act_idx = _p0_flat_direct()
+
+            if act_idx is None and len(cached_plan) > 0:
+                act_obj = cached_plan.popleft()
+                act_idx = _action_to_flat(act_obj)
+                chosen_by_mcts_queue = True
+            elif act_idx is None:
+                act_idx = _p0_flat_direct()
+        else:
+            act_idx = _p0_flat_direct()
+
+        st_pre = uenv.state
+        obs, _r, term, trunc, info = env.step(int(act_idx))
+        last_trunc = bool(trunc or info.get("truncated"))
+        done = bool(term or trunc)
+
+        dec = _flat_to_action(int(act_idx), st_pre, legal=uenv._get_legal())
+        st_after = uenv.state
+        if len(cached_plan) > 0:
+            mid_turn_plan_exhausted = False
+        elif dec is not None and dec.action_type == ActionType.END_TURN:
+            mid_turn_plan_exhausted = False
+        elif (
+            chosen_by_mcts_queue
+            and use_mcts
+            and not (term or trunc)
+            and st_after.active_player == 0
+        ):
+            # Documented: MCTS plan ended before END_TURN; remaining P0 actions use direct policy.
+            mid_turn_plan_exhausted = True
+
+    w_raw = env.unwrapped.state.winner
+    w = -1 if w_raw is None else int(w_raw)
+    return game_i, w, last_trunc, mcts_telemetry
+
+
+def main() -> int:
+    ap = build_symmetric_checkpoint_eval_parser()
     args = ap.parse_args()
     # Must be set before any import that loads engine.game (e.g. rl.self_play); workers inherit the env.
     os.environ["AWBW_PHI_PROFILE"] = str(args.phi_profile)
@@ -200,11 +370,47 @@ def main() -> int:
             raise SystemExit("no maps for --map-id")
         pool_json = json.dumps(map_pool)
         rng = np.random.default_rng(args.seed)
+        mcts_payload = _mcts_fields_from_args(args)
 
         results: list[dict] = []
         cand_wins = 0
         base_wins = 0
         game_no = 0
+        agg_mcts_walls: list[float] = []
+        agg_mcts_pv: list[int] = []
+        agg_mcts_failures = 0
+        agg_mcts_decisions = 0
+        agg_mcts_total_wall = 0.0
+
+        def _accumulate_mcts_tel(tel: dict) -> None:
+            nonlocal agg_mcts_failures, agg_mcts_decisions, agg_mcts_total_wall
+            agg_mcts_walls.extend(float(x) for x in tel.get("mcts_decision_wall_s", []))
+            agg_mcts_pv.extend(int(x) for x in tel.get("mcts_pv_depths", []))
+            agg_mcts_failures += int(tel.get("mcts_failures", 0))
+            agg_mcts_decisions += int(tel.get("mcts_total_decisions", 0))
+            agg_mcts_total_wall += float(tel.get("mcts_total_wall_s", 0.0))
+
+        def _mk_worker_payload(
+            gn: int,
+            sd: int,
+            challenger: Path,
+            defender: Path,
+        ) -> dict:
+            return {
+                "game_i": gn,
+                "seed": sd,
+                "challenger": str(challenger),
+                "defender": str(defender),
+                "map_pool_json": pool_json,
+                "tier": args.tier,
+                "co_p0": args.co_p0,
+                "co_p1": args.co_p1,
+                "deterministic": args.deterministic,
+                "max_env_steps": max_env_steps,
+                "max_p1_microsteps": args.max_p1_microsteps,
+                "max_turns": args.max_turns,
+                **mcts_payload,
+            }
 
         def _one_game_outcome(
             *,
@@ -215,22 +421,8 @@ def main() -> int:
             label: str,
         ) -> None:
             nonlocal cand_wins, base_wins
-            _gi, w, was_trunc = _worker_game(
-                {
-                    "game_i": game_no,
-                    "seed": seed,
-                    "challenger": str(challenger),
-                    "defender": str(defender),
-                    "map_pool_json": pool_json,
-                    "tier": args.tier,
-                    "co_p0": args.co_p0,
-                    "co_p1": args.co_p1,
-                    "deterministic": args.deterministic,
-                    "max_env_steps": max_env_steps,
-                    "max_p1_microsteps": args.max_p1_microsteps,
-                    "max_turns": args.max_turns,
-                }
-            )
+            _gi, w, was_trunc, tel = _worker_game(_mk_worker_payload(game_no, seed, challenger, defender))
+            _accumulate_mcts_tel(tel)
             if challenger == cand_snap:
                 cw = w == 0
                 bw = w == 1
@@ -282,32 +474,19 @@ def main() -> int:
             use_parallel = bool(args.parallel) and n_games > 1 and workers > 1
             if use_parallel:
                 payloads = [
-                    {
-                        "game_i": gn,
-                        "seed": sd,
-                        "challenger": str(challenger),
-                        "defender": str(defender),
-                        "map_pool_json": pool_json,
-                        "tier": args.tier,
-                        "co_p0": args.co_p0,
-                        "co_p1": args.co_p1,
-                        "deterministic": args.deterministic,
-                        "max_env_steps": max_env_steps,
-                        "max_p1_microsteps": args.max_p1_microsteps,
-                        "max_turns": args.max_turns,
-                    }
-                    for gn, sd in tasks
+                    _mk_worker_payload(gn, sd, challenger, defender) for gn, sd in tasks
                 ]
                 print(f"[sym] parallel block={label} workers={workers} games={n_games}")
                 with ProcessPoolExecutor(max_workers=workers) as ex:
                     futs = {ex.submit(_worker_game, p): p for p in payloads}
-                    by_i: dict[int, tuple[int, bool]] = {}
+                    by_i: dict[int, tuple[int, bool, dict]] = {}
                     for fut in as_completed(futs):
                         p = futs[fut]
-                        gi, w, was_trunc = fut.result()
-                        by_i[int(gi)] = (w, was_trunc)
+                        gi, w, was_trunc, tel = fut.result()
+                        by_i[int(gi)] = (w, was_trunc, tel)
                 for gn, sd in tasks:
-                    w, was_trunc = by_i[gn]
+                    w, was_trunc, tel = by_i[gn]
+                    _accumulate_mcts_tel(tel)
                     if challenger == cand_snap:
                         cw = w == 0
                         bw = w == 1
@@ -346,7 +525,7 @@ def main() -> int:
             f"[sym] candidate_as_P0 x{args.games_first_seat} "
             f"then candidate_as_P1 x{args.games_second_seat} "
             f"(max_env_steps={max_env_steps}, max_turns={args.max_turns}, "
-            f"parallel={args.parallel})"
+            f"parallel={args.parallel}, mcts_mode={args.mcts_mode})"
         )
         run_block(
             challenger=cand_snap,
@@ -407,6 +586,16 @@ def main() -> int:
                 "games": results,
                 "promotion_heuristic_ok": promote_ok,
             }
+            if args.mcts_mode == "eval_only":
+                summary["mcts_per_decision_wall_s_p50"] = (
+                    float(statistics.median(agg_mcts_walls)) if agg_mcts_walls else None
+                )
+                summary["mcts_total_decisions"] = int(agg_mcts_decisions)
+                summary["mcts_total_wall_s"] = float(agg_mcts_total_wall)
+                summary["mcts_avg_principal_variation_depth"] = (
+                    float(sum(agg_mcts_pv) / len(agg_mcts_pv)) if agg_mcts_pv else None
+                )
+                summary["mcts_failure_count"] = int(agg_mcts_failures)
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
             args.json_out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
             print(f"[sym] wrote {args.json_out}")

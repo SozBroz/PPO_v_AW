@@ -1,9 +1,11 @@
-"""Schema 1.7 contract: ``machine_id`` + ``terrain_usage_p0`` in ``game_log.jsonl``.
+"""Schema 1.8 contract: 1.7 fields plus ``terminated`` / ``truncated`` / ``truncation_reason``.
 
 Plan: ``.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`` — Phase 10/11
 logging prerequisites. Without ``machine_id`` on every row the orchestrator's
 per-machine rolling-window logic in 10g/10h/11d is impossible; without
 ``terrain_usage_p0`` the MCTS health gate (11d) has no terrain signal.
+
+Schema 1.8 adds explicit episode-end flags (natural vs forced truncation).
 
 The writer (``_append_game_log_line``) stamps ``machine_id`` from the env
 var ``AWBW_MACHINE_ID`` at write time so a solo dev box without the var
@@ -73,7 +75,7 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     monkeypatch.delenv("AWBW_MACHINE_ID", raising=False)
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
-    assert row["log_schema_version"] == "1.7"
+    assert row["log_schema_version"] == "1.8"
 
     assert "machine_id" in row, "writer must always stamp machine_id"
     assert row["machine_id"] is None, (
@@ -87,6 +89,10 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     assert isinstance(val, float), f"terrain_usage_p0 must be float, got {type(val)}"
     assert 0.0 <= val <= 1.0, f"terrain_usage_p0 out of range: {val!r}"
 
+    assert row.get("terminated") is True
+    assert row.get("truncated") is False
+    assert row.get("truncation_reason") is None
+
 
 def test_log_schema_v17_machine_id_from_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -95,5 +101,5 @@ def test_log_schema_v17_machine_id_from_env(
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
     assert row["machine_id"] == "test-pc"
-    assert row["log_schema_version"] == "1.7"
+    assert row["log_schema_version"] == "1.8"
     assert isinstance(row["terrain_usage_p0"], float)

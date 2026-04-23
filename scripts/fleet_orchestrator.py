@@ -11,21 +11,27 @@ this script just reads. SSH-driven probes are deferred to Phase 10f.
 
 Audit trail: every tick appends one or more rows to
 logs/fleet_orchestrator.jsonl (one row per decision class —
-heartbeat-check, curate, eval, promote, reload).
+heartbeat-check, mcts health, proposed_args, curate, eval, promote, reload).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
+
+_LOG = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -37,7 +43,57 @@ from rl.fleet_env import (  # noqa: E402
     verdict_summary_from_symmetric_json,
 )
 
-DecKind = Literal["heartbeat_alert", "curate", "eval", "promote", "reload_request", "noop"]
+# tools/ is not a regular package (no __init__.py); load the health gate by path.
+_mh_name = "awbw_mcts_health"
+_mh_spec = importlib.util.spec_from_file_location(
+    _mh_name, REPO_ROOT / "tools" / "mcts_health.py"
+)
+_mcts_health = importlib.util.module_from_spec(_mh_spec)
+# Required before exec: dataclasses look up ``sys.modules[cls.__module__]``.
+sys.modules[_mh_name] = _mcts_health
+assert _mh_spec.loader
+_mh_spec.loader.exec_module(_mcts_health)
+
+_fd_name = "awbw_fleet_diagnosis"
+_fd_spec = importlib.util.spec_from_file_location(
+    _fd_name, REPO_ROOT / "tools" / "fleet_diagnosis.py"
+)
+_fleet_diagnosis = importlib.util.module_from_spec(_fd_spec)
+sys.modules[_fd_name] = _fleet_diagnosis
+assert _fd_spec.loader
+_fd_spec.loader.exec_module(_fleet_diagnosis)
+
+_ca_name = "awbw_curriculum_advisor"
+_ca_spec = importlib.util.spec_from_file_location(
+    _ca_name, REPO_ROOT / "tools" / "curriculum_advisor.py"
+)
+_curriculum_advisor = importlib.util.module_from_spec(_ca_spec)
+sys.modules[_ca_name] = _curriculum_advisor
+assert _ca_spec.loader
+_ca_spec.loader.exec_module(_curriculum_advisor)
+
+_pt_name = "awbw_propose_train_args"
+_pt_spec = importlib.util.spec_from_file_location(
+    _pt_name, REPO_ROOT / "tools" / "propose_train_args.py"
+)
+_propose_train_args = importlib.util.module_from_spec(_pt_spec)
+sys.modules[_pt_name] = _propose_train_args
+assert _pt_spec.loader
+_pt_spec.loader.exec_module(_propose_train_args)
+
+DecKind = Literal[
+    "heartbeat_alert",
+    "curate",
+    "eval",
+    "promote",
+    "reload_request",
+    "proposed_args",
+    "restart_train",
+    "mcts_health",
+    "fleet_diagnosis",
+    "curriculum_proposal",
+    "noop",
+]
 
 
 @dataclass
@@ -82,6 +138,225 @@ def _read_json_path(p: Path) -> Optional[dict[str, Any]]:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def read_proposed_args(machine_id: str, repo_root: Path) -> Optional[dict[str, Any]]:
+    """
+    Read ``fleet/<machine_id>/proposed_args.json`` under *repo_root* (typically
+    ``--shared-root`` for this orchestrator — the tree that contains ``fleet/``).
+    """
+    p = Path(repo_root) / "fleet" / machine_id / "proposed_args.json"
+    if not p.is_file():
+        return None
+    return _read_json_path(p)
+
+
+def proposed_args_content_sha256(proposed_doc: dict[str, Any]) -> Optional[str]:
+    """SHA-256 of the canonical JSON for the ``args`` field (sorted keys)."""
+    args = proposed_doc.get("args")
+    if not isinstance(args, dict):
+        return None
+    blob = json.dumps(args, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def proposed_document_body_sha256(proposed_doc: dict[str, Any]) -> str:
+    """SHA-256 of the document minus ``proposed_at`` (wall clock excluded from drift checks)."""
+    body = {k: v for k, v in proposed_doc.items() if k != "proposed_at"}
+    blob = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def build_train_argv_from_proposed_args(
+    proposed_doc: dict[str, Any], *, repo_root: Path
+) -> list[str]:
+    """
+    Build a ``train.py`` argv from ``proposed_args.json``-style ``args`` map.
+    Mirrors ``scripts/start_solo_training.py`` defaults, extended to honor every key in ``args``.
+    """
+    args_map = proposed_doc.get("args")
+    if not isinstance(args_map, dict):
+        args_map = {}
+
+    def g(key: str, default: Any) -> Any:
+        return args_map[key] if key in args_map else default
+
+    n_envs = int(g("--n-envs", 4))
+    n_steps = int(g("--n-steps", 512))
+    batch_size = int(g("--batch-size", 256))
+    save_every = int(g("--save-every", 50_000))
+    iters = int(g("--iters", 1_000_000_000))
+
+    head: list[str] = [
+        sys.executable,
+        str(Path(repo_root) / "train.py"),
+        "--iters",
+        str(iters),
+        "--n-envs",
+        str(n_envs),
+        "--n-steps",
+        str(n_steps),
+        "--batch-size",
+        str(batch_size),
+        "--save-every",
+        str(save_every),
+        "--map-id",
+        str(g("--map-id", 123858)),
+        "--tier",
+        str(g("--tier", "T3")),
+        "--co-p0",
+        str(g("--co-p0", 1)),
+        "--co-p1",
+        str(g("--co-p1", 1)),
+        "--cold-opponent",
+        str(g("--cold-opponent", "greedy_capture")),
+        "--learner-greedy-mix",
+        str(g("--learner-greedy-mix", 0.3)),
+        "--max-env-steps",
+        str(int(g("--max-env-steps", 8000))),
+        "--max-p1-microsteps",
+        str(int(g("--max-p1-microsteps", 4000))),
+    ]
+    processed: set[str] = {
+        "--iters",
+        "--n-envs",
+        "--n-steps",
+        "--batch-size",
+        "--save-every",
+        "--map-id",
+        "--tier",
+        "--co-p0",
+        "--co-p1",
+        "--cold-opponent",
+        "--learner-greedy-mix",
+        "--max-env-steps",
+        "--max-p1-microsteps",
+    }
+    cm = g("--capture-move-gate", None)
+    if cm is True or cm == _curriculum_advisor.FLAG_PRESENT:
+        head.append("--capture-move-gate")
+        processed.add("--capture-move-gate")
+
+    for key in sorted(args_map.keys()):
+        if key in processed:
+            continue
+        val = args_map[key]
+        if val is True or val == _curriculum_advisor.FLAG_PRESENT:
+            head.append(key)
+        elif val is False:
+            continue
+        else:
+            head.extend([key, str(val)])
+    return head
+
+
+def _atomic_write_json(path: Path, obj: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _train_pid_process_alive(pid: int) -> bool:
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover
+        return False
+    try:
+        return bool(psutil.pid_exists(pid) and psutil.Process(pid).is_running())
+    except (psutil.Error, ValueError):
+        return False
+
+
+def _terminate_train_process_tree(pid: int, timeout_s: float = 30.0) -> None:
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    procs = list(proc.children(recursive=True)) + [proc]
+    for p in procs:
+        try:
+            p.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=timeout_s)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+def read_mcts_health(
+    machine_id: str, shared_root: Path
+) -> Optional[_mcts_health.MctsHealthVerdict]:  # type: ignore[valid-type, misc]
+    """
+    Read ``fleet/<id>/mcts_health.json`` (Phase 11d). Never auto-applied.
+
+    If ``measured_at`` is more than 24h old, returns a downgraded verdict with
+    ``proposed_mcts_mode="off"`` and ``reasoning="stale verdict"`` (operator
+    must re-run :mod:`tools.mcts_health`).
+
+    Returns ``None`` if the file is missing or not parseable.
+    """
+    p = Path(shared_root) / "fleet" / machine_id / "mcts_health.json"
+    if not p.is_file():
+        return None
+    raw = _read_json_path(p)
+    if raw is None:
+        return None
+    v = _mcts_health.parse_mcts_health_json(raw)
+    if v is None:
+        return None
+    if _mcts_health.is_mcts_health_stale(v.measured_at):
+        return _mcts_health.stale_mcts_off_verdict(v)
+    return v
+
+
+def read_fleet_diagnosis(
+    machine_id: str,
+    shared_root: Path,
+    *,
+    is_orchestrator_host: bool = False,
+    game_logs_path: Path | None = None,
+    repo_root: Path | None = None,
+) -> _fleet_diagnosis.DiagnosisVerdict:  # type: ignore[valid-type, misc]
+    """Read or compute the most recent diagnosis verdict for this machine.
+
+    Audit-only this session: returns the verdict for logging into
+    fleet_orchestrator.jsonl. Never feeds into proposed_args.json.
+    """
+    shared_root = Path(shared_root)
+    mid = str(machine_id)
+    gpath = game_logs_path
+    if gpath is None:
+        rr = Path(repo_root) if repo_root is not None else shared_root
+        cand = rr / "logs" / mid / "game_log.jsonl"
+        gpath = cand if cand.is_file() else rr / "logs" / "game_log.jsonl"
+    fleet_d = shared_root / "fleet" / mid
+    applied = fleet_d / "applied_args.json"
+    curr = fleet_d / "curriculum_state.json"
+    ivhist = fleet_d / "intervention_history.json"
+    v = _fleet_diagnosis.compute_diagnosis(
+        gpath,
+        mid,
+        is_orchestrator_host=is_orchestrator_host,
+        applied_args_path=applied if applied.is_file() else None,
+        curriculum_state_path=curr if curr.is_file() else None,
+        intervention_history_path=ivhist if ivhist.is_file() else None,
+    )
+    dest = fleet_d / "diagnosis.json"
+    _fleet_diagnosis.write_diagnosis(dest, v)
+    return v
 
 
 def _status_last_seen_ago(data: dict[str, Any], now: float) -> Optional[float]:
@@ -165,6 +440,13 @@ class FleetOrchestrator:
         state_file: Path,
         eval_timeout_seconds: float,
         eval_seed: int = 0,
+        auto_apply: bool = False,
+        apply_cooldown_s: float = 600.0,
+        train_pid_file_template: str = "fleet/{machine_id}/train.pid",
+        train_launch_cmd_file_template: str = "fleet/{machine_id}/train_launch_cmd.json",
+        curriculum_enabled: bool = True,
+        curriculum_window_games: int = 100,
+        curriculum_state_file_template: str = "fleet/{machine_id}/curriculum_state.json",
     ) -> None:
         self.shared_root = shared_root.resolve()
         self.pools = sorted(set(pools))
@@ -187,6 +469,16 @@ class FleetOrchestrator:
         self.state_file = state_file
         self.eval_timeout_seconds = float(eval_timeout_seconds)
         self.eval_seed = int(eval_seed)
+        self.auto_apply = bool(auto_apply)
+        self.apply_cooldown_s = float(apply_cooldown_s)
+        self.train_pid_file_template = str(train_pid_file_template)
+        self.train_launch_cmd_file_template = str(train_launch_cmd_file_template)
+        self.curriculum_enabled = bool(curriculum_enabled)
+        self.curriculum_window_games = int(curriculum_window_games)
+        self.curriculum_state_file_template = str(curriculum_state_file_template)
+        self._last_apply_at_by_machine: dict[str, float] = {}
+        self._train_restart_times_by_machine: dict[str, list[float]] = {}
+        self._circuit_open_until_by_machine: dict[str, float] = {}
         self._laggard_cycles: dict[str, int] = self._load_laggard_state()
 
     def _load_laggard_state(self) -> dict[str, int]:
@@ -284,6 +576,481 @@ class FleetOrchestrator:
             verdicts_dir=fleet,
             tick_started_at=t0,
         )
+
+    def read_mcts_health_decisions(self) -> list[TickDecision]:
+        """Surface ``fleet/<id>/mcts_health.json`` in the audit log (read-only, never apply)."""
+        out: list[TickDecision] = []
+        for mid in self.pools:
+            v = read_mcts_health(mid, self.shared_root)
+            if v is None:
+                continue
+            p = self.shared_root / "fleet" / mid / "mcts_health.json"
+            out.append(
+                TickDecision(
+                    kind="mcts_health",
+                    machine_id=mid,
+                    details={
+                        "verdict": _mcts_health.verdict_to_dict(v),
+                        "path": str(p.resolve()),
+                    },
+                    applied=False,
+                    reason=f"mcts health gate (read-only, not applied): {mid}",
+                )
+            )
+        return out
+
+    def read_fleet_diagnosis_decisions(self) -> list[TickDecision]:
+        """Write ``fleet/<id>/diagnosis.json`` and surface verdict in the audit log (audit-only)."""
+        out: list[TickDecision] = []
+        for mid in self.pools:
+            gpath = self._game_log_path_for_machine(mid)
+            is_host = mid == "pc-b"
+            v = read_fleet_diagnosis(
+                mid,
+                self.shared_root,
+                is_orchestrator_host=is_host,
+                game_logs_path=gpath,
+                repo_root=self.repo_root,
+            )
+            dest = (self.shared_root / "fleet" / mid / "diagnosis.json").resolve()
+            out.append(
+                TickDecision(
+                    kind="fleet_diagnosis",
+                    machine_id=mid,
+                    details={
+                        "event": "fleet_diagnosis",
+                        "state": v.state.value,
+                        "verdict": _fleet_diagnosis.verdict_to_dict(v),
+                        "path": str(dest),
+                    },
+                    applied=False,
+                    reason=f"fleet diagnosis (audit-only): {mid} state={v.state.value}",
+                )
+            )
+        return out
+
+    def read_proposed_train_arg_docs(self) -> list[TickDecision]:
+        """Surface fleet/<id>/proposed_args.json in the audit log (read-only, never apply)."""
+        out: list[TickDecision] = []
+        for mid in self.pools:
+            data = read_proposed_args(mid, self.shared_root)
+            if data is None:
+                continue
+            path = self.shared_root / "fleet" / mid / "proposed_args.json"
+            out.append(
+                TickDecision(
+                    kind="proposed_args",
+                    machine_id=mid,
+                    details={"proposed": data, "path": str(path.resolve())},
+                    applied=False,
+                    reason=f"proposed train args (read-only, not applied): {mid}",
+                )
+            )
+        return out
+
+    def _resolve_train_sidecar_path(self, machine_id: str, template: str) -> Path:
+        rel = template.format(machine_id=machine_id)
+        p = Path(rel)
+        if p.is_absolute():
+            return p.resolve()
+        return (self.shared_root / p).resolve()
+
+    def _game_log_path_for_machine(self, machine_id: str) -> Path:
+        per_m = self.repo_root / "logs" / machine_id / "game_log.jsonl"
+        if per_m.is_file():
+            return per_m
+        return self.repo_root / "logs" / "game_log.jsonl"
+
+    def refresh_proposed_train_args_documents(self, _state: FleetState) -> list[TickDecision]:
+        """
+        Merge probe-derived args with curriculum advisor + MCTS health, atomically
+        updating ``fleet/<id>/proposed_args.json`` when the payload changes.
+        """
+        out: list[TickDecision] = []
+        for mid in self.pools:
+            probe_path = self.shared_root / "fleet" / mid / "probe.json"
+            if not probe_path.is_file():
+                continue
+            probe_raw = _read_json_path(probe_path)
+            if probe_raw is None:
+                continue
+            try:
+                base_doc = _propose_train_args.propose_from_probe(probe_raw)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("propose_from_probe failed for %s: %s", mid, exc)
+                continue
+            merged_args: dict[str, Any] = dict(base_doc.get("args") or {})
+            if not isinstance(merged_args, dict):
+                merged_args = {}
+
+            curriculum_reason = ""
+            curriculum_stage = ""
+            metrics_snap: dict[str, Any] = {}
+            st_new: Optional[_curriculum_advisor.CurriculumState] = None
+            st_path = self._resolve_train_sidecar_path(
+                mid, self.curriculum_state_file_template
+            )
+            merged_mcts = False
+
+            if self.curriculum_enabled:
+                gpath = self._game_log_path_for_machine(mid)
+                prev = _curriculum_advisor.read_state(st_path)
+                prop, st_new = _curriculum_advisor.compute_proposal_stable(
+                    gpath,
+                    prev,
+                    window_games=self.curriculum_window_games,
+                    machine_id=mid,
+                )
+                merged_args.update(prop.args_overrides)
+                curriculum_reason = prop.reason
+                curriculum_stage = prop.stage_name
+                metrics_snap = asdict(prop.metrics_snapshot)
+
+            v = read_mcts_health(mid, self.shared_root)
+            if (
+                v is not None
+                and v.pass_overall
+                and str(v.proposed_mcts_mode).strip().lower() != "off"
+            ):
+                merged_args["--mcts-mode"] = v.proposed_mcts_mode
+                merged_args["--mcts-sims"] = int(v.proposed_mcts_sims)
+                merged_mcts = True
+
+            reasoning_parts = [str(base_doc.get("reasoning") or "")]
+            if self.curriculum_enabled and curriculum_reason:
+                reasoning_parts.append(f"curriculum: {curriculum_reason}")
+            if merged_mcts and v is not None:
+                reasoning_parts.append(
+                    f"mcts: mode={v.proposed_mcts_mode} sims={v.proposed_mcts_sims}"
+                )
+            reasoning = "; ".join(p for p in reasoning_parts if p)
+
+            prev_auto = False
+            old_doc = read_proposed_args(mid, self.shared_root)
+            if isinstance(old_doc, dict):
+                prev_auto = bool(old_doc.get("auto_apply"))
+
+            new_doc: dict[str, Any] = {
+                **base_doc,
+                "args": merged_args,
+                "reasoning": reasoning,
+                "auto_apply": prev_auto,
+            }
+            if self.curriculum_enabled and curriculum_stage:
+                # Stage only (metrics go to audit row; omitting rolling metrics avoids
+                # rewriting proposed_args.json every tick when args are unchanged).
+                new_doc["curriculum"] = {"stage": curriculum_stage}
+
+            out_path = self.shared_root / "fleet" / mid / "proposed_args.json"
+            old_fp = (
+                proposed_document_body_sha256(old_doc)
+                if isinstance(old_doc, dict)
+                else None
+            )
+            new_fp = proposed_document_body_sha256(new_doc)
+            args_changed = old_fp != new_fp
+
+            if self.curriculum_enabled and st_new is not None and not self.dry_run:
+                _curriculum_advisor.write_state(st_path, st_new)
+
+            if args_changed and not self.dry_run:
+                new_doc["proposed_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                _atomic_write_json(out_path, new_doc)
+
+            if self.curriculum_enabled:
+                out.append(
+                    TickDecision(
+                        kind="curriculum_proposal",
+                        machine_id=mid,
+                        details={
+                            "event": "curriculum_proposal",
+                            "stage": curriculum_stage or None,
+                            "metrics": metrics_snap or None,
+                            "reason": curriculum_reason or None,
+                            "merged_mcts": merged_mcts,
+                            "args_changed": args_changed,
+                            "path": str(out_path.resolve()),
+                        },
+                        applied=args_changed and not self.dry_run,
+                        reason=f"curriculum tick for {mid}",
+                    )
+                )
+        return out
+
+    def _respawn_train_from_launch_file(self, launch_path: Path) -> Optional[int]:
+        raw = _read_json_path(launch_path)
+        if raw is None:
+            return None
+        cmd = raw.get("cmd")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+            return None
+        env_extra = raw.get("env") or {}
+        if not isinstance(env_extra, dict):
+            env_extra = {}
+        cwd_raw = raw.get("cwd")
+        cwd = str(cwd_raw) if cwd_raw else str(self.repo_root)
+        env_full = {**os.environ, **{str(k): str(v) for k, v in env_extra.items()}}
+        kw: dict[str, Any] = {"cwd": cwd, "env": env_full}
+        if sys.platform == "win32":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        proc = subprocess.Popen(cmd, **kw)  # noqa: S603
+        return int(proc.pid)
+
+    def maybe_restart_train_for_proposed_args(self, _state: FleetState) -> list[TickDecision]:
+        """
+        When ``proposed_args.json`` ``args`` hash differs from ``applied_args.json``,
+        optionally terminate and respawn ``train.py`` (Tier 1: machine-probe-driven only).
+        """
+        out: list[TickDecision] = []
+        now = time.time()
+        for mid in self.pools:
+            proposed = read_proposed_args(mid, self.shared_root)
+            if proposed is None:
+                continue
+            prop_h = proposed_args_content_sha256(proposed)
+            if prop_h is None:
+                continue
+            applied_path = (self.shared_root / "fleet" / mid / "applied_args.json").resolve()
+            applied = _read_json_path(applied_path) if applied_path.is_file() else None
+            if applied is None:
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"proposed_hash": prop_h},
+                        applied=False,
+                        reason=(
+                            "applied_args.json missing; bootstrap must seed applied_args.json"
+                        ),
+                    )
+                )
+                continue
+            prev_h = applied.get("args_content_sha256")
+            if not isinstance(prev_h, str):
+                prev_h = proposed_args_content_sha256({"args": applied.get("args")})
+            if prev_h == prop_h:
+                continue
+
+            pid_path = self._resolve_train_sidecar_path(mid, self.train_pid_file_template)
+            launch_path = self._resolve_train_sidecar_path(
+                mid, self.train_launch_cmd_file_template
+            )
+
+            if not self.auto_apply:
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={
+                            "proposed_hash": prop_h,
+                            "previous_hash": prev_h,
+                            "pid_path": str(pid_path),
+                            "launch_path": str(launch_path),
+                        },
+                        applied=False,
+                        reason="auto-apply disabled",
+                    )
+                )
+                continue
+
+            if now < self._circuit_open_until_by_machine.get(mid, 0.0):
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={
+                            "circuit_open_until": self._circuit_open_until_by_machine[mid],
+                        },
+                        applied=False,
+                        reason="circuit breaker open (3 restarts in 30m)",
+                    )
+                )
+                continue
+
+            last_apply = float(self._last_apply_at_by_machine.get(mid, 0.0))
+            try:
+                last_apply = max(last_apply, float(applied.get("applied_at", 0.0)))
+            except (TypeError, ValueError):
+                pass
+            if now - last_apply < self.apply_cooldown_s:
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={
+                            "seconds_since_last_apply": now - last_apply,
+                            "cooldown_s": self.apply_cooldown_s,
+                        },
+                        applied=False,
+                        reason="apply cooldown active",
+                    )
+                )
+                continue
+
+            if not pid_path.is_file():
+                _LOG.warning("train pid file missing for %s: %s", mid, pid_path)
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"pid_path": str(pid_path)},
+                        applied=False,
+                        reason="train pid file missing (orchestrator does not spawn train)",
+                    )
+                )
+                continue
+
+            try:
+                pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
+            except (OSError, ValueError, IndexError):
+                _LOG.warning("train pid file unreadable for %s: %s", mid, pid_path)
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"pid_path": str(pid_path)},
+                        applied=False,
+                        reason="train pid file missing or unreadable",
+                    )
+                )
+                continue
+
+            if not _train_pid_process_alive(pid):
+                _LOG.warning("train pid %s not running for %s", pid, mid)
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"pid": pid},
+                        applied=False,
+                        reason="train pid stale or process not running",
+                    )
+                )
+                continue
+
+            if not launch_path.is_file():
+                _LOG.error("train launch cmd file missing for %s: %s", mid, launch_path)
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"launch_path": str(launch_path)},
+                        applied=False,
+                        reason="train_launch_cmd.json missing",
+                    )
+                )
+                continue
+
+            hist = self._train_restart_times_by_machine.setdefault(mid, [])
+            cutoff = now - 1800.0
+            hist = [t for t in hist if t >= cutoff]
+            self._train_restart_times_by_machine[mid] = hist
+            if len(hist) >= 3:
+                self._circuit_open_until_by_machine[mid] = now + 3600.0
+                _LOG.error(
+                    "circuit breaker: %s had 3 train restarts in 30m; suppressing 60m",
+                    mid,
+                )
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"recent_restarts": len(hist)},
+                        applied=False,
+                        reason="circuit breaker tripped (3 restarts in 30m)",
+                    )
+                )
+                continue
+
+            try:
+                _terminate_train_process_tree(pid)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.error("failed to terminate train pid %s: %s", pid, exc)
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={"pid": pid, "error": str(exc)},
+                        applied=False,
+                        reason="terminate train failed",
+                    )
+                )
+                continue
+
+            raw_launch = _read_json_path(launch_path)
+            launch_payload: dict[str, Any]
+            if isinstance(raw_launch, dict):
+                launch_payload = {**raw_launch}
+            else:
+                launch_payload = {}
+            launch_payload["cmd"] = build_train_argv_from_proposed_args(
+                proposed, repo_root=self.repo_root
+            )
+            if "env" not in launch_payload:
+                launch_payload["env"] = {}
+            if "cwd" not in launch_payload:
+                launch_payload["cwd"] = str(self.repo_root)
+            _atomic_write_json(launch_path, launch_payload)
+
+            new_pid = self._respawn_train_from_launch_file(launch_path)
+            if new_pid is None:
+                out.append(
+                    TickDecision(
+                        kind="restart_train",
+                        machine_id=mid,
+                        details={},
+                        applied=False,
+                        reason="respawn failed (bad train_launch_cmd.json)",
+                    )
+                )
+                continue
+
+            _atomic_write_text(pid_path, str(new_pid) + "\n")
+            applied_doc = {
+                **proposed,
+                "applied_at": time.time(),
+                "args_content_sha256": prop_h,
+            }
+            _atomic_write_json(applied_path, applied_doc)
+            self._last_apply_at_by_machine[mid] = time.time()
+            hist.append(time.time())
+            self._train_restart_times_by_machine[mid] = hist
+
+            _LOG.info(
+                "restart_train applied: machine_id=%s stopped_pid=%s new_pid=%s",
+                mid,
+                pid,
+                new_pid,
+            )
+            try:
+                life = self.shared_root / "logs" / "orchestrator_train_lifecycle.log"
+                life.parent.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                with life.open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        f"{ts} machine_id={mid} stopped_pid={pid} new_pid={new_pid} "
+                        f"proposed_hash={prop_h!s}\n"
+                    )
+            except OSError as exc:  # pragma: no cover - best-effort log
+                _LOG.warning("could not append orchestrator_train_lifecycle.log: %s", exc)
+
+            out.append(
+                TickDecision(
+                    kind="restart_train",
+                    machine_id=mid,
+                    details={
+                        "previous_pid": pid,
+                        "new_pid": new_pid,
+                        "proposed_hash": prop_h,
+                        "applied_path": str(applied_path),
+                    },
+                    applied=True,
+                    reason="proposed_args content changed",
+                )
+            )
+        return out
 
     def check_heartbeats(self, state: FleetState) -> list[TickDecision]:
         out: list[TickDecision] = []
@@ -584,6 +1351,11 @@ class FleetOrchestrator:
         st = self.read_fleet_state()
         all_d: list[TickDecision] = []
         all_d.extend(self.check_heartbeats(st))
+        all_d.extend(self.refresh_proposed_train_args_documents(st))
+        all_d.extend(self.read_mcts_health_decisions())
+        all_d.extend(self.read_fleet_diagnosis_decisions())
+        all_d.extend(self.read_proposed_train_arg_docs())
+        all_d.extend(self.maybe_restart_train_for_proposed_args(st))
         all_d.extend(self.curate_pools(st))
         ev_decs, ev_map = self.run_symmetric_evals(st)
         all_d.extend(ev_decs)
@@ -664,6 +1436,59 @@ def main() -> int:
         help="Disable --dry-run and actually apply decisions.",
     )
     ap.add_argument(
+        "--auto-apply",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow train.py restarts when fleet/<id>/proposed_args.json drifts vs "
+            "applied_args.json (uses train.pid + train_launch_cmd.json). "
+            "Independent of --dry-run (curate/eval/promote still follow --dry-run)."
+        ),
+    )
+    ap.add_argument(
+        "--apply-cooldown-s",
+        type=float,
+        default=600.0,
+        help="Minimum wall seconds between train restarts per machine (default 600).",
+    )
+    ap.add_argument(
+        "--train-pid-file",
+        type=str,
+        default="fleet/{machine_id}/train.pid",
+        help="Path template under --shared-root for train.py PID file",
+    )
+    ap.add_argument(
+        "--train-launch-cmd-file",
+        type=str,
+        default="fleet/{machine_id}/train_launch_cmd.json",
+        help="Path template under --shared-root for train launch JSON",
+    )
+    ap.set_defaults(curriculum_enabled=True)
+    ap.add_argument(
+        "--no-curriculum",
+        dest="curriculum_enabled",
+        action="store_false",
+        help="Disable curriculum advisor merge into proposed_args",
+    )
+    ap.add_argument(
+        "--curriculum-enabled",
+        dest="curriculum_enabled",
+        action="store_true",
+        help="Enable curriculum advisor merge (default)",
+    )
+    ap.add_argument(
+        "--curriculum-window-games",
+        type=int,
+        default=100,
+        help="Rolling game window for curriculum metrics",
+    )
+    ap.add_argument(
+        "--curriculum-state-file",
+        type=str,
+        default="fleet/{machine_id}/curriculum_state.json",
+        help="Template under --shared-root for curriculum_state.json",
+    )
+    ap.add_argument(
         "--audit-log", type=Path, default=Path("logs") / "fleet_orchestrator.jsonl"
     )
     ap.add_argument(
@@ -693,6 +1518,13 @@ def main() -> int:
         state_file=args.state_file,
         eval_timeout_seconds=args.eval_timeout_seconds,
         eval_seed=args.eval_seed,
+        auto_apply=bool(args.auto_apply),
+        apply_cooldown_s=args.apply_cooldown_s,
+        train_pid_file_template=args.train_pid_file,
+        train_launch_cmd_file_template=args.train_launch_cmd_file,
+        curriculum_enabled=bool(args.curriculum_enabled),
+        curriculum_window_games=int(args.curriculum_window_games),
+        curriculum_state_file_template=str(args.curriculum_state_file),
     )
     if args.once:
         orch.tick()
