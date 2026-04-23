@@ -108,6 +108,12 @@ def _append_game_log_line(record: dict) -> None:
     """
     GAME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     db_path = os.environ.get(SESSION_GAME_COUNTER_DB_ENV)
+    # Phase 10/11 prereq (schema 1.7): stamp every row with the writer's
+    # machine identity. Read at write time so a single dev box without the env
+    # var emits None and the orchestrator's per-machine slicing degrades
+    # cleanly. Held at the writer boundary (not plumbed through log_record)
+    # so the two code paths above can't drift.
+    machine_id = os.environ.get("AWBW_MACHINE_ID")
 
     if db_path:
         conn = sqlite3.connect(db_path, timeout=120.0)
@@ -121,7 +127,7 @@ def _append_game_log_line(record: dict) -> None:
             conn.execute("UPDATE session_seq SET n = n + 1 WHERE singleton = 1")
             row = conn.execute("SELECT n FROM session_seq WHERE singleton = 1").fetchone()
             game_id = int(row[0])
-            full = {"game_id": game_id, **record}
+            full = {"game_id": game_id, "machine_id": machine_id, **record}
             line = json.dumps(full) + "\n\n"
             with open(GAME_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(line)
@@ -136,7 +142,7 @@ def _append_game_log_line(record: dict) -> None:
     global _local_session_game_count
     with _log_lock:
         _local_session_game_count += 1
-        full = {"game_id": _local_session_game_count, **record}
+        full = {"game_id": _local_session_game_count, "machine_id": machine_id, **record}
         line = json.dumps(full) + "\n\n"
         with open(GAME_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line)
@@ -535,6 +541,26 @@ class AWBWEnv(gym.Env):
         self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, p_alpha)
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
+
+    def reload_opponent_pool(self) -> Optional[int]:
+        """Phase 10c: refresh the underlying opponent's checkpoint pool.
+
+        Called via SubprocVecEnv.env_method between rollouts. Returns the
+        new candidate count, or None if the opponent does not support
+        refresh (e.g. random-policy opponents in tests).
+
+        SB3's :meth:`~stable_baselines3.common.vec_env.VecEnv.env_method`
+        uses :meth:`gymnasium.Wrapper.get_wrapper_attr`, so this method
+        is reachable on the unwrapped env without attaching it to
+        :class:`sb3_contrib.common.wrappers.ActionMasker`.
+        """
+        fn = getattr(self.opponent_policy, "reload_pool", None)
+        if fn is None:
+            return None
+        try:
+            return int(fn())
+        except Exception:
+            return None
 
     # ── Map helpers ───────────────────────────────────────────────────────────
 
@@ -1050,7 +1076,9 @@ class AWBWEnv(gym.Env):
             # Opponent sees the board from P1's seat, with P1's belief overlay —
             # not P0's. Before the HP belief work this leaked exact P0 HP into
             # the opponent model on the blue seat.
-            obs = self._get_obs(observer=1)
+            needs_obs_fn = getattr(self.opponent_policy, "needs_observation", None)
+            needs_obs = True if needs_obs_fn is None else bool(needs_obs_fn())
+            obs = self._get_obs(observer=1) if needs_obs else None
             mask = _get_action_mask(self.state)
             try:
                 opp_idx = int(self.opponent_policy(obs, mask))
@@ -1137,6 +1165,25 @@ class AWBWEnv(gym.Env):
         except Exception:
             worker_rss_mb = None
 
+        # Phase 11e (schema 1.7): fraction of P0 unit positions sitting on
+        # terrain with defense_stars >= 2 at episode end. Required signal for
+        # the MCTS health gate. Empty unit list yields 0.0 (no divide-by-zero).
+        # `defense_stars` lives on TerrainInfo as `defense` (engine/terrain.py:90);
+        # there is no helper named `get_defense_stars` in this repo despite the
+        # hint in the plan — we read the field directly via get_terrain().
+        p0_units = self.state.units.get(0, [])
+        defended_count = 0
+        total_count = 0
+        for u in p0_units:
+            if not u.is_alive:
+                continue
+            r, c = u.pos
+            tid = self.state.map_data.terrain[r][c]
+            if get_terrain(tid).defense >= 2:
+                defended_count += 1
+            total_count += 1
+        terrain_usage_p0 = defended_count / max(total_count, 1)
+
         # Build comprehensive log record per LOGGING_PLAN.md Phase A (game_id added in _append_game_log_line)
         log_record = {
             # High-signal outcome fields first
@@ -1218,6 +1265,11 @@ class AWBWEnv(gym.Env):
             "wall_p1_s": wall_p1_s,
             "worker_rss_mb": worker_rss_mb,
 
+            # Phase 11e (FPS campaign / Phase 11d MCTS health gate): fraction
+            # of P0 unit positions on defense>=2 terrain at episode end.
+            # See definition above.
+            "terrain_usage_p0": terrain_usage_p0,
+
             # Tier 1 (plan p0-capture-architecture-fix): visibility into
             # teacher-mix so we can verify it is firing and slice metrics by mix value.
             "learner_greedy_mix": float(getattr(self, "_learner_greedy_mix", 0.0)),
@@ -1232,7 +1284,9 @@ class AWBWEnv(gym.Env):
 
             # Schema version for future compatibility
             # 1.6: Phase 0a (FPS campaign) — added wall_p0_s / wall_p1_s / worker_rss_mb.
-            "log_schema_version": "1.6",
+            # 1.7: Phase 10/11 prereq — added machine_id (writer-stamped, see
+            #      _append_game_log_line) and terrain_usage_p0 (computed above).
+            "log_schema_version": "1.7",
         }
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag

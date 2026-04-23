@@ -36,6 +36,8 @@ from engine.unit import UnitType
 from rl.env import SESSION_GAME_COUNTER_DB_ENV
 from rl.paths import GAME_LOG_PATH, LOGS_DIR
 
+WATCH_LOG_PATH = LOGS_DIR / "watch_log.jsonl"
+
 import numpy as np
 
 ROOT = Path(__file__).parent.parent
@@ -63,8 +65,16 @@ def log_game(
     n_actions: int,
     opening_player: int | None = None,
 ) -> None:
-    """Append a game result record to logs/game_log.jsonl."""
-    GAME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    """Append a watch-tool game record to ``logs/watch_log.jsonl``.
+
+    Standalone ``watch_game`` writer — kept on the legacy schema 1.5 shape (no
+    ``game_id``). Production training writes through
+    :func:`rl.env._log_finished_game` to ``game_log.jsonl`` on schema >= 1.6;
+    this writer is intentionally segregated so a misaimed watch session cannot
+    pollute the orchestrator's parser.
+    """
+    # Writes to logs/watch_log.jsonl (separate from production game_log.jsonl per Phase 10/11 logging prereqs).
+    WATCH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "map_id": map_id,
         "tier": tier,
@@ -78,7 +88,7 @@ def log_game(
         "log_schema_version": "1.5",
         "opening_player": opening_player,
     }
-    with open(GAME_LOG_PATH, "a") as fh:
+    with open(WATCH_LOG_PATH, "a") as fh:
         fh.write(json.dumps(record) + "\n")
 
 
@@ -326,6 +336,8 @@ class _CheckpointOpponent:
         # only on a successful checkpoint load (not random fallback).
         self.reload_count: int = 0
         self._env_ref: Optional[Callable[[], Any]] = None
+        # Phase 10c: set by ``reload_pool``; consumed by ``_load_random`` (None = glob each time)
+        self._pool_candidates: Optional[list[str]] = None
 
     def attach_env(self, env: object) -> None:
         """Weak reference so greedy fallback can read ``env.state``."""
@@ -334,12 +346,15 @@ class _CheckpointOpponent:
     def _load_random(self) -> None:
         import glob as _glob
 
-        ckpts = sorted(_glob.glob(os.path.join(self._dir, "checkpoint_*.zip")))
-        if self._pool_from_fleet:
-            from rl.fleet_env import iter_fleet_opponent_checkpoint_zips
+        if self._pool_candidates is not None:
+            ckpts = list(self._pool_candidates)
+        else:
+            ckpts = sorted(_glob.glob(os.path.join(self._dir, "checkpoint_*.zip")))
+            if self._pool_from_fleet:
+                from rl.fleet_env import iter_fleet_opponent_checkpoint_zips
 
-            root = self._fleet_opponent_root or self._dir
-            ckpts = sorted(set(ckpts + iter_fleet_opponent_checkpoint_zips(Path(root))))
+                root = self._fleet_opponent_root or self._dir
+                ckpts = sorted(set(ckpts + iter_fleet_opponent_checkpoint_zips(Path(root))))
         if not ckpts:
             self._model = None
             return
@@ -375,6 +390,24 @@ class _CheckpointOpponent:
             return "mixed"
         return "checkpoint"
 
+    def needs_observation(self) -> bool:
+        """Phase 1a: tells the env whether this opponent will consume an
+        observation on the *next* call.
+
+        Returns True when a checkpoint model is loaded and the opponent
+        will route through ``self._model.predict(obs, ...)``. Returns
+        False during cold-start (model is None) when ``__call__`` will
+        fall through to ``_cold_action(mask)``, which never reads ``obs``.
+
+        Conservative: when ``opponent_mix > 0`` and a model is loaded, we
+        return True even though some fraction of calls will substitute the
+        cold path. The expected encode work is still nonzero, and we must
+        not predict the rng outcome of the substitution. The cold-only
+        regime (model is None) is where the real win lives — the dominant
+        training state today per Phase 0 baseline (16x P1/P0 wall ratio).
+        """
+        return self._model is not None
+
     def _cold_action(self, mask: np.ndarray) -> int:
         """Pick an action under the configured cold-opponent policy."""
         if self._cold_opponent == "end_turn":
@@ -404,6 +437,37 @@ class _CheckpointOpponent:
         # default: random legal action
         legal = np.where(mask)[0]
         return int(np.random.choice(legal)) if len(legal) > 0 else 0
+
+    def reload_pool(self, zip_paths: Optional[list[str]] = None) -> int:
+        """Phase 10c: refresh the opponent pool view without process restart.
+
+        By default re-globs the same sources ``_load_random`` already uses
+        (local checkpoint dir + fleet pool roots when ``pool_from_fleet``).
+        If ``zip_paths`` is given, treat it as the new candidate set
+        (used by tests).
+
+        Returns the new candidate count. Does NOT reload the model — the
+        next `_load_random` call will pick from the refreshed set on the
+        next ``__call__`` boundary that crosses ``_refresh_every``.
+
+        If the currently loaded ``self._model`` came from a zip that is
+        no longer in the candidate set, the next ``_load_random`` picks a
+        different zip; we do not force-evict mid-call (would race rollout
+        collection).
+        """
+        import glob as _glob
+
+        if zip_paths is not None:
+            self._pool_candidates = list(zip_paths)
+            return len(self._pool_candidates)
+        ckpts = sorted(_glob.glob(os.path.join(self._dir, "checkpoint_*.zip")))
+        if self._pool_from_fleet:
+            from rl.fleet_env import iter_fleet_opponent_checkpoint_zips
+
+            root = self._fleet_opponent_root or self._dir
+            ckpts = sorted(set(ckpts + iter_fleet_opponent_checkpoint_zips(Path(root))))
+        self._pool_candidates = ckpts
+        return len(ckpts)
 
     def __call__(self, obs: dict, mask: np.ndarray) -> int:
         if self._n_calls % self._refresh_every == 0:
@@ -439,6 +503,23 @@ def _make_env_factory(
 ) -> Callable:
     """Return a picklable env factory for SubprocVecEnv."""
     def _init():
+        # Phase 1c (FPS campaign): cap thread oversubscription in this worker.
+        # Each SubprocVecEnv worker imports torch via _CheckpointOpponent +
+        # MaskablePPO.predict; torch defaults to ~physical-core threads per
+        # process. With n_envs=6 we are oversubscribed before the GPU runs.
+        # ``setdefault`` so test harnesses (or operator overrides) can pin
+        # different values via the parent-process environment.
+        import os as _os
+        _os.environ.setdefault("OMP_NUM_THREADS", "1")
+        _os.environ.setdefault("MKL_NUM_THREADS", "1")
+        _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+        import torch as _torch
+        try:
+            _torch.set_num_threads(1)
+        except Exception:
+            pass
+
         from rl.env import AWBWEnv
         from sb3_contrib.common.wrappers import ActionMasker  # type: ignore[import]
         opponent = _CheckpointOpponent(
@@ -637,6 +718,16 @@ class SelfPlayTrainer:
     checkpoint_zip_cap : int
         Maximum on-disk ``checkpoint_*.zip`` files under ``checkpoint_dir``;
         oldest snapshots (by mtime) deleted after each save. ``0`` disables pruning.
+        Ignored when ``checkpoint_curate`` is True (K/M/D curator cap instead).
+    checkpoint_curate : bool
+        Use :func:`rl.fleet_env.prune_checkpoint_zip_curated` instead of FIFO.
+    curator_k_newest, curator_m_top_winrate, curator_d_diversity : int
+        Curator pool geometry (see ``prune_checkpoint_zip_curated``).
+    curator_min_age_minutes : float
+        Never delete zips newer than this age (minutes).
+    verdicts_root : Path | None
+        Parent ``fleet/`` directory with per-machine ``*/eval/*.json`` verdicts;
+        ``None`` makes the curator fall back to FIFO until set.
     load_promoted : bool
         Prefer ``checkpoint_dir/promoted/best.zip`` over ``latest.zip`` when newer.
     bc_init : Path | str | None
@@ -664,9 +755,22 @@ class SelfPlayTrainer:
         pool_from_fleet: bool = False,
         fleet_opponent_root: Optional[Path | str] = None,
         checkpoint_zip_cap: int = 100,
+        checkpoint_curate: bool = False,
+        curator_k_newest: int = 8,
+        curator_m_top_winrate: int = 12,
+        curator_d_diversity: int = 4,
+        curator_min_age_minutes: float = 5.0,
+        verdicts_root: Optional[Path | str] = None,
         load_promoted: bool = False,
         bc_init: Optional[Path | str] = None,
         cold_opponent: str = "random",
+        local_checkpoint_mirror: Optional[Path | str] = None,
+        publisher_queue_max: int = 4,
+        publisher_drain_timeout_s: float = 60.0,
+        fleet_cfg: Optional["FleetConfig"] = None,  # type: ignore[name-defined]  # noqa: F821
+        opponent_refresh_rollouts: int = 4,
+        hot_reload_enabled: bool = False,
+        hot_reload_min_steps_done: int = 0,
     ) -> None:
         roll = n_steps * n_envs
         if batch_size > roll:
@@ -695,6 +799,14 @@ class SelfPlayTrainer:
             str(Path(fleet_opponent_root).resolve()) if fleet_opponent_root else None
         )
         self.checkpoint_zip_cap = int(checkpoint_zip_cap)
+        self.checkpoint_curate = bool(checkpoint_curate)
+        self.curator_k_newest = int(curator_k_newest)
+        self.curator_m_top_winrate = int(curator_m_top_winrate)
+        self.curator_d_diversity = int(curator_d_diversity)
+        self.curator_min_age_minutes = float(curator_min_age_minutes)
+        self.verdicts_root = (
+            Path(verdicts_root).resolve() if verdicts_root is not None else None
+        )
         self.load_promoted = bool(load_promoted)
         self.bc_init = Path(bc_init).resolve() if bc_init else None
         cold = str(cold_opponent or "random").strip().lower()
@@ -703,6 +815,19 @@ class SelfPlayTrainer:
                 f"cold_opponent must be one of {_VALID_COLD_OPPONENTS}; got {cold_opponent!r}"
             )
         self.cold_opponent = cold
+        self.fleet_cfg = fleet_cfg
+        self.opponent_refresh_rollouts = max(0, int(opponent_refresh_rollouts))
+        self.hot_reload_enabled = bool(hot_reload_enabled)
+        self.hot_reload_min_steps_done = int(hot_reload_min_steps_done)
+        self._rollout_index: int = 0
+        self._applied_reload_requests: set[tuple[str, str | int | None]] = set()
+        self.local_checkpoint_mirror = (
+            Path(local_checkpoint_mirror).resolve() if local_checkpoint_mirror is not None else None
+        )
+        self.publisher_queue_max = int(publisher_queue_max)
+        self.publisher_drain_timeout_s = float(publisher_drain_timeout_s)
+        # One-time warn for permissive auxiliary heartbeat path; see _write_trainer_status.
+        self._heartbeat_machine_id_warned = False
 
         if device == "auto":
             try:
@@ -715,15 +840,47 @@ class SelfPlayTrainer:
 
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        self._publisher = None  # type: Optional["CheckpointPublisher"]
+        if self.local_checkpoint_mirror is not None:
+            from rl.checkpoint_publisher import CheckpointPublisher
+
+            self.local_checkpoint_mirror.mkdir(parents=True, exist_ok=True)
+            self._publisher = CheckpointPublisher(
+                local_mirror_dir=self.local_checkpoint_mirror,
+                shared_dir=self.checkpoint_dir,
+                queue_max=publisher_queue_max,
+                drain_timeout_s=publisher_drain_timeout_s,
+            )
+
         self.map_pool = load_map_pool()
         if self.map_id_filter is not None:
             self.map_pool = [m for m in self.map_pool if m["map_id"] == self.map_id_filter]
             if not self.map_pool:
                 raise ValueError(f"No maps found with map_id={self.map_id_filter}")
 
-        from rl.fleet_env import prune_checkpoint_zip_snapshots, sorted_checkpoint_zip_paths
+        from rl.fleet_env import (
+            prune_checkpoint_zip_curated,
+            prune_checkpoint_zip_snapshots,
+            sorted_checkpoint_zip_paths,
+        )
 
-        if self.checkpoint_zip_cap > 0:
+        if self.checkpoint_curate:
+            summary = prune_checkpoint_zip_curated(
+                self.checkpoint_dir,
+                k_newest=self.curator_k_newest,
+                m_top_winrate=self.curator_m_top_winrate,
+                d_diversity=self.curator_d_diversity,
+                verdicts_root=self.verdicts_root,
+                min_age_minutes=self.curator_min_age_minutes,
+                dry_run=False,
+            )
+            if summary["removed"]:
+                print(
+                    f"[self_play] Curated pool: kept {summary['kept_total']}, "
+                    f"removed {len(summary['removed'])} "
+                    f"(fallback={summary['fallback_used']})"
+                )
+        elif self.checkpoint_zip_cap > 0:
             pruned = prune_checkpoint_zip_snapshots(self.checkpoint_dir, self.checkpoint_zip_cap)
             if pruned:
                 print(
@@ -820,7 +977,202 @@ class SelfPlayTrainer:
             opponent.attach_env(env)
             return ActionMasker(env, _mask_fn)
 
+    # ── Fleet heartbeat ───────────────────────────────────────────────────────
+
+    def _write_trainer_status(
+        self,
+        *,
+        steps_done: int,
+        rate: float,
+    ) -> None:
+        """Write ``fleet/<id>/status.json`` heartbeat for orchestrator stuck-worker detection.
+
+        Called once per outer training cycle after the freshly-published
+        ``latest.zip``. Permissive: missing fleet_cfg or aux machine_id is a
+        no-op (with a single one-time warn for the aux case). OSError on the
+        write itself is swallowed and logged — Samba shares hiccup, and we
+        will not crash a multi-day training run on one failed status write.
+        """
+        cfg = self.fleet_cfg
+        if cfg is None:
+            return
+
+        from rl.fleet_env import write_status_json
+
+        if cfg.role == "auxiliary":
+            if not cfg.machine_id:
+                if not self._heartbeat_machine_id_warned:
+                    print(
+                        "[self_play] heartbeat skipped: auxiliary role without "
+                        "AWBW_MACHINE_ID; orchestrator stuck-worker detection "
+                        "will not see this trainer."
+                    )
+                    self._heartbeat_machine_id_warned = True
+                return
+            if cfg.shared_root is None:
+                return
+            status_path = Path(cfg.shared_root) / "fleet" / cfg.machine_id / "status.json"
+        else:
+            status_path = Path(cfg.repo_root) / "fleet" / "main" / "status.json"
+
+        extra = {
+            "steps_done": int(steps_done),
+            "n_envs": int(self.n_envs),
+            "save_every": int(self.save_every),
+            "checkpoint_dir": str(self.checkpoint_dir),
+            "rate_steps_per_s": float(rate),
+        }
+        try:
+            write_status_json(
+                status_path,
+                role=cfg.role,
+                machine_id=cfg.machine_id,
+                task="train",
+                current_target=str(self.checkpoint_dir / "latest.zip"),
+                extra=extra,
+            )
+        except OSError as exc:
+            print(f"[self_play] heartbeat write failed ({status_path}): {exc}")
+
+    def _maybe_handle_rollout_boundary(
+        self,
+        model: Any,
+        _vec_env: Any,
+        steps_done: int,
+    ) -> None:
+        """Phase 10c + 10d: between-rollout fleet hooks.
+
+        Safe to call unconditionally — does nothing when both features are
+        off. Called from the main training loop AFTER the heartbeat write
+        and BEFORE the prune block.
+
+        Opponent pool refresh uses ``model.env`` (the SB3 :class:`VecEnv`),
+        not the pre-wrap ``_vec_env`` — when ``n_envs==1`` the local ref is
+        a raw :class:`gymnasium.Wrapper` without ``env_method``.
+        """
+        self._rollout_index += 1
+
+        if self.opponent_refresh_rollouts > 0 and (
+            self._rollout_index % self.opponent_refresh_rollouts
+        ) == 0:
+            vec = getattr(model, "env", None)
+            try:
+                if vec is not None and hasattr(vec, "env_method"):
+                    results = vec.env_method("reload_opponent_pool")
+                else:
+                    results = []
+                n_refreshed = sum(1 for r in results if r is not None)
+                print(
+                    f"[self_play] Opponent pool refreshed across {n_refreshed} env(s)"
+                )
+            except Exception as exc:
+                print(f"[self_play] Opponent refresh failed: {exc}")
+
+        if self.hot_reload_enabled and self.fleet_cfg is not None:
+            self._maybe_apply_reload_request(model, steps_done)
+
+    def _maybe_apply_reload_request(self, model: Any, steps_done: int) -> None:
+        """Phase 10d: check for and apply a fleet reload request.
+
+        Reads ``<shared>/fleet/<machine_id>/reload_request.json`` and, if
+        valid, calls ``set_parameters`` on the learner, then renames the
+        request to ``reload_request.applied.<unix_ts>.json`` (atomic where
+        the host OS allows).
+        """
+        cfg = self.fleet_cfg
+        if cfg is None or cfg.shared_root is None:
+            return
+
+        machine_id = (
+            cfg.machine_id
+            if cfg.machine_id
+            else os.environ.get("AWBW_MACHINE_ID")
+        )
+        if not machine_id:
+            return
+
+        fleet_dir = Path(cfg.shared_root) / "fleet" / str(machine_id)
+        request_path = fleet_dir / "reload_request.json"
+        if not request_path.is_file():
+            return
+        try:
+            with open(request_path, encoding="utf-8") as f:
+                req = json.load(f)
+        except OSError as exc:
+            print(f"[hot-reload] Could not read {request_path}: {exc}")
+            return
+        except json.JSONDecodeError as exc:
+            print(f"[hot-reload] Could not read {request_path}: {exc}")
+            return
+
+        target_zip = req.get("target_zip")
+        min_steps = int(req.get("min_steps_done", 0) or 0)
+        issued_at = req.get("issued_at")
+
+        if not target_zip or not Path(str(target_zip)).is_file():
+            print(f"[hot-reload] Skipping: target_zip missing/unreadable: {target_zip!r}")
+            return
+        if steps_done < min_steps:
+            return
+        if steps_done < self.hot_reload_min_steps_done:
+            return
+
+        key = (str(target_zip), issued_at)
+        if key in self._applied_reload_requests:
+            return
+
+        try:
+            model.set_parameters(
+                str(target_zip), exact_match=True, device=self.device
+            )
+        except Exception as exc:
+            print(f"[hot-reload] set_parameters failed: {exc}")
+            return
+
+        self._applied_reload_requests.add(key)
+        print(
+            f"[hot-reload] Applied weights from {target_zip} "
+            f"(reason={req.get('reason', '?')}, steps_done={steps_done})"
+        )
+
+        ts = int(time.time())
+        ack_path = fleet_dir / f"reload_request.applied.{ts}.json"
+        try:
+            os.replace(str(request_path), str(ack_path))
+        except OSError as exc:
+            print(f"[hot-reload] Ack rename failed (non-fatal): {exc}")
+
     # ── Main training loop ────────────────────────────────────────────────────
+
+    def _save_checkpoint_with_publish(
+        self,
+        model,
+        stem: str,
+        *,
+        also_publish_as_latest: bool = False,
+    ) -> Path:
+        """Phase 10a: route saves through the publisher when enabled.
+
+        Default path (publisher None): preserves pre-Phase-10a semantics —
+        direct ``_atomic_model_save`` to the shared checkpoint_dir. No
+        behavior change.
+
+        Publisher path: write to local mirror, enqueue async copy to
+        shared. Returns the LOCAL path so callers can stat it for size
+        if needed.
+        """
+        if self._publisher is None:
+            target = self.checkpoint_dir / stem
+            _atomic_model_save(model, target)
+            if also_publish_as_latest:
+                _atomic_model_save(model, self.checkpoint_dir / "latest")
+            return self.checkpoint_dir / f"{stem}.zip"
+
+        local_zip = self._publisher.save_and_publish(model, stem)
+        if also_publish_as_latest:
+            latest_local = self._publisher.save_and_publish(model, "latest")
+            del latest_local
+        return local_zip
 
     def train(self) -> None:
         try:
@@ -959,6 +1311,7 @@ class SelfPlayTrainer:
 
         from rl.fleet_env import (
             new_checkpoint_stem_utc,
+            prune_checkpoint_zip_curated,
             prune_checkpoint_zip_snapshots,
             sorted_checkpoint_zip_paths,
         )
@@ -972,58 +1325,93 @@ class SelfPlayTrainer:
         diag_callback = _build_diagnostics_callback()
 
         try:
-            while cap is None or steps_done < cap:
-                if cap is None:
-                    chunk = self.save_every
-                else:
-                    chunk = min(self.save_every, cap - steps_done)
-                elapsed = time.time() - t_start
-                rate = steps_done / elapsed if elapsed > 0 else 0
-                if cap is None:
-                    eta_str = "—"
-                else:
-                    rem = cap - steps_done
-                    eta = rem / rate if rate > 0 else float("inf")
-                    eta_str = f"{eta / 60:.1f}min"
-                print(
-                    f"\n[self_play] Steps {steps_done:,}->{steps_done + chunk:,} | "
-                    f"{rate:,.0f} steps/s | ETA {eta_str}"
-                )
-
-                model.learn(
-                    total_timesteps=chunk,
-                    reset_num_timesteps=False,
-                    callback=diag_callback,
-                )
-                steps_done += chunk
-
-                ckpt_stem = new_checkpoint_stem_utc()
-                _atomic_model_save(model, self.checkpoint_dir / ckpt_stem)
-                _atomic_model_save(model, self.checkpoint_dir / "latest")
-                print(f"[self_play] Saved {ckpt_stem}.zip")
-
-                if self.checkpoint_zip_cap > 0:
-                    pruned = prune_checkpoint_zip_snapshots(
-                        self.checkpoint_dir, self.checkpoint_zip_cap
+            try:
+                while cap is None or steps_done < cap:
+                    if cap is None:
+                        chunk = self.save_every
+                    else:
+                        chunk = min(self.save_every, cap - steps_done)
+                    elapsed = time.time() - t_start
+                    rate = steps_done / elapsed if elapsed > 0 else 0
+                    if cap is None:
+                        eta_str = "—"
+                    else:
+                        rem = cap - steps_done
+                        eta = rem / rate if rate > 0 else float("inf")
+                        eta_str = f"{eta / 60:.1f}min"
+                    print(
+                        f"\n[self_play] Steps {steps_done:,}->{steps_done + chunk:,} | "
+                        f"{rate:,.0f} steps/s | ETA {eta_str}"
                     )
-                    if pruned:
-                        print(
-                            f"[self_play] Pruned {pruned} checkpoint_*.zip "
-                            f"(cap={self.checkpoint_zip_cap})"
+
+                    model.learn(
+                        total_timesteps=chunk,
+                        reset_num_timesteps=False,
+                        callback=diag_callback,
+                    )
+                    steps_done += chunk
+
+                    ckpt_stem = new_checkpoint_stem_utc()
+                    self._save_checkpoint_with_publish(
+                        model, ckpt_stem, also_publish_as_latest=True
+                    )
+                    print(f"[self_play] Saved {ckpt_stem}.zip")
+
+                    self._write_trainer_status(steps_done=steps_done, rate=rate)
+
+                    self._maybe_handle_rollout_boundary(model, vec_env, steps_done)
+
+                    if self.checkpoint_curate:
+                        summary = prune_checkpoint_zip_curated(
+                            self.checkpoint_dir,
+                            k_newest=self.curator_k_newest,
+                            m_top_winrate=self.curator_m_top_winrate,
+                            d_diversity=self.curator_d_diversity,
+                            verdicts_root=self.verdicts_root,
+                            min_age_minutes=self.curator_min_age_minutes,
+                            dry_run=False,
                         )
-                tail = self.checkpoint_pool_size if self.checkpoint_pool_size > 0 else None
-                all_ck = sorted_checkpoint_zip_paths(self.checkpoint_dir)
-                self.checkpoints = all_ck[-tail:] if tail else all_ck
-        except KeyboardInterrupt:
-            print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
-            _atomic_model_save(model, self.checkpoint_dir / "latest")
-            print(f"[self_play] Saved -> {self.checkpoint_dir / 'latest.zip'}")
+                        if summary["removed"]:
+                            print(
+                                f"[self_play] Curated pool: kept {summary['kept_total']}, "
+                                f"removed {len(summary['removed'])} "
+                                f"(fallback={summary['fallback_used']})"
+                            )
+                    elif self.checkpoint_zip_cap > 0:
+                        pruned = prune_checkpoint_zip_snapshots(
+                            self.checkpoint_dir, self.checkpoint_zip_cap
+                        )
+                        if pruned:
+                            print(
+                                f"[self_play] Pruned {pruned} checkpoint_*.zip "
+                                f"(cap={self.checkpoint_zip_cap})"
+                            )
+                    tail = self.checkpoint_pool_size if self.checkpoint_pool_size > 0 else None
+                    all_ck = sorted_checkpoint_zip_paths(self.checkpoint_dir)
+                    self.checkpoints = all_ck[-tail:] if tail else all_ck
+            except KeyboardInterrupt:
+                print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
+                saved = self._save_checkpoint_with_publish(
+                    model, "latest", also_publish_as_latest=False
+                )
+                print(f"[self_play] Saved -> {saved}")
+        finally:
+            if self._publisher is not None:
+                drained = self._publisher.drain(timeout_s=self.publisher_drain_timeout_s)
+                print(
+                    f"[self_play] checkpoint publisher drained {drained} pending publishes; "
+                    f"{self._publisher.queue_depth} still pending."
+                )
+                self._publisher.close()
 
         total_elapsed = time.time() - t_start
         steps_note = f"{steps_done:,}" if cap is None else f"{self.total_timesteps:,}"
+        final_path = self.checkpoint_dir / "latest.zip"
+        if self._publisher is not None and self.local_checkpoint_mirror is not None:
+            final_path = self.local_checkpoint_mirror / "latest.zip"
         print(
             f"\n[self_play] Done. {steps_note} steps in "
-            f"{total_elapsed/60:.1f}min | Final -> {self.checkpoint_dir / 'latest.zip'}"
+            f"{total_elapsed/60:.1f}min | Final -> {final_path}"
         )
 
 

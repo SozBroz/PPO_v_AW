@@ -14,10 +14,12 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+import sys
+from typing import Any, Optional
 
 # Any top-level `checkpoint_*.zip` in a checkpoint_dir is a managed snapshot
 # (historical PPO zips, opponent pool, prune targets).  Not used for
@@ -370,3 +372,300 @@ def prune_checkpoint_zip_snapshots(checkpoint_dir: Path, max_keep: int) -> int:
         except OSError:
             pass
     return n
+
+
+def _discover_fleet_eval_verdict_paths(verdicts_root: Path) -> list[Path]:
+    """All ``<verdicts_root>/*/eval/*.json`` (normalized)."""
+    root = _norm(verdicts_root)
+    if not root.is_dir():
+        return []
+    return sorted(root.glob("*/eval/*.json"))
+
+
+def _verdict_winrate_by_stem(verdict_paths: list[Path]) -> dict[str, float]:
+    """
+    Map checkpoint **stem** -> winrate, preferring the newest on-disk verdict
+    for each stem (tie-break: larger ``timestamp`` in JSON if present).
+
+    The eval daemon names verdict files ``<candidate_zip_stem>.json`` and also
+    sets ``"ckpt": "<file>.zip"`` in the payload; both identify the same stem.
+    """
+    best: dict[str, tuple[tuple[float, float], float]] = {}
+    for vp in verdict_paths:
+        try:
+            raw = json.loads(vp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"[curator] skipping malformed verdict {vp}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(raw, dict):
+            continue
+        stem = vp.stem
+        ck = raw.get("ckpt")
+        if isinstance(ck, str) and ck:
+            try:
+                stem = Path(ck).stem
+            except (TypeError, ValueError):
+                pass
+        if "winrate" in raw:
+            try:
+                wr = float(raw["winrate"])
+            except (TypeError, ValueError):
+                wr = float(verdict_summary_from_symmetric_json(raw)["winrate"])
+        else:
+            wr = float(verdict_summary_from_symmetric_json(raw)["winrate"])
+        try:
+            vm = float(vp.stat().st_mtime)
+        except OSError:
+            vm = 0.0
+        try:
+            ts = float(raw.get("timestamp", 0.0))
+        except (TypeError, ValueError):
+            ts = 0.0
+        ksort = (vm, ts)
+        prev = best.get(stem)
+        if prev is None or ksort > prev[0]:
+            best[stem] = (ksort, wr)
+    return {s: t[1] for s, t in best.items()}
+
+
+def _training_step_from_stem(stem: str) -> int | None:
+    """
+    If the stem is legacy ``checkpoint_<small_int>``-style, return the int.
+    The default UTC+nanos stems (20-digit count before ``Z``) are **not** a
+    training step — return None so callers fall back to mtime deciles.
+    """
+    m = re.search(r"_([0-9]+)Z$", stem)
+    if m and len(m.group(1)) <= 6:
+        try:
+            return int(m.group(1), 10)
+        except ValueError:
+            return None
+    m2 = re.search(r"checkpoint_0*([0-9]+)$", stem)
+    if m2:
+        try:
+            return int(m2.group(1), 10)
+        except ValueError:
+            return None
+    return None
+
+
+def prune_checkpoint_zip_curated(
+    checkpoint_dir: Path,
+    *,
+    k_newest: int = 8,
+    m_top_winrate: int = 12,
+    d_diversity: int = 4,
+    verdicts_root: Optional[Path] = None,
+    min_age_minutes: float = 5.0,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Phase 10b: quality-curated pool pruning. Replaces FIFO-by-mtime.
+
+    Keeps the UNION of three sets:
+      * K newest checkpoint_*.zip by mtime (recency).
+      * M top by verdict winrate (quality, sourced from
+        ``<verdicts_root>/<MACHINE_ID>/eval/*.json`` written by
+        scripts/fleet_eval_daemon.py).
+      * D diversity slots: bucket the remaining survivors by training-step
+        decile (or by mtime decile if step is not encoded in the stem),
+        keep one per bucket so distinct old policies don't all evict at
+        once.
+
+    Files younger than ``min_age_minutes`` are NEVER candidates for
+    deletion (protects freshly-published zips before any verdict has had
+    a chance to land; also makes the 10a async-publish lag safe).
+
+    When ``verdicts_root`` is None or no verdicts exist, behavior falls
+    back to ``prune_checkpoint_zip_snapshots(checkpoint_dir,
+    max_keep=k_newest + m_top_winrate + d_diversity)`` — i.e. mtime-FIFO
+    at the same total cap. Cold-start safe.
+
+    Returns a dict with diagnostic shape:
+      {
+        "kept_total":       int,
+        "kept_by_recency":  list[str],   # zip stems
+        "kept_by_winrate":  list[str],
+        "kept_by_diversity":list[str],
+        "removed":          list[str],
+        "fallback_used":    bool,        # True if FIFO path taken
+        "reason":           str,         # human-readable summary
+      }
+
+    With ``dry_run=True`` no files are deleted; the dict still reports
+    what would have been removed. Used by the orchestrator (Phase 10e).
+    """
+    total_cap = k_newest + m_top_winrate + d_diversity
+    paths = sorted_checkpoint_zip_paths(checkpoint_dir)
+    if not paths:
+        reason = "empty checkpoint_dir; nothing to prune"
+        return {
+            "kept_total": 0,
+            "kept_by_recency": [],
+            "kept_by_winrate": [],
+            "kept_by_diversity": [],
+            "removed": [],
+            "fallback_used": True,
+            "reason": reason,
+        }
+    vroot = _norm(verdicts_root) if verdicts_root is not None else None
+    verdict_files: list[Path] = []
+    if vroot is not None:
+        verdict_files = _discover_fleet_eval_verdict_paths(vroot)
+    if verdicts_root is None or not verdict_files:
+        n_before = len(paths)
+        if total_cap > 0 and n_before > total_cap:
+            fifo_remove = paths[: n_before - total_cap]
+        else:
+            fifo_remove = []
+        rem_stems_fb = [p.stem for p in fifo_remove]
+        if not dry_run:
+            n_removed = prune_checkpoint_zip_snapshots(checkpoint_dir, total_cap)
+        else:
+            n_removed = len(fifo_remove)
+        paths_after = sorted_checkpoint_zip_paths(checkpoint_dir)
+        kept_n = n_before - len(rem_stems_fb) if dry_run else len(paths_after)
+        reason = (
+            f"cold start: no verdicts_root or no eval/*.json; FIFO cap={total_cap} "
+            f"({n_removed} removed)"
+        )
+        if dry_run:
+            print(
+                f"[curator dry-run] kept K={0} M={0} D={0} total={kept_n} "
+                f"removed={len(rem_stems_fb)} (fallback=True)"
+            )
+        else:
+            print(
+                f"[curator] kept K={0} M={0} D={0} total={kept_n} "
+                f"removed={n_removed} (fallback=True)"
+            )
+        return {
+            "kept_total": kept_n,
+            "kept_by_recency": [],
+            "kept_by_winrate": [],
+            "kept_by_diversity": [],
+            "removed": rem_stems_fb,
+            "fallback_used": True,
+            "reason": reason,
+        }
+    # --- curated path (at least one verdict file on disk) ---
+    wr_by_stem = _verdict_winrate_by_stem(verdict_files)
+    now = time.time()
+    min_age_s = max(0.0, float(min_age_minutes)) * 60.0
+
+    def is_protected(p: Path) -> bool:
+        try:
+            return (now - p.stat().st_mtime) < min_age_s
+        except OSError:
+            return True
+
+    protected = {p.stem for p in paths if is_protected(p)}
+
+    k_take = min(max(0, k_newest), len(paths))
+    k_stems = [p.stem for p in paths[-k_take:]] if k_take else []
+
+    present = {p.stem for p in paths}
+    ranked: list[tuple[float, str]] = []
+    for st in present:
+        if st in wr_by_stem:
+            ranked.append((wr_by_stem[st], st))
+    ranked.sort(key=lambda t: (-t[0], t[1]))
+    m_take = min(max(0, m_top_winrate), len(ranked))
+    m_stems = [st for _wr, st in ranked[:m_take]] if m_take else []
+
+    km = set(k_stems) | set(m_stems)
+    remaining = [p for p in paths if p.stem not in km]
+
+    d_stems: list[str] = []
+    d_slots = max(0, d_diversity)
+    if d_slots and remaining:
+        step_vals = [(_p, _training_step_from_stem(_p.stem)) for _p in remaining]
+        use_step = all(t is not None for _p, t in step_vals) and len(remaining) >= 1
+        if use_step:
+            st_list = [t for _p, t in step_vals if t is not None]
+            mn_s, mx_s = min(st_list), max(st_list)
+        else:
+            mn_s, mx_s = 0, 0
+        if use_step and mn_s != mx_s:
+            span_s = max(mx_s - mn_s, 1)
+            buckets: dict[int, list[Path]] = {}
+            for p, t in step_vals:
+                if t is None:
+                    continue
+                b = min(9, int(9 * (t - mn_s) / span_s + 0.0))
+                buckets.setdefault(b, []).append(p)
+        else:
+            mtimes: list[tuple[Path, float]] = []
+            for p in remaining:
+                try:
+                    mtimes.append((p, float(p.stat().st_mtime)))
+                except OSError:
+                    continue
+            if not mtimes:
+                buckets = {}
+            else:
+                ts = [m for _p, m in mtimes]
+                mn_t, mx_t = min(ts), max(ts)
+                buckets = {}
+                if mn_t == mx_t:
+                    buckets[0] = [p for p, _m in mtimes]
+                else:
+                    span_t = max(mx_t - mn_t, 1e-9)
+                    for p, m in mtimes:
+                        frac = (m - mn_t) / span_t
+                        b = min(9, int(10.0 * frac))
+                        if b == 10:
+                            b = 9
+                        buckets.setdefault(b, []).append(p)
+        left = d_slots
+        for b in sorted(buckets.keys()):
+            if left <= 0:
+                break
+            group = buckets[b]
+            if not group:
+                continue
+            best_p = max(group, key=lambda p: p.stat().st_mtime)
+            d_stems.append(best_p.stem)
+            left -= 1
+
+    keep: set[str] = set(k_stems) | set(m_stems) | set(d_stems) | protected
+    to_delete: list[Path] = [p for p in paths if p.stem not in keep]
+    rem_stems = [p.stem for p in to_delete]
+    n_removed = 0
+    if not dry_run:
+        for p in to_delete:
+            try:
+                p.unlink()
+                n_removed += 1
+            except OSError:
+                pass
+    else:
+        n_removed = len(to_delete)
+    n_before = len(paths)
+    kept_n = n_before - len(to_delete) if dry_run else len(sorted_checkpoint_zip_paths(checkpoint_dir))
+    a, b, c = len(k_stems), len(m_stems), len(d_stems)
+    reason = (
+        f"curated keep union K={a} M={b} D={c} + {len(protected)} min-age; "
+        f"removed {n_removed} zip(s)"
+    )
+    if dry_run:
+        print(
+            f"[curator dry-run] kept K={a} M={b} D={c} total={kept_n} "
+            f"removed={n_removed} (fallback=False)"
+        )
+    else:
+        print(
+            f"[curator] kept K={a} M={b} D={c} total={kept_n} "
+            f"removed={n_removed} (fallback=False)"
+        )
+    return {
+        "kept_total": kept_n,
+        "kept_by_recency": list(k_stems),
+        "kept_by_winrate": list(m_stems),
+        "kept_by_diversity": list(d_stems),
+        "removed": rem_stems,
+        "fallback_used": False,
+        "reason": reason,
+    }

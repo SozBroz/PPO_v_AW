@@ -137,6 +137,54 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--checkpoint-curate",
+        action="store_true",
+        default=False,
+        help=(
+            "Phase 10b: replace FIFO-by-mtime pruning with a curator that "
+            "keeps K newest + M top-by-verdict-winrate + D diversity slots. "
+            "Default off; falls back to FIFO when no verdicts available."
+        ),
+    )
+    parser.add_argument("--curator-k-newest", type=int, default=8)
+    parser.add_argument("--curator-m-top-winrate", type=int, default=12)
+    parser.add_argument("--curator-d-diversity", type=int, default=4)
+    parser.add_argument("--curator-min-age-minutes", type=float, default=5.0)
+    parser.add_argument(
+        "--verdicts-root",
+        type=str,
+        default=None,
+        help=(
+            "Phase 10b: shared <root>/fleet/ directory the curator reads "
+            "verdict json from. None = curator falls back to FIFO."
+        ),
+    )
+    parser.add_argument(
+        "--local-checkpoint-mirror",
+        type=str,
+        default=None,
+        help=(
+            "Phase 10a: local fast-disk directory the trainer writes checkpoints "
+            "to first; a background publisher copies them to the shared "
+            "checkpoint dir asynchronously. Default off (legacy direct-write "
+            "semantics). Recommended on aux pool trainers writing to slow "
+            "Samba/HDD shares — e.g. C:\\Users\\<you>\\.awbw_local_ckpt\\<id> "
+            "on Windows."
+        ),
+    )
+    parser.add_argument(
+        "--publisher-queue-max",
+        type=int,
+        default=4,
+        help="Phase 10a: max queued async publishes when --local-checkpoint-mirror is set (default 4).",
+    )
+    parser.add_argument(
+        "--publisher-drain-timeout-s",
+        type=float,
+        default=60.0,
+        help="Phase 10a: max seconds to wait for the publisher on shutdown (default 60).",
+    )
+    parser.add_argument(
         "--ent-coef", type=float, default=0.05,
         help="PPO entropy coefficient (default 0.05; narrow Misery-Andy runs often use 0.02)",
     )
@@ -188,6 +236,31 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "'end_turn': punching bag — picks END_TURN whenever legal. "
             "Used for the smoke gate in plan p0-capture-architecture-fix."
         ),
+    )
+    parser.add_argument(
+        "--opponent-refresh-rollouts",
+        type=int,
+        default=4,
+        help=(
+            "Phase 10c: refresh opponent pool every N rollouts (vec_env."
+            "env_method). 0 disables. Default 4."
+        ),
+    )
+    parser.add_argument(
+        "--hot-reload-enabled",
+        action="store_true",
+        default=False,
+        help=(
+            "Phase 10d: when set, watch <shared>/fleet/<id>/reload_request.json "
+            "and apply target weights at rollout boundary. Default OFF — "
+            "orchestrator (Phase 10e) flips this per-machine."
+        ),
+    )
+    parser.add_argument(
+        "--hot-reload-min-steps-done",
+        type=int,
+        default=0,
+        help="Phase 10d: minimum self.steps_done before honoring a reload request.",
     )
     parser.add_argument(
         "--learner-greedy-mix", type=float, default=0.0,
@@ -354,9 +427,22 @@ def main() -> None:
         pool_from_fleet=args.pool_from_fleet,
         fleet_opponent_root=fleet_opponent_root,
         checkpoint_zip_cap=args.checkpoint_zip_cap,
+        checkpoint_curate=args.checkpoint_curate,
+        curator_k_newest=args.curator_k_newest,
+        curator_m_top_winrate=args.curator_m_top_winrate,
+        curator_d_diversity=args.curator_d_diversity,
+        curator_min_age_minutes=args.curator_min_age_minutes,
+        verdicts_root=args.verdicts_root,
         load_promoted=args.load_promoted,
         bc_init=args.bc_init,
         cold_opponent=args.cold_opponent,
+        local_checkpoint_mirror=args.local_checkpoint_mirror,
+        publisher_queue_max=args.publisher_queue_max,
+        publisher_drain_timeout_s=args.publisher_drain_timeout_s,
+        fleet_cfg=fleet_cfg,
+        opponent_refresh_rollouts=args.opponent_refresh_rollouts,
+        hot_reload_enabled=args.hot_reload_enabled,
+        hot_reload_min_steps_done=args.hot_reload_min_steps_done,
     )
     _install_sigint_first_only()
     trainer.train()
