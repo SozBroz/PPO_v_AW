@@ -7,67 +7,78 @@ Input:
 Output:
   policy_logits: (batch, ACTION_SPACE_SIZE)
   value:         (batch,)
+
+Flat action layout matches ``rl/env.py`` (scatter indices); constants duplicated here
+to avoid importing ``rl.env`` (circular import risk).
 """
+from __future__ import annotations
+
+import gymnasium as gym
 import torch
 import torch.nn as nn
-import gymnasium as gym
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from rl.encoder import N_SPATIAL_CHANNELS, N_SCALARS, GRID_SIZE
 
-# Flat action space: non-BUILD actions use indices < 10_000; BUILD uses
-# _BUILD_OFFSET + (r * 30 + c) * N_UNIT_TYPES + unit_type (see rl/env.py).
-# Max BUILD index ≈ 10_000 + 899 * 27 + 26 = 34_299 → round up.
+from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS
+
+# --- Flat index layout (must stay aligned with rl/env.py) ---------------------
 ACTION_SPACE_SIZE = 35_000
+_ENC_W = 30
+_ATTACK_OFFSET = _ENC_W * _ENC_W
+_CAPTURE_IDX = _ATTACK_OFFSET * 2
+_WAIT_IDX = _CAPTURE_IDX + 1
+_LOAD_IDX = _CAPTURE_IDX + 2
+_JOIN_IDX = _CAPTURE_IDX + 3
+_DIVE_HIDE_IDX = _CAPTURE_IDX + 4
+_UNLOAD_OFFSET = _CAPTURE_IDX + 10
+_MOVE_OFFSET = _UNLOAD_OFFSET + 8
+_BUILD_OFFSET = 10_000
+_REPAIR_OFFSET = 3500
+_N_BUILD_UNIT_TYPES = 27
+
+TRUNK_CHANNELS = 128
+SCALAR_PLANES = 16
+FUSED_CHANNELS = TRUNK_CHANNELS + SCALAR_PLANES  # 144
 
 
 class AWBWFeaturesExtractor(BaseFeaturesExtractor):
     """
-    SB3-compatible features extractor wrapping the AWBWNet CNN trunk.
-
-    Replaces SB3's default CombinedExtractor on Dict observations.
-    Accepts {'spatial': Box(30,30,62), 'scalars': Box(N_SCALARS,)} and outputs
-    a flat (batch, features_dim) tensor consumed by the policy/value heads.
+    SB3-compatible features extractor: same trunk + scalar fusion as ``AWBWNet``,
+    then pools to a flat vector for SB3 policy/value MLPs.
     """
 
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 256) -> None:
         super().__init__(observation_space, features_dim=features_dim)
 
         self.stem = nn.Sequential(
-            nn.Conv2d(N_SPATIAL_CHANNELS, 64, kernel_size=3, padding=1),
+            nn.Conv2d(N_SPATIAL_CHANNELS, TRUNK_CHANNELS, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
-
-        self.res1 = _ResBlock(64, 64)
-        self.res2 = _ResBlock(64, 128, downsample=True)
-        self.res3 = _ResBlock(128, 128)
-
-        self.pool = nn.AdaptiveAvgPool2d((8, 8))
-
-        cnn_out_dim = 128 * 8 * 8  # 8192
+        self.trunk_blocks = nn.ModuleList(
+            [_ResBlock128() for _ in range(10)]
+        )
+        self.scalar_to_plane = nn.Linear(N_SCALARS, SCALAR_PLANES)
 
         self.fc = nn.Sequential(
-            nn.Linear(cnn_out_dim + N_SCALARS, features_dim),
+            nn.Linear(FUSED_CHANNELS, features_dim),
             nn.ReLU(inplace=True),
             nn.Linear(features_dim, features_dim),
             nn.ReLU(inplace=True),
         )
-
         self._init_weights()
 
     def forward(self, observations: dict) -> torch.Tensor:
-        spatial = observations["spatial"]  # (batch, H, W, C)
-        scalars = observations["scalars"]  # (batch, N_SCALARS)
-
+        spatial = observations["spatial"]
+        scalars = observations["scalars"]
         x = spatial.permute(0, 3, 1, 2).contiguous()
         x = self.stem(x)
-        x = self.res1(x)
-        x = self.res2(x)
-        x = self.res3(x)
-        x = self.pool(x)
-
-        cnn_flat = x.reshape(x.shape[0], -1)
-        combined = torch.cat([cnn_flat, scalars], dim=1)
-        return self.fc(combined)
+        for blk in self.trunk_blocks:
+            x = blk(x)
+        b = scalars.shape[0]
+        sp = self.scalar_to_plane(scalars).view(b, SCALAR_PLANES, 1, 1)
+        sp = sp.expand(-1, -1, GRID_SIZE, GRID_SIZE)
+        xf = torch.cat([x, sp], dim=1)
+        g = torch.nn.functional.adaptive_avg_pool2d(xf, (1, 1)).flatten(1)
+        return self.fc(g)
 
     def _init_weights(self) -> None:
         for m in self.modules():
@@ -82,49 +93,38 @@ class AWBWFeaturesExtractor(BaseFeaturesExtractor):
 
 class AWBWNet(nn.Module):
     """
-    Residual CNN trunk → scalar fusion → dual heads (policy + value).
-
-    Architecture:
-      - Conv stem: N_SPATIAL_CHANNELS → 64 channels
-      - 3× residual blocks (64 → 128 → 128)
-      - AdaptiveAvgPool to 8×8 → flatten → 8192-dim vector
-      - Concat with scalar features → Linear → ReLU × 2 (hidden_size)
-      - Policy head: Linear → ACTION_SPACE_SIZE logits
-      - Value head:  Linear → 1 scalar
+    Residual CNN trunk (10×128, full 30×30), scalar broadcast fusion → 144 ch,
+    factored spatial policy head + pooled value head (MASTER_SPEC §4).
     """
 
     def __init__(self, hidden_size: int = 256) -> None:
         super().__init__()
+        self.hidden_size = hidden_size
 
-        # ── CNN trunk ─────────────────────────────────────────────────────────
         self.stem = nn.Sequential(
-            nn.Conv2d(N_SPATIAL_CHANNELS, 64, kernel_size=3, padding=1),
+            nn.Conv2d(N_SPATIAL_CHANNELS, TRUNK_CHANNELS, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
-
-        self.res1 = _ResBlock(64, 64)
-        self.res2 = _ResBlock(64, 128, downsample=True)
-        self.res3 = _ResBlock(128, 128)
-
-        self.pool = nn.AdaptiveAvgPool2d((8, 8))
-
-        cnn_out_dim = 128 * 8 * 8  # 8192
-
-        # ── Fusion MLP ────────────────────────────────────────────────────────
-        self.fc = nn.Sequential(
-            nn.Linear(cnn_out_dim + N_SCALARS, hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(inplace=True),
+        self.trunk_blocks = nn.ModuleList(
+            [_ResBlock128() for _ in range(10)]
         )
+        self.scalar_to_plane = nn.Linear(N_SCALARS, SCALAR_PLANES)
 
-        # ── Heads ─────────────────────────────────────────────────────────────
-        self.policy_head = nn.Linear(hidden_size, ACTION_SPACE_SIZE)
-        self.value_head = nn.Linear(hidden_size, 1)
+        self.conv_select = nn.Conv2d(FUSED_CHANNELS, 1, kernel_size=1)
+        self.conv_move = nn.Conv2d(FUSED_CHANNELS, 1, kernel_size=1)
+        self.conv_attack = nn.Conv2d(FUSED_CHANNELS, 1, kernel_size=1)
+        self.conv_repair = nn.Conv2d(FUSED_CHANNELS, 1, kernel_size=1)
+        self.conv_build = nn.Conv2d(FUSED_CHANNELS, _N_BUILD_UNIT_TYPES, kernel_size=1)
+
+        self.linear_scalar_policy = nn.Linear(FUSED_CHANNELS, 16)
+
+        self.value_head = nn.Sequential(
+            nn.Linear(FUSED_CHANNELS, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, 1),
+        )
 
         self._init_weights()
-
-    # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(
         self,
@@ -132,31 +132,65 @@ class AWBWNet(nn.Module):
         scalars: torch.Tensor,
         action_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            spatial:     (batch, H, W, C) — channels-last from encoder
-            scalars:     (batch, N_SCALARS)
-            action_mask: (batch, ACTION_SPACE_SIZE) bool; True = valid action.
-                         Invalid positions are set to -inf before softmax.
-        Returns:
-            logits: (batch, ACTION_SPACE_SIZE)
-            value:  (batch,)
-        """
-        # Permute to (batch, C, H, W) for Conv2d
         x = spatial.permute(0, 3, 1, 2).contiguous()
-
         x = self.stem(x)
-        x = self.res1(x)
-        x = self.res2(x)
-        x = self.res3(x)
-        x = self.pool(x)
+        for blk in self.trunk_blocks:
+            x = blk(x)
 
-        cnn_flat = x.reshape(x.shape[0], -1)
-        combined = torch.cat([cnn_flat, scalars], dim=1)
-        features = self.fc(combined)
+        b = scalars.shape[0]
+        device = spatial.device
+        dtype = spatial.dtype
+        sp = self.scalar_to_plane(scalars).view(b, SCALAR_PLANES, 1, 1)
+        sp = sp.expand(-1, -1, GRID_SIZE, GRID_SIZE)
+        xf = torch.cat([x, sp], dim=1)
 
-        logits = self.policy_head(features)
-        value = self.value_head(features).squeeze(-1)
+        g = torch.nn.functional.adaptive_avg_pool2d(xf, (1, 1)).flatten(1)
+
+        l_sel = self.conv_select(xf).squeeze(1)
+        l_move = self.conv_move(xf).squeeze(1)
+        l_atk = self.conv_attack(xf).squeeze(1)
+        l_rep = self.conv_repair(xf).squeeze(1)
+        l_bld = self.conv_build(xf)
+
+        s_all = self.linear_scalar_policy(g)
+        s_pow = s_all[:, :3]
+        s_misc = s_all[:, 3:8]
+        s_unl = s_all[:, 8:16]
+
+        logits = torch.full(
+            (b, ACTION_SPACE_SIZE), float("-inf"), device=device, dtype=dtype
+        )
+
+        sel_flat = l_sel.view(b, -1)
+        atk_flat = l_atk.view(b, -1)
+        logits[:, 3:900] = sel_flat[:, 0:897]
+        logits[:, 903:1800] = atk_flat[:, 3:900]
+        logits[:, 900] = sel_flat[:, 897] + atk_flat[:, 0]
+        logits[:, 901] = sel_flat[:, 898] + atk_flat[:, 1]
+        logits[:, 902] = sel_flat[:, 899] + atk_flat[:, 2]
+
+        logits[:, 0:3] = s_pow
+        logits[:, _CAPTURE_IDX] = s_misc[:, 0]
+        logits[:, _WAIT_IDX] = s_misc[:, 1]
+        logits[:, _LOAD_IDX] = s_misc[:, 2]
+        logits[:, _JOIN_IDX] = s_misc[:, 3]
+        logits[:, _DIVE_HIDE_IDX] = s_misc[:, 4]
+        logits[:, _UNLOAD_OFFSET : _UNLOAD_OFFSET + 8] = s_unl
+
+        logits[:, _MOVE_OFFSET : _MOVE_OFFSET + _ENC_W * _ENC_W] = l_move.reshape(
+            b, -1
+        )
+
+        logits[:, _REPAIR_OFFSET : _REPAIR_OFFSET + _ENC_W * _ENC_W] = l_rep.reshape(
+            b, -1
+        )
+
+        build_flat = l_bld.permute(0, 2, 3, 1).reshape(
+            b, _ENC_W * _ENC_W * _N_BUILD_UNIT_TYPES
+        )
+        logits[:, _BUILD_OFFSET : _BUILD_OFFSET + build_flat.shape[1]] = build_flat
+
+        value = self.value_head(g).squeeze(-1)
 
         if action_mask is not None:
             logits = logits.masked_fill(~action_mask, float("-inf"))
@@ -170,15 +204,6 @@ class AWBWNet(nn.Module):
         action_mask: torch.Tensor,
         action: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Sample (or evaluate) an action.
-
-        Returns:
-            action:   (batch,) int64
-            log_prob: (batch,)
-            entropy:  (batch,)
-            value:    (batch,)
-        """
         logits, value = self.forward(spatial, scalars, action_mask)
         dist = torch.distributions.Categorical(logits=logits)
         if action is None:
@@ -186,8 +211,6 @@ class AWBWNet(nn.Module):
         log_prob = dist.log_prob(action)
         entropy = dist.entropy()
         return action, log_prob, entropy, value
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _init_weights(self) -> None:
         for m in self.modules():
@@ -198,35 +221,34 @@ class AWBWNet(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight, gain=1.0)
                 nn.init.zeros_(m.bias)
-        # Value head: smaller init for stable early training
-        nn.init.orthogonal_(self.value_head.weight, gain=0.01)
-        # Policy head: small init to start near-uniform
-        nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
+        nn.init.orthogonal_(self.value_head[-1].weight, gain=0.01)
+        nn.init.zeros_(self.value_head[-1].bias)
+        nn.init.orthogonal_(self.linear_scalar_policy.weight, gain=0.01)
+        nn.init.zeros_(self.linear_scalar_policy.bias)
+        for head in (
+            self.conv_select,
+            self.conv_move,
+            self.conv_attack,
+            self.conv_repair,
+            self.conv_build,
+        ):
+            nn.init.orthogonal_(head.weight, gain=0.01)
+            if head.bias is not None:
+                nn.init.zeros_(head.bias)
 
 
-class _ResBlock(nn.Module):
-    """Basic residual block with optional channel-doubling downsampling."""
+class _ResBlock128(nn.Module):
+    """Residual block 128→128, 3×3, BN + ReLU."""
 
-    def __init__(self, in_ch: int, out_ch: int, downsample: bool = False) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        stride = 1  # spatial size preserved; we use AdaptiveAvgPool later
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_ch)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.conv1 = nn.Conv2d(128, 128, 3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(128)
+        self.conv2 = nn.Conv2d(128, 128, 3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(128)
         self.act = nn.ReLU(inplace=True)
 
-        self.shortcut: nn.Module
-        if in_ch != out_ch:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_ch, out_ch, 1, bias=False),
-                nn.BatchNorm2d(out_ch),
-            )
-        else:
-            self.shortcut = nn.Identity()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = self.shortcut(x)
         out = self.act(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        return self.act(out + identity)
+        return self.act(out + x)

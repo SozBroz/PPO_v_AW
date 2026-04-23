@@ -2,27 +2,26 @@
 Encodes a GameState into a numpy observation tensor.
 
 Output shape: (H, W, N_CHANNELS) where H=W=30 (padded), N_CHANNELS is:
-  - 28 unit channels (14 unit types × 2 players)
+  - 28 unit channels (14 unit types × **me / enemy** relative to ``observer``)
   - 2 HP channels (hp_lo_ch, hp_hi_ch) — observer-aware belief interval
   - 15 terrain channels (one-hot, main terrain categories)
-  - 15 property channels (5 property types × 3 states: neutral/p0/p1)
-  - 2 capture-progress channels (P0 / P1 unit reducing ``capture_points`` on tile)
+  - 15 property channels (5 property types × 3 states: neutral / me / enemy)
+  - 2 capture-progress channels (capturing unit is **me** vs **enemy**)
   - 1 neutral contestable income-property mask (owner None, not lab/comm)
-  Total: 28 + 2 + 15 + 15 + 3 = 63 spatial channels
+  - 6 influence channels (threat/reach/capture-ETA planes; ``engine/threat.py``)
+  - 1 defense-stars channel (``TerrainInfo.defense / 4``, map-static; cached on ``MapData``)
+  Total: 28 + 2 + 15 + 15 + 3 + 6 + 1 = 70 spatial channels
 
-Plus scalar features (appended after CNN flatten):
-  - funds[0], funds[1] (normalized by 50000)
-  - co_power_bar[0], co_power_bar[1] (normalized by max)
-  - cop_active[0], cop_active[1] (binary)
-  - scop_active[0], scop_active[1] (binary)
+Plus scalar features (**ego-centric**, ``observer`` = engine seat of “me”):
+  - funds[me], funds[enemy] (normalized by 50000)
+  - co_power_bar[me], co_power_bar[enemy] (normalized by max)
+  - cop_active[me], scop_active[me], cop_active[enemy], scop_active[enemy] (binary)
   - turn (normalized by MAX_TURNS)
-  - active_player (0 or 1)
-  - p0_co_id, p1_co_id (normalized by 30)
+  - **my_turn**: 1.0 iff ``state.active_player == observer`` (not raw seat id)
+  - co_id[me], co_id[enemy] (normalized by 30)
   - tier (normalized: T1=0.25, T2=0.5, T3=0.75, T4=1.0)
-  - weather_rain  (binary: 1.0 if rain active, else 0.0)
-  - weather_snow  (binary: 1.0 if snow active, else 0.0)
-  - weather_turns (co_weather_segments_remaining / 2.0; 0 = clear/default)
-  - p0_income_share (income properties owned by P0 / total income tiles on map)
+  - weather_rain / weather_snow / weather_turns (same as pre-bundle)
+  - **me** income share (contestable income tiles owned by ``observer`` / total)
   Total scalars: 17
 
 HP belief (see ``docs/hp_belief.md``)
@@ -45,13 +44,20 @@ for enemy units when a belief overlay is provided.
 **Checkpoint compatibility:** legacy 62-channel zips (single HP) load via
 ``rl.ckpt_compat.load_maskable_ppo_compat`` — stem weights and Adam moments
 are expanded to 63 channels by duplicating the old HP channel into
-``hp_lo`` / ``hp_hi``. See ``docs/hp_belief.md`` for the observation change.
+``hp_lo`` / ``hp_hi``. The 63→70 channel bump (influence placeholders +
+defense stars) is a **restart-bundle** contract; do not load pre-restart
+policy weights without a stem transplant. See ``docs/hp_belief.md``.
 """
+from __future__ import annotations
+
 import numpy as np
-from engine.game import GameState, MAX_TURNS
-from engine.unit import UnitType
-from engine.terrain import get_terrain
+
 from engine.belief import BeliefState
+from engine.game import GameState, MAX_TURNS
+from engine.map_loader import MapData
+from engine.terrain import get_terrain
+from engine.threat import compute_influence_planes
+from engine.unit import UnitType
 
 GRID_SIZE = 30
 N_UNIT_CHANNELS = 28       # 14 unit types × 2 players
@@ -59,10 +65,28 @@ N_HP_CHANNELS = 2          # hp_lo, hp_hi (belief interval)
 N_TERRAIN_CHANNELS = 15
 N_PROPERTY_CHANNELS = 15   # 5 property types × 3 ownership states
 N_CAPTURE_EXTRA_CHANNELS = 3  # p0 progress, p1 progress, neutral-income mask
+# Influence planes (MASTER_SPEC / influence_channels_spec); see ``compute_influence_planes``.
+N_INFLUENCE_CHANNELS = 6
+N_DEFENSE_STARS_CHANNELS = 1
 N_SPATIAL_CHANNELS = (
-    N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS
-    + N_PROPERTY_CHANNELS + N_CAPTURE_EXTRA_CHANNELS
-)  # 63
+    N_UNIT_CHANNELS
+    + N_HP_CHANNELS
+    + N_TERRAIN_CHANNELS
+    + N_PROPERTY_CHANNELS
+    + N_CAPTURE_EXTRA_CHANNELS
+    + N_INFLUENCE_CHANNELS
+    + N_DEFENSE_STARS_CHANNELS
+)  # 70
+
+# First channel index for the 6-plane influence block (63..68); last channel 69 = defense stars.
+N_INFLUENCE_CHANNEL_BASE = (
+    N_UNIT_CHANNELS
+    + N_HP_CHANNELS
+    + N_TERRAIN_CHANNELS
+    + N_PROPERTY_CHANNELS
+    + N_CAPTURE_EXTRA_CHANNELS
+)
+N_DEFENSE_STARS_CHANNEL = N_SPATIAL_CHANNELS - 1
 N_SCALARS = 17
 
 # Terrain one-hot categories
@@ -146,6 +170,78 @@ def _build_terrain_category_table() -> dict[int, int]:
 _TERRAIN_CATEGORY_TABLE = _build_terrain_category_table()
 
 
+def _build_defense_norm_table() -> dict[int, float]:
+    """terrain_id → defense_stars / 4 (matches ``TerrainInfo.defense`` scale 0–4)."""
+    from engine.terrain import TERRAIN_TABLE
+
+    return {tid: float(info.defense) / 4.0 for tid, info in TERRAIN_TABLE.items()}
+
+
+_DEFENSE_NORM_TABLE = _build_defense_norm_table()
+
+
+def _defense_norm_for_tid(tid: int) -> float:
+    v = _DEFENSE_NORM_TABLE.get(tid)
+    if v is not None:
+        return v
+    return float(get_terrain(tid).defense) / 4.0
+
+
+def _refresh_map_static_caches_if_needed(md: MapData, *, force: bool = False) -> None:
+    """
+    Ensure ``md`` has Phase-3b terrain one-hot plus defense-stars grid, sharing one
+    terrain-id snapshot for invalidation (pipe breaks / terrain mutations).
+    """
+    H_md = min(md.height, GRID_SIZE)
+    W_md = min(md.width, GRID_SIZE)
+    tids_live = np.empty((H_md, W_md), dtype=np.int32)
+    for r in range(H_md):
+        tids_live[r, :] = md.terrain[r][:W_md]
+
+    terrain_block = getattr(md, "_encoded_terrain_channels", None)
+    defense_block = getattr(md, "_encoded_defense_stars", None)
+    terrain_snap = getattr(md, "_encoded_terrain_tid_snapshot", None)
+    cache_ok = (
+        not force
+        and terrain_block is not None
+        and defense_block is not None
+        and terrain_snap is not None
+        and terrain_block.shape == (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS)
+        and defense_block.shape == (GRID_SIZE, GRID_SIZE)
+        and terrain_snap.shape == (H_md, W_md)
+        and np.array_equal(terrain_snap, tids_live)
+    )
+    if cache_ok:
+        return
+
+    terrain_block = np.zeros(
+        (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS), dtype=np.float32
+    )
+    defense_block = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    for r in range(H_md):
+        for c in range(W_md):
+            tid = int(tids_live[r, c])
+            cat = _get_terrain_category(tid)
+            terrain_block[r, c, cat] = 1.0
+            defense_block[r, c] = _defense_norm_for_tid(tid)
+    try:
+        md._encoded_terrain_channels = terrain_block
+        md._encoded_defense_stars = defense_block
+        md._encoded_terrain_tid_snapshot = tids_live.copy()
+    except (AttributeError, TypeError):
+        pass
+
+
+def warm_map_static_encoder_cache(map_data: MapData) -> None:
+    """Pre-fill terrain + defense-star caches on ``MapData`` (no ``GameState`` required).
+
+    Call after ``load_map`` so the first ``encode_state`` skips cache-miss work.
+    Idempotent per terrain grid; use ``_refresh_map_static_caches_if_needed(..., force=True)``
+    after in-place terrain mutation on the same ``MapData`` instance.
+    """
+    _refresh_map_static_caches_if_needed(map_data, force=False)
+
+
 def _get_terrain_category(terrain_id: int) -> int:
     """Map a raw terrain tile id to a TERRAIN_CATEGORIES index."""
     cached = _TERRAIN_CATEGORY_TABLE.get(terrain_id)
@@ -202,35 +298,15 @@ def encode_state(
     # pipe-seam breaks mutate terrain in place — see engine/game.py).
     terrain_ch_offset = N_UNIT_CHANNELS + N_HP_CHANNELS
     md = state.map_data
-    H_md = min(md.height, GRID_SIZE)
-    W_md = min(md.width, GRID_SIZE)
-    tids_live = np.empty((H_md, W_md), dtype=np.int32)
-    for r in range(H_md):
-        tids_live[r, :] = md.terrain[r][:W_md]
-
+    _refresh_map_static_caches_if_needed(md, force=False)
     terrain_block = getattr(md, "_encoded_terrain_channels", None)
-    terrain_snap = getattr(md, "_encoded_terrain_tid_snapshot", None)
-    cache_ok = (
-        terrain_block is not None
-        and terrain_snap is not None
-        and terrain_block.shape
-        == (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS)
-        and terrain_snap.shape == (H_md, W_md)
-        and np.array_equal(terrain_snap, tids_live)
-    )
-    if not cache_ok:
+    defense_block = getattr(md, "_encoded_defense_stars", None)
+    if terrain_block is None:
         terrain_block = np.zeros(
             (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS), dtype=np.float32
         )
-        for r in range(H_md):
-            for c in range(W_md):
-                cat = _get_terrain_category(int(tids_live[r, c]))
-                terrain_block[r, c, cat] = 1.0
-        try:
-            md._encoded_terrain_channels = terrain_block
-            md._encoded_terrain_tid_snapshot = tids_live.copy()
-        except (AttributeError, TypeError):
-            pass
+    if defense_block is None:
+        defense_block = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
     np.copyto(
         spatial[:, :, terrain_ch_offset : terrain_ch_offset + N_TERRAIN_CHANNELS],
@@ -260,10 +336,10 @@ def encode_state(
 
         if prop.owner is None:
             ownership = 0
-        elif prop.owner == 0:
-            ownership = 1
+        elif prop.owner == observer:
+            ownership = 1  # me
         else:
-            ownership = 2
+            ownership = 2  # enemy
 
         spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
 
@@ -274,14 +350,14 @@ def encode_state(
             occ = state.get_unit_at(r, c)
             if occ is not None:
                 prog = (20 - prop.capture_points) / 20.0
-                if occ.player == 0:
+                if occ.player == observer:
                     spatial[r, c, cap_ch0] = max(spatial[r, c, cap_ch0], prog)
-                elif occ.player == 1:
+                elif occ.player != observer:
                     spatial[r, c, cap_ch1] = max(spatial[r, c, cap_ch1], prog)
 
-    # ── Unit presence + HP belief channels ───────────────────────────────────
-    for player in (0, 1):
-        player_ch_offset = _N_UNIT_TYPES * player  # 0 for p0, 14 for p1
+    # ── Unit presence + HP belief channels (me then enemy) ──────────────────
+    for idx, player in enumerate((observer, 1 - observer)):
+        player_ch_offset = _N_UNIT_TYPES * idx  # 0 = me, 14 = enemy
         for unit in state.units[player]:
             r, c = unit.pos
             if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
@@ -311,9 +387,25 @@ def encode_state(
             spatial[r, c, hp_lo_ch] = hp_lo
             spatial[r, c, hp_hi_ch] = hp_hi
 
-    # ── Scalar features ───────────────────────────────────────────────────────
-    co0 = state.co_states[0]
-    co1 = state.co_states[1]
+    # ── Influence planes (63..68) ────────────────────────────────────────────
+    infl_base = N_INFLUENCE_CHANNEL_BASE
+    t_me, t_en, r_me, r_en, c_me, c_en = compute_influence_planes(
+        state, me=observer, grid=GRID_SIZE
+    )
+    spatial[:, :, infl_base + 0] = t_me
+    spatial[:, :, infl_base + 1] = t_en
+    spatial[:, :, infl_base + 2] = r_me
+    spatial[:, :, infl_base + 3] = r_en
+    spatial[:, :, infl_base + 4] = c_me
+    spatial[:, :, infl_base + 5] = c_en
+
+    # ── Map-static defense stars (channel 69) ────────────────────────────────
+    np.copyto(spatial[:, :, N_DEFENSE_STARS_CHANNEL], defense_block)
+
+    # ── Scalar features (ego-centric) ───────────────────────────────────────
+    enemy = 1 - int(observer)
+    co_me = state.co_states[observer]
+    co_en = state.co_states[enemy]
 
     # Normalise power bar against the current SCOP threshold (grows with power_uses)
     def _norm_power(co_state) -> float:
@@ -323,47 +415,46 @@ def encode_state(
         return min(1.0, float(co_state.power_bar) / denom)
 
     weather = getattr(state, "weather", "clear")
+    my_turn = 1.0 if int(state.active_player) == int(observer) else 0.0
     if out_scalars is not None:
         scalars = out_scalars
-        scalars[0] = state.funds[0] / 50_000.0
-        scalars[1] = state.funds[1] / 50_000.0
-        scalars[2] = _norm_power(co0)
-        scalars[3] = _norm_power(co1)
-        scalars[4] = float(co0.cop_active)
-        scalars[5] = float(co0.scop_active)
-        scalars[6] = float(co1.cop_active)
-        scalars[7] = float(co1.scop_active)
+        scalars[0] = state.funds[observer] / 50_000.0
+        scalars[1] = state.funds[enemy] / 50_000.0
+        scalars[2] = _norm_power(co_me)
+        scalars[3] = _norm_power(co_en)
+        scalars[4] = float(co_me.cop_active)
+        scalars[5] = float(co_me.scop_active)
+        scalars[6] = float(co_en.cop_active)
+        scalars[7] = float(co_en.scop_active)
         scalars[8] = state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS)))
-        scalars[9] = float(state.active_player)
-        scalars[10] = co0.co_id / 30.0
-        scalars[11] = co1.co_id / 30.0
+        scalars[9] = my_turn
+        scalars[10] = co_me.co_id / 30.0
+        scalars[11] = co_en.co_id / 30.0
         scalars[12] = _TIER_MAP.get(state.tier_name, 0.5)
         scalars[13] = 1.0 if weather == "rain" else 0.0
         scalars[14] = 1.0 if weather == "snow" else 0.0
         scalars[15] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
-        scalars[16] = _p0_income_share(state)
+        scalars[16] = _income_share_for(state, observer)
     else:
         scalars = np.array(
             [
-                state.funds[0] / 50_000.0,
-                state.funds[1] / 50_000.0,
-                _norm_power(co0),
-                _norm_power(co1),
-                float(co0.cop_active),
-                float(co0.scop_active),
-                float(co1.cop_active),
-                float(co1.scop_active),
+                state.funds[observer] / 50_000.0,
+                state.funds[enemy] / 50_000.0,
+                _norm_power(co_me),
+                _norm_power(co_en),
+                float(co_me.cop_active),
+                float(co_me.scop_active),
+                float(co_en.cop_active),
+                float(co_en.scop_active),
                 state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS))),
-                float(state.active_player),
-                co0.co_id / 30.0,
-                co1.co_id / 30.0,
+                my_turn,
+                co_me.co_id / 30.0,
+                co_en.co_id / 30.0,
                 _TIER_MAP.get(state.tier_name, 0.5),
-                # Weather scalars (indices 13-15)
                 1.0 if weather == "rain" else 0.0,
                 1.0 if weather == "snow" else 0.0,
                 getattr(state, "co_weather_segments_remaining", 0) / 2.0,
-                # Share of contestable income tiles owned by P0 (labs/comm excluded).
-                _p0_income_share(state),
+                _income_share_for(state, observer),
             ],
             dtype=np.float32,
         )
@@ -371,10 +462,10 @@ def encode_state(
     return spatial, scalars
 
 
-def _p0_income_share(state: GameState) -> float:
+def _income_share_for(state: GameState, observer: int) -> float:
     n_income = sum(
         1 for p in state.properties if not p.is_comm_tower and not p.is_lab
     )
     if n_income <= 0:
         return 0.0
-    return float(state.count_income_properties(0)) / float(n_income)
+    return float(state.count_income_properties(observer)) / float(n_income)

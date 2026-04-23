@@ -1,10 +1,12 @@
 """Play API helpers and flat-action invariants used by human vs bot."""
+import numpy as np
 import pytest
 
 from engine.action import Action, ActionType, get_legal_actions
+from rl.encoder import encode_state
 from rl.env import _action_to_flat, _flat_to_action
 
-from server.play_human import POOL_PATH, MAPS_DIR, build_play_payload
+from server.play_human import BOT_PLAYER, POOL_PATH, MAPS_DIR, build_play_payload
 from engine.game import make_initial_state
 from engine.map_loader import load_map
 
@@ -43,6 +45,24 @@ def test_build_play_payload_keys():
         "unload_options",
     ):
         assert k in p
+
+
+def test_ego_observer_differs_for_p1_turn():
+    """Bot path must use observer=BOT_PLAYER; P0 vs P1 ego views must diverge here."""
+    m = load_map(123858, POOL_PATH, MAPS_DIR)
+    s = make_initial_state(m, 1, 1, tier_name="T3")
+    guard = 0
+    while int(s.active_player) != BOT_PLAYER and not s.done and guard < 500:
+        legal = get_legal_actions(s)
+        if not legal:
+            break
+        s.step(legal[0])
+        guard += 1
+    if int(s.active_player) != BOT_PLAYER:
+        pytest.skip("Could not reach P1 turn on this slice")
+    a0, b0 = encode_state(s, observer=0)
+    a1, b1 = encode_state(s, observer=1)
+    assert not np.array_equal(a0, a1) or not np.array_equal(b0, b1)
 
 
 def test_demo_row_flat_roundtrip_end_turn_when_legal():

@@ -2694,8 +2694,10 @@ class GameState:
                 (a turn is typically 5-50 sub-steps).
             rng_seed:
                 If not None, ``random.seed(rng_seed)`` is called BEFORE the rollout
-                to make combat-luck rolls deterministic. Saved-and-restored so the
-                global RNG state is preserved across the call.
+                and ``state.luck_rng`` is replaced with ``random.Random(rng_seed)``
+                so combat luck matches the seed (combat does not use the module
+                RNG). Saved-and-restored so the global RNG state is preserved
+                across the call.
             on_step:
                 Optional callback ``(state_after, action, reward, done)`` invoked
                 after each sub-step. Use for tree-search bookkeeping or tracing.
@@ -2735,6 +2737,8 @@ class GameState:
         if rng_seed is not None:
             saved_rng_state = _random_mod.getstate()
             _random_mod.seed(rng_seed)
+            # Combat luck draws from ``state.luck_rng``, not the module RNG.
+            state.luck_rng = _random_mod.Random(int(rng_seed))
 
         actions_taken: list[Action] = []
         total_reward = 0.0

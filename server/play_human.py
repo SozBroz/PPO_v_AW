@@ -40,8 +40,8 @@ ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
 
-# Seat invariants — match training: human always P0 (red / first seat), bot P1 (blue / second);
-# encode_state is always P0 view.
+# Seat invariants — match training: human always P0 (red / first seat), bot P1 (blue / second).
+# Ego-centric encoder: human demos use observer=HUMAN_PLAYER; bot inference uses observer=BOT_PLAYER.
 HUMAN_PLAYER = 0
 BOT_PLAYER = 1
 
@@ -311,7 +311,7 @@ def _run_bot_turn(state: GameState, model: Optional[Any]) -> None:
     while not state.done and state.active_player == BOT_PLAYER:
         mask = _get_action_mask(state)
         if model is not None:
-            obs_sp, obs_sc = encode_state(state)
+            obs_sp, obs_sc = encode_state(state, observer=BOT_PLAYER)
             obs = {"spatial": obs_sp, "scalars": obs_sc}
             with _model_lock:
                 action_arr, _ = model.predict(obs, action_masks=mask, deterministic=False)
@@ -337,14 +337,14 @@ def _append_human_demo(
     map_id: Optional[int],
     tier: Optional[str],
 ) -> None:
-    spatial, scalars = encode_state(state)
+    spatial, scalars = encode_state(state, observer=HUMAN_PLAYER)
     mask = _get_action_mask(state)
     row = {
         "encoder_version": [int(N_SPATIAL_CHANNELS), int(N_SCALARS)],
         "spatial": spatial.tolist(),
         "scalars": scalars.tolist(),
         "action_mask": mask.tolist(),
-        "action_idx": int(_action_to_flat(action)),
+        "action_idx": int(_action_to_flat(action, state)),
         "action_stage": state.action_stage.name,
         "action_label": _action_label(action),
         "active_player": int(state.active_player),

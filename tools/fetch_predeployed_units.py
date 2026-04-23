@@ -56,39 +56,21 @@ HEADERS    = {
 }
 
 # ---------------------------------------------------------------------------
-# AWBW unit name → engine UnitType enum name
-# Derived from the inverse of export_awbw_replay._AWBW_UNIT_NAMES
+# AWBW unit name → engine UnitType enum name.
+# Phase 11Z: derived from the canon in ``engine/unit_naming.py``. Kept as a
+# public dict so any external/out-of-tree caller still sees the same
+# ``AWBW_NAME_TO_UNIT_TYPE`` symbol. To add a spelling, edit
+# ``engine/unit_naming.py`` and not this dict.
 # ---------------------------------------------------------------------------
-AWBW_NAME_TO_UNIT_TYPE: dict[str, str] = {
-    "Infantry":    "INFANTRY",
-    "Mech":        "MECH",
-    "Recon":       "RECON",
-    "Tank":        "TANK",
-    "Md. Tank":    "MED_TANK",
-    "Neo Tank":    "NEO_TANK",
-    "Mega Tank":   "MEGA_TANK",
-    "APC":         "APC",
-    "Artillery":   "ARTILLERY",
-    "Rockets":     "ROCKET",
-    "Anti-Air":    "ANTI_AIR",
-    "Missiles":    "MISSILES",
-    "Fighter":     "FIGHTER",
-    "Bomber":      "BOMBER",
-    "Stealth":     "STEALTH",
-    "B-Copter":    "B_COPTER",
-    "T-Copter":    "T_COPTER",
-    "Battleship":  "BATTLESHIP",
-    "Carrier":     "CARRIER",
-    "Sub":         "SUBMARINE",
-    "Missile":     "MISSILES",
-    "Cruiser":     "CRUISER",
-    "Lander":      "LANDER",
-    "Gunboat":     "GUNBOAT",
-    "Black Boat":  "BLACK_BOAT",
-    "Black Bomb":  "BLACK_BOMB",
-    "Piperunner":  "PIPERUNNER",
-    "Oozium":      "OOZIUM",
-}
+def _build_awbw_name_to_unit_type() -> dict[str, str]:
+    # Local import to avoid forcing the engine import at module load time
+    # for callers that only want the http helpers.
+    from engine.unit_naming import all_known_aliases
+
+    return {alias: ut.name for alias, ut in all_known_aliases().items()}
+
+
+AWBW_NAME_TO_UNIT_TYPE: dict[str, str] = _build_awbw_name_to_unit_type()
 
 
 # ---------------------------------------------------------------------------

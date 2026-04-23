@@ -27,6 +27,7 @@ from typing import Any, Literal, Optional
 
 from engine.game import GameState
 from engine.unit import UNIT_STATS
+from engine.unit_naming import UnknownUnitName, to_unit_type
 
 PairingMode = Literal["trailing", "tight"]
 
@@ -204,15 +205,16 @@ def compare_units(
         php_name = str(pu.get("name", "")).strip()
         eng_name = UNIT_STATS[eu.unit_type].name
         if php_name and eng_name != php_name:
-            # AWBW sometimes omits spaces ("Md.Tank") and uses short forms;
-            # tolerate the aliases the comparator sees in PHP snapshots.
-            aliases = {
-                "Md.Tank": "Medium Tank",
-                "Md. Tank": "Medium Tank",
-            }
-            eng_cmp = aliases.get(eng_name, eng_name)
-            php_cmp = aliases.get(php_name, php_name)
-            if eng_cmp != php_cmp:
+            # Phase 11Z: route through ``engine.unit_naming``. Both
+            # spellings must resolve to the same UnitType for the type
+            # comparison to be considered cosmetic. Anything that
+            # fails resolution falls through to a literal string
+            # mismatch (preserves legacy diagnostic output).
+            try:
+                php_ut = to_unit_type(php_name)
+            except UnknownUnitName:
+                php_ut = None
+            if php_ut != eu.unit_type:
                 out.append(f"at {key} type engine={eng_name!r} php={php_name!r}")
         php_bars = _php_unit_bars(pu, engine_internal_hp=int(eu.hp))
         eng_bars = eu.display_hp

@@ -250,7 +250,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
             act_idx = _p0_flat_direct()
         elif len(cached_plan) > 0:
             act_obj = cached_plan.popleft()
-            act_idx = _action_to_flat(act_obj)
+            act_idx = _action_to_flat(act_obj, st)
             chosen_by_mcts_queue = True
         elif mid_turn_plan_exhausted:
             act_idx = _p0_flat_direct()
@@ -292,7 +292,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
 
             if act_idx is None and len(cached_plan) > 0:
                 act_obj = cached_plan.popleft()
-                act_idx = _action_to_flat(act_obj)
+                act_idx = _action_to_flat(act_obj, st)
                 chosen_by_mcts_queue = True
             elif act_idx is None:
                 act_idx = _p0_flat_direct()

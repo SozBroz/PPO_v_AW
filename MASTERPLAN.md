@@ -1,6 +1,6 @@
 # AWBW-RL Master Plan
 
-*Last updated: 2026-04-22*
+*Last updated: 2026-04-23*
 
 This document is the strategic north star for the AWBW reinforcement learning project.
 It records where we are, where we are going, and — critically — the concrete thresholds
@@ -10,22 +10,25 @@ that should gate each phase transition.
 
 ## 1. Where We Are Now
 
-### Architecture (as of 2026-04-16)
+### Architecture (restart bundle — 2026-04)
 
 | Component | Status | Detail |
 |---|---|---|
-| Feature extractor | **Active** | `AWBWFeaturesExtractor` — ResNet (3 blocks, 64→128ch) + scalar fusion → 256-dim |
-| Policy | **Active** | SB3 `MultiInputPolicy` with `net_arch=[]` — Linear 256→35k + action mask |
-| Value head | **Active** | Linear 256→1, step-level V(s) |
-| Opponent | **Active** | `_CheckpointOpponent` — rotates through historical checkpoints, falls back to random |
-| Reward | **Dual path** | **Default (`level`):** terminal ±1.0 + per-step property diff (asymmetric) + unit-value *level* ×2e-6 + engine capture constants (`_CAPTURE_*` in `engine/game.py`). **Opt-in (`phi`):** terminal ±1.0 + potential-based Φ-delta in `rl/env.py` (value + property + contested capture progress); engine capture shaping suppressed. See **§11** and [`.cursor/plans/rl_capture-combat_recalibration_4ebf9d22.plan.md`](.cursor/plans/rl_capture-combat_recalibration_4ebf9d22.plan.md). |
-| Training | **Active** | MaskablePPO, n_steps=512, n_envs=4, batch=256, γ=0.99, λ=0.95 |
+| Encoder | **Active** | 70 spatial ch (ego-centric me/enemy + influence + defense stars); 17 scalars (`docs/restart_arch/MASTER_SPEC.md`) |
+| Feature extractor | **Active** | `AWBWFeaturesExtractor` — stem 70→128, **10×** ResBlock@128, scalar→16 broadcast, GAP 144 → 256 MLP (matches `AWBWNet` trunk) |
+| Policy | **Active** | Factored spatial head (`Conv2d` 1×1 on 144ch) + scatter to 35k flat; MOVE band 1818..2717; collision 900..902 |
+| Value head | **Active** | GAP on 144 fused ch → MLP → scalar V(s) |
+| Opponent | **Active** | `_CheckpointOpponent` + optional PFSP (`AWBW_PFSP`, `AWBW_PFSP_STATS`); optional `AsyncVectorEnv` (`AWBW_ASYNC_VEC`) |
+| Reward | **Dual path** | **Default (`phi`):** learner-frame Φ-delta + terminal ±1.0 (sign-aware vs seat). **Fallback (`level`):** me−enemy property/value *levels*. `AWBW_REWARD_SHAPING` in `rl/env.py`. Seat balance: `AWBW_SEAT_BALANCE` / `AWBW_LEARNER_SEAT`. |
+| Training | **Active** | MaskablePPO; defaults unchanged in `train.py` unless overridden — use **`--stage1-narrow`** for Phase 1a Misery preset |
+
+**Pre-restart checkpoints** (`latest.zip` / dense Linear head / 62–63ch stem): kept on disk for BC experiments and regression baselines; **not** loadable into the new policy stem without a transplant. Prefer scratch or BC-init zips matched to the 70ch + factored head contract.
 
 ### What the Current Run Is Building
 
 The network is learning three things simultaneously:
 
-1. **Board reading** (`AWBWFeaturesExtractor` weights) — how to compress a 30×30×59 spatial
+1. **Board reading** (`AWBWFeaturesExtractor` weights) — how to compress a 30×30×70 spatial
    grid into a 256-dim representation that captures unit positions, terrain relationships,
    property ownership, and threat geometry. This knowledge is **architecture-portable** and
    will transfer directly into any future model.
@@ -175,7 +178,7 @@ Example ladder (tune with telemetry):
 - **Stage 3 — CO generalization:** re-enable stratified / full `co_ids` from enabled tiers (or staged CO buckets) on the Stage 2 map set.
 - **Stage 4 — Full pool:** return to “all Std maps / full tier sampling” for **Phase 1 Full Go** metrics.
 
-**Parallel (calendar risk, not a substitute for curriculum):** implement the **turn-level rollout interface** in the engine early (Phase 2 prereq, §4.2). It is testable without a full MCTS loop and de-risks turn-level nodes vs RL sub-steps. It does **not** replace expanding the training distribution before relying on MCTS as main strength.
+**Parallel (calendar risk, not a substitute for curriculum):** the **turn-level rollout interface** is in place (Phase 2 prereq, §4.2): `GameState.apply_full_turn` in `engine/game.py`, covered by `tests/test_apply_full_turn.py`, used as the rollout primitive in `rl/mcts.py`. It is testable without a full MCTS loop and de-risks turn-level nodes vs RL sub-steps. It does **not** replace expanding the training distribution before relying on MCTS as main strength.
 
 ### Phase 1 Narrow (bootstrap) exit
 
@@ -218,10 +221,7 @@ AWBW turns are broken into 20–30 RL sub-steps. Building a tree over individual
 sub-steps would branch at every SELECT/MOVE/ACTION, producing an intractably wide
 tree. The solution is to operate the tree at the **turn level**:
 
-1. **Add a turn-level rollout interface to the engine** — a function that takes
-   a `GameState` and a complete turn plan (or a rollout policy) and returns the
-   `GameState` after the full turn ends, without surfacing each sub-step as a
-   separate RL decision.
+1. **Turn-level rollout interface in the engine** — **done (Phase 11a):** `GameState.apply_full_turn` takes a `GameState` and a complete turn plan (`list[Action]`) or a rollout policy (`Callable[[GameState], Action]`) and returns the post-turn `GameState` (plus trace metadata), without requiring each sub-step to be a separate RL decision at the API boundary. See `engine/game.py`, `tests/test_apply_full_turn.py`, `rl/mcts.py`.
 
 2. **MCTS tree nodes = full-turn game states** — the tree branches once per
    player turn, not once per unit sub-step.
@@ -242,13 +242,13 @@ The Phase 1 weights transfer **entirely and directly** to Phase 2.
 
 MCTS leaf evaluation is **V(s) on the leaf state distribution**. A value head trained only on one layout/mirror can look strong **on that slice** while being **wrong off-manifold**; search then amplifies a biased evaluator. **Order:**
 
-- **MCTS prototype** (small sim budget, one map) may run after **Stage 1–2** once the **turn-level API** exists — useful for plumbing and speed-of-light measurements.
+- **MCTS prototype** (small sim budget, one map) may run after **Stage 1–2** — the **turn-level API** (`apply_full_turn`) is available — useful for plumbing and speed-of-light measurements.
 - **MCTS as relied-on strength** (competitive eval, larger sim budget) waits for **Phase 1 Full Go** on the **Stage 3–4** distribution, including **EV > 0.6** on **that** slice (same spirit as the gate below). Prototype MCTS does not satisfy the Phase 2 “production” bar.
 
 ### Phase 2 Go Threshold
 
 - [ ] **Phase 1 Full** thresholds met (§3), on the target training/eval distribution — not only narrow bootstrap
-- [ ] Turn-level rollout interface implemented and tested in `engine/game.py`
+- [x] Turn-level rollout interface implemented and tested in `engine/game.py` (`GameState.apply_full_turn`; `tests/test_apply_full_turn.py`)
 - [ ] Engine can simulate a full turn in < 5ms (required for real-time MCTS)
 - [ ] `explained_variance` > 0.6 (V(s) must be a strong evaluator for MCTS to work **on the states you will search**)
 
@@ -428,7 +428,7 @@ Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second
 
 **Priority (program sense): Tier 2 —** fits **Phase 1b** (distribution + curriculum + eval), **not** Phase 0 or narrow Phase 1a bootstrap. It does **not** block Stage 1 Misery mirror or turn-level API plumbing. It **does** belong on the path to **Phase 1 Full**: treat “agent only ever acts as engine **player 0**” as a known inductive bias and **measure** whether seat / opening order hurts you before claiming robust cross-context strength.
 
-**Why it matters:** [`rl/env.py`](rl/env.py) documents that the **policy always controls player 0**; [`docs/player_seats.md`](docs/player_seats.md) ties that to human `/play/` and red/blue seats. [`rl/encoder.py`](rl/encoder.py) uses **fixed** P0 vs P1 channel blocks (not an ego-centric “always me” frame). The policy **never** selects actions on P1’s clock during training—so it does not learn **P1-style initiative** with the same action head, even though many decisions are **post-opponent** (reactive “second” timing on each P0 step). Geography also differs by [`p0_country_id`](data/gl_map_pool.json) vs “being blue on the same map.”
+**Why it matters (historical vs restart):** Before the restart, the env trained **P0-only** with fixed P0/P1 tensor blocks. **Now:** [`rl/encoder.py`](rl/encoder.py) is **ego-centric** (me/enemy vs `observer`); optional **`AWBW_SEAT_BALANCE`** lets the learner act on either engine seat with the same flat action head. [`docs/player_seats.md`](docs/player_seats.md) still ties human `/play/` to red/blue. Geography still varies by [`p0_country_id`](data/gl_map_pool.json).
 
 **What still works without code changes:** reactive play when `active_player` returns to P0 after P1’s micro-steps; a stable “I am always red in the tensor” mapping avoids label-switching bugs; stronger opponents and broader maps improve tempo defence without swapping seats.
 
@@ -443,9 +443,9 @@ Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second
 
 **Rule of thumb:** (1) and (2) are **default** Phase 1b hygiene. Pursue (3)–(4) only after metrics justify the engineering and checkpoint contract cost.
 
-**Training doctrine once Tier 4 is funded (ego-centric “me” frame):**
+**Training doctrine — Tier 4 (ego-centric “me” frame) — funded in-repo (2026-04 restart):**
 
-- **Tier 4 is the prerequisite** for every “both sides” or “alternate seats” path below. Without ego-centric encoding, alternating the learner’s engine seat or logging opponent-side rows feeds P1-oriented state through a P0-oriented action head and teaches the wrong action bijection.
+- Encoder + obs paths use **me/enemy** vs `observer`; enable **seat-balanced** rollouts with `AWBW_SEAT_BALANCE=1`. Human-vs-bot play uses the correct observer per seat in `server/play_human.py`.
 - **BC (supervised):** once the encoder is ego-centric, log and train on **both** seats’ human turns from the same games. BC has no on-policy constraint; this is the highest-ROI use of “both sides.”
 - **PPO actor (on-policy):** alternate which engine seat the **learner** controls across parallel envs (e.g. half of [`rl/self_play.py`](rl/self_play.py) workers: learner P0 vs pool P1; half: learner P1 vs pool P0). Do **not** run policy gradients on actions taken by the **frozen pool** opponent — those trajectories are off-policy and are not correctable under PPO’s clipped surrogate without a different algorithm.
 - **PPO critic:** the value head is regression, not PG. Train it on **both** seats’ states with **sign-flipped** returns under the zero-sum assumption (watch first-move / tempo asymmetry vs a strict −V symmetry).
@@ -458,7 +458,7 @@ Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second
 - [ ] Win rate (or EV) **conditional on opening player** logged or dashboarded (Tier 1 measurement report on ≥ Stage 2 volume)
 - [ ] Curriculum includes a **meaningful fraction** of P1-opens games where the engine allows it
 - [ ] If gate fails: document whether remediation is (3) pool remap or (4) representation change before declaring Phase 1 Full for “fair seat” claims
-- [ ] **If Tier 4 is funded:** BC row format includes a `me ∈ {0, 1}` (or equivalent) flag and the encoder supports ego-centric channel swap; parallel envs are **seat-balanced** for the learner; critic targets use sign-flip on opponent-seat rows where applicable
+- [x] **Tier 4 (encoder + logs):** ego-centric channel swap in `rl/encoder.py`; `learner_seat` / `reward_mode` in `game_log` (schema ≥1.9). **Seat-balanced envs** (`AWBW_SEAT_BALANCE`); BC row flag / critic sign-flip policy still tracked per run.
 
 ---
 
@@ -535,16 +535,14 @@ Document the command line and seed in the run notes so regressions are comparabl
 - Watch **advantage / return variance**: if dominated by Φ spikes, prefer **halving** coefficients (§11.2) before architectural changes.
 - **Checkpoint policy:** resuming a **level**-trained `latest.zip` under **phi** is allowed for smoke but expect **value-head drift**; a **scratch** run from random or BC init is the honest read for the new return distribution.
 
-### 11.4 Default flip (later gate)
+### 11.4 Default flip
 
-After scratch + slice metrics look healthy:
-
-- [ ] Flip default shaping to `phi` in code (or document `phi` as standard in `train.py` bootstrap) and **remove or dead-code** the legacy level block in `rl/env.py` only when no production run depends on it.
-- [ ] Update §1 table row “Reward” to **Active (phi)** and prune stale “level only” prose elsewhere in this doc.
+- [x] Default shaping is **`phi`** in `rl/env.py` (`AWBW_REWARD_SHAPING` unset). Legacy **`level`** remains for ablations.
+- [x] §1 table updated for phi-default + learner frame. The legacy level path stays until no run depends on it.
 
 ### 11.5 MASTERPLAN metric hygiene under phi
 
-- Slice **win rate / game length / captures** by `curriculum_tag` and by `AWBW_REWARD_SHAPING` value in run notes (env is not logged in `game_log` today — add a tag or env echo in launch scripts).
+- Slice **win rate / game length / captures** by `curriculum_tag`, **`reward_mode`**, **`learner_seat`**, and `log_schema_version` (≥1.9) in `game_log.jsonl`. Use `tools/slice_game_log.py`.
 - Phase 1 **Full Go** gates (§3) still apply; reward switch does **not** replace distribution or replay qualitative bars.
 
 ---

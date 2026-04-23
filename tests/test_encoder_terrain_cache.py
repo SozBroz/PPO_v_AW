@@ -5,7 +5,7 @@ from engine.action import ActionStage
 from engine.co import make_co_state_safe
 from engine.game import GameState
 from engine.map_loader import MapData
-from rl.encoder import GRID_SIZE, N_TERRAIN_CHANNELS, encode_state
+from rl.encoder import GRID_SIZE, N_TERRAIN_CHANNELS, N_SPATIAL_CHANNELS, encode_state, warm_map_static_encoder_cache
 
 
 def _st(mid: int) -> GameState:
@@ -36,9 +36,14 @@ def _st(mid: int) -> GameState:
 def test_terrain_cache_attached_after_first_encode() -> None:
     st = _st(999_911)
     assert getattr(st.map_data, "_encoded_terrain_channels", None) is None
+    assert getattr(st.map_data, "_encoded_defense_stars", None) is None
     encode_state(st)
     ch = getattr(st.map_data, "_encoded_terrain_channels", None)
     assert ch is not None and ch.shape == (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS)
+    ds = getattr(st.map_data, "_encoded_defense_stars", None)
+    assert ds is not None and ds.shape == (GRID_SIZE, GRID_SIZE)
+    # Plain tile id 1 → defense stars 1 → normalized 0.25
+    assert ds[0, 0] == 0.25
 
 
 def test_terrain_cache_reused_second_call() -> None:
@@ -54,3 +59,12 @@ def test_terrain_cache_distinct_per_mapdata() -> None:
     encode_state(s0)
     encode_state(s1)
     assert s0.map_data._encoded_terrain_channels is not s1.map_data._encoded_terrain_channels
+
+
+def test_warm_map_static_encoder_cache_before_encode() -> None:
+    st = _st(999_915)
+    warm_map_static_encoder_cache(st.map_data)
+    assert st.map_data._encoded_terrain_channels is not None
+    assert st.map_data._encoded_defense_stars is not None
+    sp, _sc = encode_state(st)
+    assert sp.shape[2] == N_SPATIAL_CHANNELS

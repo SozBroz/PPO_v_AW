@@ -6,9 +6,9 @@ The environment wraps the AWBW game engine and exposes:
   - action_space: Discrete(ACTION_SPACE_SIZE)
   - action_masks(): bool array for MaskablePPO compatibility
 
-The agent always controls player 0 (red seat: first mover on symmetric starts).
-Player 1 (blue seat) is stepped automatically using either a provided opponent
-policy or a random fallback.
+By default the trained agent controls engine seat 0; the other seat is stepped
+automatically (checkpoint opponent or random). With ``AWBW_SEAT_BALANCE=1`` the
+learner seat is sampled 50/50 each episode (ego-centric obs + learner-frame Φ).
 """
 import collections
 import json
@@ -79,17 +79,17 @@ TRACK_PER_WORKER_TIMES_ENV = "AWBW_TRACK_PER_WORKER_TIMES"
 PREALLOCATED_BUFFERS_ENV = "AWBW_PREALLOCATED_BUFFERS"
 
 # Reward shaping mode (plan rl_capture-combat_recalibration).
-#   "level" (default) — legacy: per-step (p0_val − p1_val) × 2e-6 + asymmetric
-#                       property-diff term. Persists every step → cumulative
-#                       shaping drowns terminal ±1.0 and capture chips.
-#   "phi"             — potential-based: per-step reward gets
-#                       Φ(s_after) − Φ(s_before), where
-#                       Φ = α·Δval + β·Δprops + κ·Δcap-progress (contested).
-#                       Telescopes; suicidal caps net to value cost only.
+#   "phi" (default)   — potential-based: per-step reward gets
+#                       Φ(s_after) − Φ(s_before) in the learner frame.
+#   "level"           — legacy property + unit-value differential (me − enemy).
 # When mode is "phi", AWBW_PHI_PROFILE picks defaults for α,β,κ if the
 # per-coefficient env vars are unset. Explicit AWBW_PHI_ALPHA / _BETA / _KAPPA
 # still override. Default profile is "balanced"; "capture" skews toward κ.
 REWARD_SHAPING_ENV = "AWBW_REWARD_SHAPING"
+# Seat-balanced rollouts: ``1`` / ``true`` → random learner seat {0,1} each reset.
+SEAT_BALANCE_ENV = "AWBW_SEAT_BALANCE"
+# Force learner seat when seat balance is off (0 or 1).
+LEARNER_SEAT_ENV = "AWBW_LEARNER_SEAT"
 PHI_PROFILE_ENV = "AWBW_PHI_PROFILE"
 PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient
 PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
@@ -170,6 +170,9 @@ _DIVE_HIDE_IDX = _CAPTURE_IDX + 4         # 1804  (Sub dive / Stealth hide)
 # Index = _UNLOAD_OFFSET + slot_idx * 4 + dir (0=N, 1=S, 2=W, 3=E).
 _UNLOAD_OFFSET = _CAPTURE_IDX + 10        # 1810
 _UNLOAD_DIRS   = ((-1, 0), (1, 0), (0, -1), (0, 1))
+# MOVE-stage SELECT_UNIT encodes destination tile only (1818..2717). See
+# docs/restart_arch/move_encoding_redesign.md
+_MOVE_OFFSET = _UNLOAD_OFFSET + 8         # 1818
 _BUILD_OFFSET = 10_000
 # REPAIR (Black Boat): one index per target tile; kept below _BUILD_OFFSET.
 _REPAIR_OFFSET = 3500
@@ -177,8 +180,14 @@ _REPAIR_OFFSET = 3500
 _N_UNIT_TYPES = len(UnitType)
 
 
-def _action_to_flat(action: Action) -> int:
-    """Encode an Action to a flat integer index."""
+def _action_to_flat(action: Action, state: Optional[GameState] = None) -> int:
+    """Encode an Action to a flat integer index.
+
+    MOVE-stage ``SELECT_UNIT`` encodes ``move_pos`` at ``_MOVE_OFFSET + r*30+c``;
+    SELECT-stage encodes the unit tile at ``3 + r*30+c``. When ``state`` is
+    omitted, ``move_pos is not None`` implies MOVE encoding (for well-formed
+    engine actions); otherwise SELECT encoding.
+    """
     at = action.action_type
 
     if at == ActionType.END_TURN:
@@ -189,7 +198,19 @@ def _action_to_flat(action: Action) -> int:
         return 2
 
     if at == ActionType.SELECT_UNIT:
-        # SELECT: unit tile; MOVE stage also uses SELECT_UNIT with move_pos set (engine).
+        if state is not None:
+            if state.action_stage == ActionStage.SELECT:
+                r, c = action.unit_pos
+                return 3 + r * _ENC_W + c
+            if state.action_stage == ActionStage.MOVE:
+                if action.move_pos is None:
+                    return 0
+                r, c = action.move_pos
+                return _MOVE_OFFSET + r * _ENC_W + c
+            return 0
+        if action.move_pos is not None:
+            r, c = action.move_pos
+            return _MOVE_OFFSET + r * _ENC_W + c
         r, c = action.unit_pos
         return 3 + r * _ENC_W + c
 
@@ -253,7 +274,7 @@ def _action_to_flat(action: Action) -> int:
 
 def _flat_to_action(
     flat_idx: int,
-    state: GameState,
+    state: Optional[GameState],
     legal: list[Action] | None = None,
 ) -> Optional[Action]:
     """
@@ -262,8 +283,27 @@ def _flat_to_action(
     """
     if legal is None:
         legal = get_legal_actions(state)
+
+    if (
+        state is not None
+        and state.action_stage == ActionStage.MOVE
+        and _MOVE_OFFSET <= flat_idx < _MOVE_OFFSET + _ENC_W * _ENC_W
+    ):
+        r = (flat_idx - _MOVE_OFFSET) // _ENC_W
+        c = (flat_idx - _MOVE_OFFSET) % _ENC_W
+        u = state.selected_unit
+        if u is not None:
+            for a in legal:
+                if (
+                    a.action_type == ActionType.SELECT_UNIT
+                    and a.move_pos == (r, c)
+                    and a.unit_pos == u.pos
+                ):
+                    return a
+        return None
+
     for a in legal:
-        if _action_to_flat(a) == flat_idx:
+        if _action_to_flat(a, state) == flat_idx:
             return a
     return None
 
@@ -300,7 +340,7 @@ def _get_action_mask(
     if legal is None:
         legal = get_legal_actions(state)
     for action in legal:
-        idx = _action_to_flat(action)
+        idx = _action_to_flat(action, state)
         if 0 <= idx < ACTION_SPACE_SIZE:
             mask[idx] = True
     return mask
@@ -316,7 +356,7 @@ def _strip_non_infantry_builds(
         legal = get_legal_actions(state)
     for action in legal:
         if action.action_type == ActionType.BUILD and action.unit_type != UnitType.INFANTRY:
-            idx = _action_to_flat(action)
+            idx = _action_to_flat(action, state)
             if 0 <= idx < ACTION_SPACE_SIZE:
                 mask[idx] = False
 
@@ -562,6 +602,9 @@ class AWBWEnv(gym.Env):
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
         self._p1_truncated_mid_turn: bool = False
+        # Filled each ``reset()``; used for ego-centric obs + learner-frame rewards.
+        self._learner_seat: int = 0
+        self._enemy_seat: int = 1
 
         # Tier 1: read the teacher-mix probability ONCE at construction so
         # SubprocVecEnv workers (each a separate process) inherit the value
@@ -578,8 +621,8 @@ class AWBWEnv(gym.Env):
         # Reward shaping mode + Φ coefficients — read once per env instance
         # so SubprocVecEnv workers inherit a stable value at spawn. Restart
         # the run to change. See plan rl_capture-combat_recalibration.
-        mode = (os.environ.get(REWARD_SHAPING_ENV, "level") or "level").strip().lower()
-        self._reward_shaping_mode: str = mode if mode in ("level", "phi") else "level"
+        mode = (os.environ.get(REWARD_SHAPING_ENV, "phi") or "phi").strip().lower()
+        self._reward_shaping_mode: str = mode if mode in ("level", "phi") else "phi"
 
         prof_raw = (os.environ.get(PHI_PROFILE_ENV, "balanced") or "balanced").strip().lower()
         if prof_raw not in PHI_PROFILE_DEFAULTS:
@@ -730,12 +773,25 @@ class AWBWEnv(gym.Env):
         # Who opens (engine seat 0 or 1) per make_initial_state predeploy rule; see engine/game.py.
         self._opening_player = int(self.state.active_player)
 
+        _bal = (os.environ.get(SEAT_BALANCE_ENV, "") or "").strip().lower()
+        if _bal in ("1", "true", "yes", "on"):
+            self._learner_seat = int(self.np_random.integers(0, 2))
+        else:
+            try:
+                self._learner_seat = int(os.environ.get(LEARNER_SEAT_ENV, "0"))
+            except ValueError:
+                self._learner_seat = 0
+        if self._learner_seat not in (0, 1):
+            self._learner_seat = 0
+        self._enemy_seat = 1 - self._learner_seat
+
         self._episode_info = {
             "map_id": map_id,
             "map_name": map_name,
             "tier": tier_name,
             "p0_co": p0_co,
             "p1_co": p1_co,
+            "learner_seat": self._learner_seat,
             "episode_started_at": time.time(),  # Track episode start time
         }
         if self.curriculum_tag:
@@ -767,7 +823,7 @@ class AWBWEnv(gym.Env):
         self._opponent_reloads_at_start: int = int(
             getattr(self.opponent_policy, "reload_count", 0) or 0
         )
-        self._first_p0_capture_step: int | None = None
+        self._first_learner_capture_step: int | None = None
 
         # HP belief overlays — one per seat. Seeded with the initial board so
         # predeployed units start at their visible bucket (not exact HP) for the
@@ -780,12 +836,9 @@ class AWBWEnv(gym.Env):
         for b in self._beliefs.values():
             b.seed_from_state(self.state)
 
-        # If P1 opens, run the opponent before the learner's first step — same contract as
-        # server/play_human.new_session: observations must always be on P0's clock.
-        # (After _max_p1_microsteps init — _run_random_opponent updates that counter.)
-        # Phase 0a.2: count this opening opponent run as wall_p1_s so per-episode
-        # totals reflect ALL P1 work, not just the post-step microsteps.
-        if not self.state.done and self.state.active_player == 1:
+        # If the non-learner opens, autoplay that seat until the learner's clock.
+        # Phase 0a.2: count opening autoplay as wall_p1_s (enemy-side wall bucket).
+        if not self.state.done and int(self.state.active_player) != self._learner_seat:
             _t_open = time.perf_counter()
             if self.opponent_policy is not None:
                 self._run_policy_opponent(0.0)
@@ -797,7 +850,7 @@ class AWBWEnv(gym.Env):
         self._replay_frames = []
         self._capture_frame(action=None)
 
-        return self._get_obs(), dict(self._episode_info)
+        return self._get_obs(observer=self._learner_seat), dict(self._episode_info)
 
     def step(
         self, action_idx: int
@@ -834,11 +887,11 @@ class AWBWEnv(gym.Env):
             action_idx = pick_capture_greedy_flat(self.state, mask)
             self._learner_teacher_overrides += 1
 
-        # ── Decode & apply player-0 action ────────────────────────────────────
+        # ── Decode & apply learner action (must be learner's clock) ───────────
         action = _flat_to_action(action_idx, self.state, legal=self._get_legal())
         if action is None:
             self._invalid_action_count += 1
-            obs = self._get_obs()
+            obs = self._get_obs(observer=self._learner_seat)
             # Phase 0a.2: invalid-action early return is still P0 work; account it.
             self._wall_p0_s += time.perf_counter() - _t_step_start
             if _track_step_wall:
@@ -853,45 +906,43 @@ class AWBWEnv(gym.Env):
         else:
             phi_before = 0.0
 
+        acting = int(self.state.active_player)
         self.state, reward, done = self._engine_step_with_belief(action)
+        reward = self._signed_engine_reward(reward, acting)
         self._capture_frame(action=action)
 
-        if action.action_type == ActionType.CAPTURE and self._first_p0_capture_step is None:
-            self._first_p0_capture_step = self._p0_env_steps
+        if (
+            action.action_type == ActionType.CAPTURE
+            and self._first_learner_capture_step is None
+        ):
+            self._first_learner_capture_step = self._p0_env_steps
 
-        # Dense shaping (legacy "level" mode): property advantage + unit value
-        # differential. Coefficients are small relative to terminal ±1.0 but
-        # because they are LEVELS not deltas, cumulative trajectory impact
-        # scales with remaining episode length — see plan
-        # rl_capture-combat_recalibration for why "phi" mode replaces this.
-        # Asymmetric penalty (plan p0-capture-architecture-fix): prior
-        # symmetric (p0 − p1)*0.005 manufactured a "punished for existing"
-        # gradient when the opponent bootstrapped with capture-greedy and the
-        # learner had no teacher. Penalty is 5× softer than reward to break the
-        # dead-curriculum trap without removing the diff signal.
+        # Dense shaping (legacy "level" mode): me − enemy in learner frame.
         if self._reward_shaping_mode == "level" and not done:
-            p0_props = self.state.count_properties(0)
-            p1_props = self.state.count_properties(1)
-            diff = p0_props - p1_props
+            me = self._learner_seat
+            en = self._enemy_seat
+            p_me = self.state.count_properties(me)
+            p_en = self.state.count_properties(en)
+            diff = p_me - p_en
             if diff >= 0:
                 reward += diff * 0.005
             else:
                 reward += diff * 0.001
 
-            p0_val = sum(
+            v_me = sum(
                 UNIT_STATS[u.unit_type].cost * u.hp / 100
-                for u in self.state.units[0]
+                for u in self.state.units[me]
                 if u.is_alive
             )
-            p1_val = sum(
+            v_en = sum(
                 UNIT_STATS[u.unit_type].cost * u.hp / 100
-                for u in self.state.units[1]
+                for u in self.state.units[en]
                 if u.is_alive
             )
-            reward += (p0_val - p1_val) * 2e-6
+            reward += (v_me - v_en) * 2e-6
 
-        # ── Auto-step opponent ────────────────────────────────────────────────
-        if not done and self.state.active_player == 1:
+        # ── Auto-step non-learner seat ─────────────────────────────────────────
+        if not done and int(self.state.active_player) != self._learner_seat:
             _t_p1 = time.perf_counter()
             if self.opponent_policy is not None:
                 reward = self._run_policy_opponent(reward)
@@ -907,7 +958,7 @@ class AWBWEnv(gym.Env):
             phi_after = 0.0 if self.state.done else self._compute_phi(self.state)
             reward += phi_after - phi_before
 
-        obs = self._get_obs()
+        obs = self._get_obs(observer=self._learner_seat)
         terminated = bool(self.state.done)
         p1_cap_trunc = bool(self._p1_truncated_mid_turn)
         self._p1_truncated_mid_turn = False
@@ -937,9 +988,9 @@ class AWBWEnv(gym.Env):
                     coef = float(raw_inc)
                     if coef != 0.0:
                         cap_lim = max(1, self.state.map_data.cap_limit)
-                        inc0 = self.state.count_income_properties(0)
-                        inc1 = self.state.count_income_properties(1)
-                        reward += coef * (inc0 - inc1) / float(cap_lim)
+                        inc_me = self.state.count_income_properties(self._learner_seat)
+                        inc_en = self.state.count_income_properties(self._enemy_seat)
+                        reward += coef * (inc_me - inc_en) / float(cap_lim)
                 except ValueError:
                     pass
 
@@ -993,63 +1044,59 @@ class AWBWEnv(gym.Env):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _signed_engine_reward(self, r_engine: float, acting_seat: int) -> float:
+        """Map engine reward (acting player's perspective) into learner coordinates."""
+        if int(acting_seat) == int(self._learner_seat):
+            return float(r_engine)
+        return float(-r_engine)
+
     def _compute_phi(self, state: GameState) -> float:
-        """Potential function Φ(s) for P0-perspective reward shaping.
+        """Potential Φ(s) in the **learner** frame (me = ``_learner_seat``)."""
+        me = int(self._learner_seat)
+        en = int(self._enemy_seat)
 
-        Φ = α·(p0_val − p1_val)
-          + β·(p0_props − p1_props)
-          + κ·Σ_{prop contested for P0}(1 − cp/20)
-          − κ·Σ_{prop contested for P1}(1 − cp/20)
-
-        "Contested for P" = property is neutral or owned by 1−P AND cp < 20.
-        The engine resets cp to 20 when a capturer dies or vacates the tile
-        (engine/game.py lines 1290–1303 plus the move_unit path), so chip
-        credit is automatically refunded in ΔΦ — no special-case shaping.
-
-        Per-step shaping = Φ(s_after) − Φ(s_before); on terminal we use
-        Φ(s_after) := 0 so the trajectory shaping telescopes to −Φ(s_0)
-        (a per-episode constant) and does not double-count terminal ±1.0.
-        """
-        # Material (value coin: cost × hp/100, same units as legacy level form).
-        p0_val = sum(
+        v_me = sum(
             UNIT_STATS[u.unit_type].cost * u.hp / 100
-            for u in state.units[0]
+            for u in state.units[me]
             if u.is_alive
         )
-        p1_val = sum(
+        v_en = sum(
             UNIT_STATS[u.unit_type].cost * u.hp / 100
-            for u in state.units[1]
+            for u in state.units[en]
             if u.is_alive
         )
 
-        p0_props = state.count_properties(0)
-        p1_props = state.count_properties(1)
+        p_me = state.count_properties(me)
+        p_en = state.count_properties(en)
 
-        # Contested capture progress. cp ∈ [0, 20]; (1 − cp/20) ∈ [0, 1].
-        cap_p0 = 0.0  # contested for P0 (neutral or P1-owned, partly chipped)
-        cap_p1 = 0.0  # contested for P1 (neutral or P0-owned, partly chipped)
+        cap_me = 0.0
+        cap_en = 0.0
         for prop in state.properties:
             cp = prop.capture_points
             if cp >= 20:
                 continue
             chip = 1.0 - cp / 20.0
             owner = prop.owner
-            if owner != 0:  # neutral or P1-owned → contested for P0 to take
-                cap_p0 += chip
-            if owner != 1:  # neutral or P0-owned → contested for P1 to take
-                cap_p1 += chip
+            if owner != me:
+                cap_me += chip
+            if owner != en:
+                cap_en += chip
 
         return (
-            self._phi_alpha * (p0_val - p1_val)
-            + self._phi_beta  * (p0_props - p1_props)
-            + self._phi_kappa * (cap_p0 - cap_p1)
+            self._phi_alpha * (v_me - v_en)
+            + self._phi_beta * (p_me - p_en)
+            + self._phi_kappa * (cap_me - cap_en)
         )
 
-    def _get_obs(self, observer: int = 0) -> dict:
+    def _get_obs(self, observer: int | None = None) -> dict:
         """Render observation from ``observer``'s perspective, honouring the
         HP belief overlay so enemy units leak only bucket + formula-narrowed
         interval information — never exact HP.
+
+        When ``observer`` is omitted, use the current learner seat (after ``reset``).
         """
+        if observer is None:
+            observer = int(getattr(self, "_learner_seat", 0))
         belief = self._beliefs.get(observer) if hasattr(self, "_beliefs") else None
         if self._use_preallocated_buffers:
             encode_state(
@@ -1242,10 +1289,11 @@ class AWBWEnv(gym.Env):
         return self.state, reward, done
 
     def _run_random_opponent(self, accumulated_reward: float) -> float:
-        """Run player 1's turn using uniform-random legal actions."""
+        """Run the non-learner seat using uniform-random legal actions."""
         microsteps = 0
         cap = self._max_p1_microsteps_cap
-        while not self.state.done and self.state.active_player == 1:
+        enemy = int(self._enemy_seat)
+        while not self.state.done and int(self.state.active_player) == enemy:
             if cap is not None and microsteps >= cap:
                 self._p1_truncated_mid_turn = True
                 break
@@ -1253,10 +1301,9 @@ class AWBWEnv(gym.Env):
             if not legal:
                 break
             action = random.choice(legal)
+            acting = int(self.state.active_player)
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
-            if done_opp:
-                # Engine reward is from the acting player (P1); training is P0-only.
-                accumulated_reward -= r_opp
+            accumulated_reward += self._signed_engine_reward(r_opp, acting)
             self._capture_frame(action=action)
             microsteps += 1
         if microsteps > self._max_p1_microsteps:
@@ -1264,19 +1311,17 @@ class AWBWEnv(gym.Env):
         return accumulated_reward
 
     def _run_policy_opponent(self, accumulated_reward: float) -> float:
-        """Run player 1's turn using the provided opponent policy callable."""
+        """Run the non-learner seat using the provided opponent policy callable."""
         microsteps = 0
         cap = self._max_p1_microsteps_cap
-        while not self.state.done and self.state.active_player == 1:
+        enemy = int(self._enemy_seat)
+        while not self.state.done and int(self.state.active_player) == enemy:
             if cap is not None and microsteps >= cap:
                 self._p1_truncated_mid_turn = True
                 break
-            # Opponent sees the board from P1's seat, with P1's belief overlay —
-            # not P0's. Before the HP belief work this leaked exact P0 HP into
-            # the opponent model on the blue seat.
             needs_obs_fn = getattr(self.opponent_policy, "needs_observation", None)
             needs_obs = True if needs_obs_fn is None else bool(needs_obs_fn())
-            obs = self._get_obs(observer=1) if needs_obs else None
+            obs = self._get_obs(observer=enemy) if needs_obs else None
             legal = self._get_legal()
             _mout = self._action_mask_buf if self._use_preallocated_buffers else None
             mask = _get_action_mask(self.state, out=_mout, legal=legal)
@@ -1287,15 +1332,13 @@ class AWBWEnv(gym.Env):
 
             action = _flat_to_action(opp_idx, self.state, legal=legal)
             if action is None:
-                # Policy returned illegal index — fall back to random
                 if not legal:
                     break
                 action = random.choice(legal)
 
+            acting = int(self.state.active_player)
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
-            if done_opp:
-                # Engine reward is from the acting player (P1); training is P0-only.
-                accumulated_reward -= r_opp
+            accumulated_reward += self._signed_engine_reward(r_opp, acting)
             self._capture_frame(action=action)
             microsteps += 1
         if microsteps > self._max_p1_microsteps:
@@ -1394,7 +1437,14 @@ class AWBWEnv(gym.Env):
                 self.state.count_income_properties(0),
                 self.state.count_income_properties(1),
             ],
-            "first_p0_capture_p0_step": getattr(self, "_first_p0_capture_step", None),
+            "first_learner_capture_step": getattr(
+                self, "_first_learner_capture_step", None
+            ),
+            "first_p0_capture_p0_step": (
+                getattr(self, "_first_learner_capture_step", None)
+                if int(getattr(self, "_learner_seat", 0)) == 0
+                else None
+            ),
             "captures_completed_p0": sum(
                 1
                 for e in self.state.game_log
@@ -1439,7 +1489,16 @@ class AWBWEnv(gym.Env):
             "n_actions": n_actions,
 
             # Training context
-            "agent_plays": 0,  # Agent always controls player 0
+            "learner_seat": int(getattr(self, "_learner_seat", 0)),
+            "agent_plays": int(getattr(self, "_learner_seat", 0)),
+            "reward_mode": getattr(self, "_reward_shaping_mode", "phi"),
+            "arch_version": (os.environ.get("AWBW_ARCH_VERSION", "wave2") or "wave2").strip(),
+            "opponent_sampler": (
+                "pfsp"
+                if (os.environ.get("AWBW_PFSP", "") or "").strip().lower()
+                in ("1", "true", "yes", "on")
+                else "uniform"
+            ),
             "opening_player": getattr(self, "_opening_player", None),
             "opponent_type": (
                 self.opponent_policy.mode()
@@ -1485,10 +1544,12 @@ class AWBWEnv(gym.Env):
             # 1.6: Phase 0a (FPS campaign) — added wall_p0_s / wall_p1_s / worker_rss_mb.
             # 1.7: Phase 10/11 prereq — machine_id (writer-stamped) + terrain_usage_p0.
             # 1.8: terminated / truncated / truncation_reason (forced episode caps).
+            # 1.9: restart bundle — learner_seat, reward_mode, arch_version, opponent_sampler;
+            #      agent_plays now mirrors learner_seat (was always 0).
             "terminated": bool(self.state.done),
             "truncated": bool(getattr(self, "_log_episode_truncated", False)),
             "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
-            "log_schema_version": "1.8",
+            "log_schema_version": "1.9",
         }
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag

@@ -288,10 +288,10 @@ class TestSyncOwn(unittest.TestCase):
 class TestEncoderHpChannels(unittest.TestCase):
     """Encoder writes hp_lo and hp_hi; belief overlay honoured per observer."""
 
-    def test_n_spatial_channels_is_63(self) -> None:
+    def test_n_spatial_channels_is_70(self) -> None:
         from rl.encoder import N_SPATIAL_CHANNELS, N_HP_CHANNELS
         self.assertEqual(N_HP_CHANNELS, 2)
-        self.assertEqual(N_SPATIAL_CHANNELS, 63)
+        self.assertEqual(N_SPATIAL_CHANNELS, 70)
 
     def test_own_units_exact_enemy_bucket(self) -> None:
         """Render a minimal board; check P0 sees its own unit exact and the

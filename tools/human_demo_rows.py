@@ -37,7 +37,7 @@ def build_demo_row_dict(
         "spatial": spatial.tolist(),
         "scalars": scalars.tolist(),
         "action_mask": mask.tolist(),
-        "action_idx": int(_action_to_flat(action)),
+        "action_idx": int(_action_to_flat(action, state)),
         "action_stage": state.action_stage.name,
         "action_label": _action_label(action),
         "active_player": int(state.active_player),

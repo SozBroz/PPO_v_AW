@@ -120,6 +120,7 @@ from tools.replay_snapshot_compare import (  # noqa: E402
     replay_snapshot_pairing,
 )
 from engine.unit import UNIT_STATS  # noqa: E402
+from engine.unit_naming import UnknownUnitName, normalize_alias_key, to_unit_type  # noqa: E402
 
 CATALOG_DEFAULT = ROOT / "data" / "amarriner_gl_std_catalog.json"
 ZIPS_DEFAULT = ROOT / "replays" / "amarriner_gl"
@@ -368,49 +369,35 @@ class StateMismatchError(Exception):
         self.diff_summary = diff_summary
 
 
-# Name aliases the PHP comparator already tolerates (mirror
-# ``replay_snapshot_compare.compare_units``). Kept local so we don't import a
-# private map and so the audit's diff stays self-describing.
-_PHP_NAME_ALIASES: dict[str, str] = {
-    "Md.Tank": "Medium Tank",
-    "Md. Tank": "Medium Tank",
-}
+# Phase 11Z: name aliases now live in ``engine/unit_naming.py``. The local
+# ``_PHP_NAME_ALIASES`` dict and the per-string fold logic below have been
+# replaced with a single canon lookup. Strings that fail to resolve fall
+# back to the legacy normalize so legacy diff lines (e.g. genuine
+# ``Black Boat`` vs ``Infantry`` drift) still print a stable label.
 
 
 def _canonicalize_unit_type_name(name: str) -> str:
     """Normalize unit display names for state-mismatch **type** equality only.
 
+    Phase 11Z: routes through ``engine.unit_naming.to_unit_type``. When the
+    string resolves to a UnitType, returns ``ut.name`` (the engine enum
+    member name — stable, deterministic, hash-friendly). When it does not
+    resolve, falls back to ``normalize_alias_key`` so legacy non-unit
+    diff strings (e.g. captured property labels) still produce a stable
+    folded form.
+
     Cosmetic engine vs PHP naming (spacing, abbreviations, one plural) was
     polluting ``state_mismatch_units``; see ``docs/oracle_exception_audit/
-    phase11j_state_mismatch_name_normalize.md``. Empirical sample from
-    ``desync_register_state_mismatch_936_retune.jsonl``: ``Megatank`` vs
-    ``Mega Tank`` (21 rows), ``Missiles`` vs ``Missile`` (9 rows).
+    phase11j_state_mismatch_name_normalize.md`` and the architectural
+    rewrite in ``phase11z_unit_naming_canon_audit.md``.
 
     Does **not** affect ``compare_units`` / default desync classification —
     only ``_diff_engine_vs_snapshot`` when ``--enable-state-mismatch`` is on.
-
-    Steps: apply ``_PHP_NAME_ALIASES`` on exact strings; lowercase; strip
-    spaces, hyphens, periods, underscores; fold the missile unit plural
-    ``missiles`` → ``missile`` (AWBW singular/plural pair only — not generic
-    ``s`` stripping); fold medium-tank spellings to one token.
     """
-    s = str(name).strip()
-    s = _PHP_NAME_ALIASES.get(s, s)
-    core = (
-        s.lower()
-        .replace(" ", "")
-        .replace("-", "")
-        .replace(".", "")
-        .replace("_", "")
-    )
-    if core == "missiles":
-        core = "missile"
-    if core in ("mediumtank", "mdtank", "medtank"):
-        core = "mediumtank"
-    # PHP export uses abbreviated "Sub"; engine uses full "Submarine".
-    if core in ("sub", "submarine"):
-        core = "submarine"
-    return core
+    try:
+        return to_unit_type(name).name
+    except UnknownUnitName:
+        return normalize_alias_key(name)
 
 
 def _snapshot_line_is_cosmetic_type_only(line: str) -> bool:

@@ -163,6 +163,45 @@ def update_elo(
     return ratings
 
 
+def _pfsp_pick_checkpoint(paths: list[str]) -> str:
+    """Weighted random checkpoint: concave ``(1-w)*w`` on optional win-rates JSON.
+
+    Enable with ``AWBW_PFSP=1``. Optional ``AWBW_PFSP_STATS`` path to JSON mapping
+    zip path / basename / resolved path → win rate in ``[0,1]``. Missing entries
+    default to 0.5 (uniform-ish weights).
+    """
+    if not paths:
+        raise ValueError("PFSP pick on empty checkpoint list")
+    flag = (os.environ.get("AWBW_PFSP", "") or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return random.choice(paths)
+    stats_path = (os.environ.get("AWBW_PFSP_STATS", "") or "").strip()
+    if not stats_path or not os.path.isfile(stats_path):
+        return random.choice(paths)
+    try:
+        with open(stats_path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return random.choice(paths)
+    weights: list[float] = []
+    for p in paths:
+        w = 0.5
+        for k in (p, os.path.basename(p), str(Path(p).resolve())):
+            if isinstance(raw, dict) and k in raw:
+                try:
+                    w = float(raw[k])
+                except (TypeError, ValueError):
+                    w = 0.5
+                break
+        w = min(0.99, max(0.01, w))
+        weights.append((1.0 - w) * w)
+    s = sum(weights)
+    if s <= 0:
+        return random.choice(paths)
+    norm = [x / s for x in weights]
+    return random.choices(paths, weights=norm, k=1)[0]
+
+
 # ── Trainer ───────────────────────────────────────────────────────────────────
 
 def _mask_fn(env: "AWBWEnv") -> np.ndarray:  # type: ignore[name-defined]
@@ -266,7 +305,7 @@ def pick_capture_greedy_flat(state: GameState, mask: np.ndarray) -> int:
     best_score = -1e18
     best: list[int] = []
     for act in legal:
-        idx = _action_to_flat(act)
+        idx = _action_to_flat(act, state)
         if not (0 <= idx < ACTION_SPACE_SIZE) or not mask[idx]:
             continue
         sc = _greedy_action_score(state, act)
@@ -308,7 +347,7 @@ def _passive_cold_action(state: GameState, mask: np.ndarray) -> int | None:
         # Some unit must move; pick the first SELECT_UNIT in legal order.
         for act in get_legal_actions(state):
             if act.action_type == ActionType.SELECT_UNIT and act.move_pos is None:
-                idx = _action_to_flat(act)
+                idx = _action_to_flat(act, state)
                 if 0 <= idx < ACTION_SPACE_SIZE and bool(mask[idx]):
                     return idx
         return None
@@ -323,7 +362,7 @@ def _passive_cold_action(state: GameState, mask: np.ndarray) -> int | None:
                 act.action_type == ActionType.SELECT_UNIT
                 and act.move_pos == unit.pos
             ):
-                idx = _action_to_flat(act)
+                idx = _action_to_flat(act, state)
                 if 0 <= idx < ACTION_SPACE_SIZE and bool(mask[idx]):
                     return idx
         # Stay-in-place not in legal moves (rare); fall through to None
@@ -417,7 +456,7 @@ class _CheckpointOpponent:
         if not ckpts:
             self._model = None
             return
-        path = random.choice(ckpts)
+        path = _pfsp_pick_checkpoint(ckpts)
         try:
             from rl.ckpt_compat import load_maskable_ppo_compat
 
@@ -844,12 +883,10 @@ class SelfPlayTrainer:
         opponent inference on CPU.  More workers raise throughput but cost
         ~2-3 GB host RAM each.
 
-        Step-sync note: SubprocVecEnv is synchronous — every call to
-        ``VecEnv.step()`` waits for the slowest worker before returning.
-        Within a rollout individual episodes reset independently (no waiting
-        for every env to finish a game), but per-timestep progress is still
-        gated by the laggard.  True per-worker async rollouts would require a
-        custom ``VecEnv`` + rollout collector and are not supported here.
+        Step-sync note: the default ``SubprocVecEnv`` waits for the slowest worker
+        each ``VecEnv.step()``. Set ``AWBW_ASYNC_VEC=1`` to try
+        ``gymnasium.vector.AsyncVectorEnv`` (experimental with MaskablePPO; falls
+        back to SubprocVecEnv if construction fails).
     device : str
         Torch device for the **learner only** — "cuda", "cpu", or "auto".
         Opponent inference always runs on CPU with a minimal rollout buffer
@@ -1155,12 +1192,29 @@ class SelfPlayTrainer:
         )
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
+
             factories = [
                 _make_env_factory(self.map_pool, str(self.checkpoint_dir), **env_kw)
                 for _ in range(self.n_envs)
             ]
-            vec_env = SubprocVecEnv(factories, start_method="spawn")
-            print(f"[self_play] SubprocVecEnv: {self.n_envs} workers (spawn)")
+            use_async = (os.environ.get("AWBW_ASYNC_VEC", "") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            vec_env = None
+            if use_async:
+                try:
+                    from gymnasium.vector import AsyncVectorEnv  # type: ignore[import]
+
+                    vec_env = AsyncVectorEnv(factories, shared_memory=False)
+                    print(f"[self_play] AsyncVectorEnv: {self.n_envs} workers")
+                except Exception as exc:
+                    print(f"[self_play] AsyncVectorEnv failed ({exc}); using SubprocVecEnv")
+            if vec_env is None:
+                vec_env = SubprocVecEnv(factories, start_method="spawn")
+                print(f"[self_play] SubprocVecEnv: {self.n_envs} workers (spawn)")
             return vec_env
         else:
             from rl.env import AWBWEnv

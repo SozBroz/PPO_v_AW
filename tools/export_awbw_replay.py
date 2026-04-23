@@ -23,6 +23,7 @@ from typing import Optional
 from engine.game import GameState, make_initial_state
 from engine.map_loader import MapData, load_map
 from engine.unit import UnitType, UNIT_STATS
+from engine.unit_naming import UnitNameSurface, from_unit_type
 from engine.terrain import TERRAIN_TABLE
 
 log = logging.getLogger(__name__)
@@ -108,38 +109,17 @@ def _awbw_non_property_building_capture(terrain_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# AWBW unit name mapping (must match the viewer's unit database)
+# AWBW unit name mapping (must match the viewer's unit database).
+#
+# Phase 11Z: derived from the canon in ``engine/unit_naming.py``. Kept as
+# a public dict for backwards compatibility (``tools/oracle_zip_replay``,
+# ``tools/export_awbw_replay_actions``, and external callers import it
+# directly). To add or change a spelling, edit ``engine/unit_naming.py``
+# and not this dict — see ``docs/oracle_exception_audit/
+# phase11z_unit_naming_canon_audit.md``.
 # ---------------------------------------------------------------------------
 _AWBW_UNIT_NAMES: dict[UnitType, str] = {
-    UnitType.INFANTRY:   "Infantry",
-    UnitType.MECH:       "Mech",
-    UnitType.RECON:      "Recon",
-    UnitType.TANK:       "Tank",
-    UnitType.MED_TANK:   "Md. Tank",
-    UnitType.NEO_TANK:   "Neo Tank",
-    UnitType.MEGA_TANK:  "Mega Tank",
-    UnitType.APC:        "APC",
-    UnitType.ARTILLERY:  "Artillery",
-    UnitType.ROCKET:     "Rockets",
-    UnitType.ANTI_AIR:   "Anti-Air",
-    # AWBW PHP / damage.php row is "Missiles" (plural). "Missile" breaks some
-    # desktop viewer lookups and drifts from site-pulled replays.
-    UnitType.MISSILES:   "Missiles",
-    UnitType.FIGHTER:    "Fighter",
-    UnitType.BOMBER:     "Bomber",
-    UnitType.STEALTH:    "Stealth",
-    UnitType.B_COPTER:   "B-Copter",
-    UnitType.T_COPTER:   "T-Copter",
-    UnitType.BATTLESHIP: "Battleship",
-    UnitType.CARRIER:    "Carrier",
-    UnitType.SUBMARINE:  "Sub",
-    UnitType.CRUISER:    "Cruiser",
-    UnitType.LANDER:     "Lander",
-    UnitType.GUNBOAT:    "Gunboat",
-    UnitType.BLACK_BOAT: "Black Boat",
-    UnitType.BLACK_BOMB: "Black Bomb",
-    UnitType.PIPERUNNER: "Piperunner",
-    UnitType.OOZIUM:     "Oozium",
+    ut: from_unit_type(ut, UnitNameSurface.AWBW_PHP) for ut in UnitType
 }
 
 # AWBW movement type strings

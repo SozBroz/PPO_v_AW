@@ -48,6 +48,11 @@ todos:
       Calendar-risk parallel — implement/test turn-level rollout interface in engine
       (MASTERPLAN §4.2); does not substitute curriculum expansion.
     status: pending
+  - id: masterplan-elo-league-backlog
+    content: >-
+      When ready (post Phase 1 Full / Phase 2 eval), paste [elo league plan](c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md) draft
+      into MASTERPLAN as §10.5 + optional §2/§7 cross-refs. Does not block Stages 0–4.
+    status: pending
 ---
 
 # Phase 1 foundation validation
@@ -58,6 +63,7 @@ Plan derived from [MASTERPLAN.md](c:\Users\phili\AWBW\MASTERPLAN.md) §3 (gates)
 
 - Declaring Phase 1 complete on narrow-slice metrics alone.
 - Competitive MCTS or hierarchical RL scope — only prerequisites where explicitly parallel (turn-level API).
+- **Elo / league eval** — [draft + paste instructions for MASTERPLAN §10.5](c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md) are deferred; not part of Phase 1 gates (optional Phase 2 eval/promotion layer).
 
 ## Repository truth
 
@@ -68,6 +74,7 @@ Plan derived from [MASTERPLAN.md](c:\Users\phili\AWBW\MASTERPLAN.md) §3 (gates)
 | Matchup and outcome telemetry | [data/game_log.jsonl](c:\Users\phili\AWBW\data\game_log.jsonl) |
 | Map pool reference | [data/gl_map_pool.json](c:\Users\phili\AWBW\data\gl_map_pool.json) |
 | Engine / replay cross-cutting work (separate track) | [awbw-engine-parity.plan.md](c:\Users\phili\AWBW\.cursor\plans\awbw-engine-parity.plan.md) |
+| Elo league → MASTERPLAN doc (backlog) | [elo_league_masterplan.plan.md](c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md) |
 
 ## Critical section — risks and wrong assumptions
 

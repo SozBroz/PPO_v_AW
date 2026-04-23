@@ -135,7 +135,7 @@ def materialize_sb3_zip_with_spatial_compat(ckpt_path: Path) -> tuple[Path, bool
 
 
 def _current_awbw_observation_space() -> gym.spaces.Dict:
-    """Dict space matching ``AWBWEnv`` / ``encode_state`` (63 spatial channels)."""
+    """Dict space matching ``AWBWEnv`` / ``encode_state`` (``N_SPATIAL_CHANNELS``)."""
     return gym.spaces.Dict(
         {
             "spatial": gym.spaces.Box(

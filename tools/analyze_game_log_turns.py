@@ -10,6 +10,9 @@ Examples::
   python tools/analyze_game_log_turns.py
   python tools/analyze_game_log_turns.py --since 2026-04-18
   python tools/analyze_game_log_turns.py --all-dates   # no date filter
+
+For filtering rows by ``curriculum_tag`` / ``learner_seat`` / schema 1.9 fields, see
+``tools/slice_game_log.py``.
 """
 from __future__ import annotations
 

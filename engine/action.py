@@ -594,6 +594,28 @@ _BAN_MAP: dict[str, UnitType] = {
     "Oozium":      UnitType.OOZIUM,
 }
 
+# Phase 11Z sanity: every key here must resolve via the unit-naming canon.
+# This makes a typo here trip at import time rather than silently letting
+# a banned unit through map filtering.
+def _assert_ban_map_in_canon() -> None:
+    from engine.unit_naming import to_unit_type, UnknownUnitName  # noqa: WPS433
+
+    for nm, ut in _BAN_MAP.items():
+        try:
+            resolved = to_unit_type(nm)
+        except UnknownUnitName as exc:  # pragma: no cover — defensive
+            raise RuntimeError(
+                f"_BAN_MAP key {nm!r} is not recognized by engine.unit_naming"
+            ) from exc
+        if resolved != ut:  # pragma: no cover — defensive
+            raise RuntimeError(
+                f"_BAN_MAP key {nm!r} resolves to {resolved.name} "
+                f"but is mapped to {ut.name}"
+            )
+
+
+_assert_ban_map_in_canon()
+
 
 def get_producible_units(terrain_info, unit_bans: list[str]) -> list[UnitType]:
     banned = {_BAN_MAP[b] for b in unit_bans if b in _BAN_MAP}

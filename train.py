@@ -9,6 +9,7 @@ Usage:
   python train.py --map-id 133665             # train on one map only
   python train.py --watch-only                # watch a single random game (debug)
   python train.py --watch-only --map-id 133665 --co-p0 7 --co-p1 1
+  python train.py --stage1-narrow
   python train.py --map-id 123858 --tier T3 --co-p0 1 --co-p1 1 --curriculum-tag misery-andy
   python train.py --n-envs 12 --n-steps 2048 --map-id 123858 --tier T3 --co-p0 1 --co-p1 1
   python train.py --log-replay-frames         # game_log rows include frames for /replay/
@@ -36,6 +37,26 @@ def _load_dotenv(path: Path) -> None:
         key, val = key.strip(), val.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = val
+
+
+def _apply_stage1_narrow_defaults(args: argparse.Namespace) -> None:
+    """Fill Phase 1a narrow fields when ``--stage1-narrow`` is set (unset slots only)."""
+    if not getattr(args, "stage1_narrow", False):
+        return
+    if args.map_id is None:
+        args.map_id = 123858
+    if args.tier is None:
+        args.tier = "T3"
+    if args.co_p0 is None:
+        args.co_p0 = 1
+    if args.co_p1 is None:
+        args.co_p1 = 1
+    if args.curriculum_tag is None:
+        args.curriculum_tag = "stage1-misery-andy"
+    print(
+        "[train] --stage1-narrow: map_id=123858 tier=T3 co_p0=1 co_p1=1 "
+        "tag=stage1-misery-andy (unset fields only)"
+    )
 
 
 def build_train_argument_parser() -> argparse.ArgumentParser:
@@ -120,6 +141,16 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--curriculum-tag", type=str, default=None,
         help="Optional label written to game_log rows for slicing TensorBoard / analysis",
+    )
+    parser.add_argument(
+        "--stage1-narrow",
+        action="store_true",
+        help=(
+            "Phase 1a preset: Misery map 123858, tier T3, Andy mirror (co 1 vs 1), "
+            "curriculum_tag stage1-misery-andy — only for args left at default None "
+            "(override any piece by setting --map-id / --tier / --co-p0 / --co-p1 / "
+            "--curriculum-tag explicitly)."
+        ),
     )
     parser.add_argument(
         "--save-every", type=int, default=50_000,
@@ -403,6 +434,7 @@ def main() -> None:
     _load_dotenv(ROOT / ".env")
     parser = build_train_argument_parser()
     args = parser.parse_args()
+    _apply_stage1_narrow_defaults(args)
 
     # ── Resolve device ────────────────────────────────────────────────────────
     if args.device == "auto":
@@ -472,6 +504,11 @@ def main() -> None:
         ("AWBW_LOG_REPLAY_FRAMES", os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
         ("AWBW_LEARNER_GREEDY_MIX", os.environ.get("AWBW_LEARNER_GREEDY_MIX")),
         ("AWBW_CAPTURE_MOVE_GATE", os.environ.get("AWBW_CAPTURE_MOVE_GATE")),
+        ("AWBW_SEAT_BALANCE", os.environ.get("AWBW_SEAT_BALANCE")),
+        ("AWBW_LEARNER_SEAT", os.environ.get("AWBW_LEARNER_SEAT")),
+        ("AWBW_PFSP", os.environ.get("AWBW_PFSP")),
+        ("AWBW_ASYNC_VEC", os.environ.get("AWBW_ASYNC_VEC")),
+        ("AWBW_REWARD_SHAPING", os.environ.get("AWBW_REWARD_SHAPING")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
     if _active:

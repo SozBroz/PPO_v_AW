@@ -93,19 +93,19 @@ todos:
     content: "Phase 11d SHIPPED 2026-04-22 (Composer G): tools/mcts_health.py + orchestrator read path; 14 tests; audit-only MCTS gate — duplicate track of phase-11d-mcts-health-gate."
     status: completed
   - id: log-machine-id
-    content: "PREREQ for Phase 10g/10h/11d (BLOCKING). Add machine_id to every game_log.jsonl row by reading os.environ['AWBW_MACHINE_ID'] in _append_game_log_line (rl/env.py:98-142). Without this the orchestrator cannot filter games per machine. Combine schema bump with terrain_usage_p0 (single 1.6 -> 1.7 jump)."
+    content: PREREQ for Phase 10g/10h/11d (BLOCKING). Add machine_id to every game_log.jsonl row by reading os.environ['AWBW_MACHINE_ID'] in _append_game_log_line (rl/env.py:98-142). Without this the orchestrator cannot filter games per machine. Combine schema bump with terrain_usage_p0 (single 1.6 -> 1.7 jump).
     status: completed
   - id: terrain-usage-metric
     content: "Phase 11e (small, lands with log-machine-id): Add per-episode terrain_usage_p0 to game_log.jsonl in rl/env.py — fraction of P0 unit-end-of-turn positions on terrain with defense_stars>=2. Required signal for the MCTS health gate. Schema bump to 1.7 (combined with machine_id)."
     status: completed
   - id: trainer-status-heartbeat
-    content: "PREREQ for Phase 10e/10h. Trainer process calls write_status_json (rl/fleet_env.py:200) once per outer cycle in rl/self_play.py around line 993 — currently only the eval daemon writes status.json. Without this the orchestrator's stuck-worker detection has no heartbeat to read."
+    content: PREREQ for Phase 10e/10h. Trainer process calls write_status_json (rl/fleet_env.py:200) once per outer cycle in rl/self_play.py around line 993 — currently only the eval daemon writes status.json. Without this the orchestrator's stuck-worker detection has no heartbeat to read.
     status: completed
   - id: formalize-fleet-logs-layout
     content: "PREREQ for Phase 10/11 reads. Document and codify the fleet-logs convention: logs/<file> = this machine (pc-b); logs/logs/<file> = Main's manual mirror (operator copies from D:/awbw/logs/ during/after Main's offline window). Add a small fleet_logs.py helper that maps machine_id -> log path for orchestrator readers, and a startup assert in rl/paths.py that the WRITER never lands in a sub-path (catches future wrong-CWD accidents without breaking the mirror)."
     status: completed
   - id: separate-watch-log-path
-    content: "Housekeeping. log_game in rl/self_play.py:54-82 writes schema 1.5 (no game_id) to the same game_log.jsonl that production schema-1.6 writes go to. Only watch_game calls it (line 1089-1099) — but if anyone aims watch at the live log it pollutes the orchestrator's parser. Either retire the legacy writer or send watch output to logs/watch_log.jsonl."
+    content: Housekeeping. log_game in rl/self_play.py:54-82 writes schema 1.5 (no game_id) to the same game_log.jsonl that production schema-1.6 writes go to. Only watch_game calls it (line 1089-1099) — but if anyone aims watch at the live log it pollutes the orchestrator's parser. Either retire the legacy writer or send watch output to logs/watch_log.jsonl.
     status: completed
   - id: fleet-machine-diagnosis
     content: "Phase 10h: Continuous health diagnosis for ALL machines (fresh and established). Classifier slots each into {fresh, bootstrapping, competent, stuck, regressing}. Stuck -> partial bootstrap re-enable; regressing -> curriculum rollback or weight reload. Conservative defaults so the orchestrator never makes a working machine worse. State per-machine in fleet/<id>/diagnosis.json with full audit trail."

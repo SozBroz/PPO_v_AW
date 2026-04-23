@@ -70,6 +70,7 @@ from engine.action import (
 from engine.game import GameState, make_initial_state
 from engine.map_loader import load_map
 from engine.unit import Unit, UnitType, UNIT_STATS
+from engine.unit_naming import UnknownUnitName, to_unit_type
 
 from tools.diff_replay_zips import load_replay
 from tools.export_awbw_replay import _AWBW_UNIT_NAMES
@@ -3315,39 +3316,17 @@ def _resolve_unload_transport(
 
 
 def _name_to_unit_type(name: str) -> UnitType:
-    n = str(name).strip()
-    # Site JSON sometimes omits spaces / varies casing vs ``export_awbw_replay``.
-    aliases = {
-        "Md.Tank": "Md. Tank",
-        "md.tank": "Md. Tank",
-        "MD.TANK": "Md. Tank",
-        "Neotank": "Neo Tank",
-        "NeoTank": "Neo Tank",
-        "neo tank": "Neo Tank",
-        "NEO TANK": "Neo Tank",
-        "Megatank": "Mega Tank",
-        "mega tank": "Mega Tank",
-        "MEGA TANK": "Mega Tank",
-        # Live site sometimes uses singular; exporter uses plural (AWBW chart naming).
-        "Rocket": "Rockets",
-        "rocket": "Rockets",
-        "ROCKET": "Rockets",
-        "Anti Air": "Anti-Air",
-        "anti air": "Anti-Air",
-        "B Copter": "B-Copter",
-        "b copter": "B-Copter",
-        "T Copter": "T-Copter",
-        "t copter": "T-Copter",
-    }
-    n = aliases.get(n, n)
-    for ut, nm in _AWBW_UNIT_NAMES.items():
-        if nm == n:
-            return ut
-    n_norm = " ".join(n.lower().split())
-    for ut, nm in _AWBW_UNIT_NAMES.items():
-        if " ".join(nm.lower().split()) == n_norm:
-            return ut
-    raise UnsupportedOracleAction(f"unknown AWBW unit name {name!r}")
+    """Resolve a site/PHP/JSON unit-name string to a UnitType.
+
+    Phase 11Z: thin wrapper around ``engine.unit_naming.to_unit_type``.
+    All alias dicts (formerly local) live in ``engine/unit_naming.py``;
+    add new spellings there. The oracle-error contract (``UnsupportedOracleAction``
+    on unknown name) is preserved here so callers do not need to change.
+    """
+    try:
+        return to_unit_type(name)
+    except UnknownUnitName:
+        raise UnsupportedOracleAction(f"unknown AWBW unit name {name!r}") from None
 
 
 def map_snapshot_player_ids_to_engine(
