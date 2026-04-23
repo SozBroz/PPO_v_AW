@@ -135,6 +135,8 @@ def encode_state(
     *,
     observer: int = 0,
     belief: "BeliefState | None" = None,
+    out_spatial: np.ndarray | None = None,
+    out_scalars: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Encode a GameState into spatial and scalar tensors.
@@ -148,6 +150,11 @@ def encode_state(
                   both HP channels collapse to ``unit.hp / 100`` for all
                   units (legacy / debug path; leaks exact enemy HP — do not
                   use for bot runtime).
+        out_spatial, out_scalars:
+                  Optional pre-allocated float32 arrays with shapes
+                  (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS) and (N_SCALARS,).
+                  When provided, results are written in place (spatial is fully
+                  zeroed before encoding). When omitted, fresh arrays are allocated.
 
     Returns:
         spatial: (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS) float32
@@ -156,7 +163,11 @@ def encode_state(
     H = min(state.map_data.height, GRID_SIZE)
     W = min(state.map_data.width, GRID_SIZE)
 
-    spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
+    if out_spatial is not None:
+        spatial = out_spatial
+        spatial.fill(0.0)
+    else:
+        spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
 
     hp_lo_ch = N_UNIT_CHANNELS
     hp_hi_ch = N_UNIT_CHANNELS + 1
@@ -260,30 +271,50 @@ def encode_state(
         return min(1.0, float(co_state.power_bar) / denom)
 
     weather = getattr(state, "weather", "clear")
-    scalars = np.array(
-        [
-            state.funds[0] / 50_000.0,
-            state.funds[1] / 50_000.0,
-            _norm_power(co0),
-            _norm_power(co1),
-            float(co0.cop_active),
-            float(co0.scop_active),
-            float(co1.cop_active),
-            float(co1.scop_active),
-            state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS))),
-            float(state.active_player),
-            co0.co_id / 30.0,
-            co1.co_id / 30.0,
-            _TIER_MAP.get(state.tier_name, 0.5),
-            # Weather scalars (indices 13-15)
-            1.0 if weather == "rain" else 0.0,
-            1.0 if weather == "snow" else 0.0,
-            getattr(state, "co_weather_segments_remaining", 0) / 2.0,
-            # Share of contestable income tiles owned by P0 (labs/comm excluded).
-            _p0_income_share(state),
-        ],
-        dtype=np.float32,
-    )
+    if out_scalars is not None:
+        scalars = out_scalars
+        scalars[0] = state.funds[0] / 50_000.0
+        scalars[1] = state.funds[1] / 50_000.0
+        scalars[2] = _norm_power(co0)
+        scalars[3] = _norm_power(co1)
+        scalars[4] = float(co0.cop_active)
+        scalars[5] = float(co0.scop_active)
+        scalars[6] = float(co1.cop_active)
+        scalars[7] = float(co1.scop_active)
+        scalars[8] = state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS)))
+        scalars[9] = float(state.active_player)
+        scalars[10] = co0.co_id / 30.0
+        scalars[11] = co1.co_id / 30.0
+        scalars[12] = _TIER_MAP.get(state.tier_name, 0.5)
+        scalars[13] = 1.0 if weather == "rain" else 0.0
+        scalars[14] = 1.0 if weather == "snow" else 0.0
+        scalars[15] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
+        scalars[16] = _p0_income_share(state)
+    else:
+        scalars = np.array(
+            [
+                state.funds[0] / 50_000.0,
+                state.funds[1] / 50_000.0,
+                _norm_power(co0),
+                _norm_power(co1),
+                float(co0.cop_active),
+                float(co0.scop_active),
+                float(co1.cop_active),
+                float(co1.scop_active),
+                state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS))),
+                float(state.active_player),
+                co0.co_id / 30.0,
+                co1.co_id / 30.0,
+                _TIER_MAP.get(state.tier_name, 0.5),
+                # Weather scalars (indices 13-15)
+                1.0 if weather == "rain" else 0.0,
+                1.0 if weather == "snow" else 0.0,
+                getattr(state, "co_weather_segments_remaining", 0) / 2.0,
+                # Share of contestable income tiles owned by P0 (labs/comm excluded).
+                _p0_income_share(state),
+            ],
+            dtype=np.float32,
+        )
 
     return spatial, scalars
 

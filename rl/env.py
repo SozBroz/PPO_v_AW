@@ -32,7 +32,7 @@ from engine.terrain import get_terrain
 from engine.combat import damage_range
 from engine.belief import BeliefState
 
-from rl.encoder import encode_state, N_SPATIAL_CHANNELS, N_SCALARS, GRID_SIZE
+from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.network import ACTION_SPACE_SIZE
 from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
 from server.write_watch_state import board_dict
@@ -265,9 +265,18 @@ def _action_label(action: Optional[Action]) -> Optional[dict]:
     }
 
 
-def _get_action_mask(state: GameState) -> np.ndarray:
-    """Return a bool mask over [0, ACTION_SPACE_SIZE) indicating legal actions."""
-    mask = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
+def _get_action_mask(state: GameState, out: np.ndarray | None = None) -> np.ndarray:
+    """Return a bool mask over [0, ACTION_SPACE_SIZE) indicating legal actions.
+
+    When ``out`` is a pre-allocated array of shape (ACTION_SPACE_SIZE,) and dtype bool,
+    fills it in place and returns it (hot path). When ``out`` is None, allocates a
+    fresh array (tools, server, legacy callers).
+    """
+    if out is None:
+        mask = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
+    else:
+        mask = out
+        mask.fill(False)
     for action in get_legal_actions(state):
         idx = _action_to_flat(action)
         if 0 <= idx < ACTION_SPACE_SIZE:
@@ -504,6 +513,14 @@ class AWBWEnv(gym.Env):
         )
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
 
+        # Phase 1b (FPS campaign): reuse numpy buffers for mask + obs to cut allocator churn.
+        # Golden tests in tests/test_env_buffer_reuse_golden.py guard against stale reuse.
+        self._action_mask_buf = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
+        self._spatial_obs_buf = np.zeros(
+            (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32
+        )
+        self._scalars_obs_buf = np.zeros((N_SCALARS,), dtype=np.float32)
+
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
         self._p1_truncated_mid_turn: bool = False
@@ -595,7 +612,29 @@ class AWBWEnv(gym.Env):
     ) -> tuple[dict, dict]:
         super().reset(seed=seed)
 
-        map_id, tier_name, p0_co, p1_co, map_name = self._sample_config()
+        # Zero reused buffers before any encode / mask use (unused map cells must not
+        # carry stale floats from a prior episode or env instance path).
+        self._spatial_obs_buf.fill(0.0)
+        self._scalars_obs_buf.fill(0.0)
+        self._action_mask_buf.fill(False)
+
+        if options is not None and options.get("map_id") is not None:
+            map_id = int(options["map_id"])
+            narrow = [m for m in self._sample_map_pool if m.get("map_id") == map_id]
+            if not narrow:
+                raise ValueError(
+                    f"map_id {map_id} not found in env map pool (sample_map_pool)"
+                )
+            map_id, tier_name, p0_co, p1_co, map_name = sample_training_matchup(
+                narrow,
+                co_p0=self.co_p0,
+                co_p1=self.co_p1,
+                tier_name=self.tier_name,
+                curriculum_broad_prob=0.0,
+                rng=None,
+            )
+        else:
+            map_id, tier_name, p0_co, p1_co, map_name = self._sample_config()
         map_data = self._load_map(map_id)
 
         _mk: dict = dict(starting_funds=0, tier_name=tier_name)
@@ -697,7 +736,7 @@ class AWBWEnv(gym.Env):
         # for the final on-policy phase.
         if self._learner_greedy_mix > 0.0 and random.random() < self._learner_greedy_mix:
             from rl.self_play import pick_capture_greedy_flat
-            mask = _get_action_mask(self.state)
+            mask = _get_action_mask(self.state, out=self._action_mask_buf)
             action_idx = pick_capture_greedy_flat(self.state, mask)
             self._learner_teacher_overrides += 1
 
@@ -828,8 +867,9 @@ class AWBWEnv(gym.Env):
     def action_masks(self) -> np.ndarray:
         """Return valid-action bool mask. Required by MaskablePPO wrappers."""
         if self.state is None:
-            return np.zeros(ACTION_SPACE_SIZE, dtype=bool)
-        mask = _get_action_mask(self.state)
+            self._action_mask_buf.fill(False)
+            return self._action_mask_buf
+        mask = _get_action_mask(self.state, out=self._action_mask_buf)
         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
         if flag in ("1", "true", "yes", "on"):
             _strip_non_infantry_builds(mask, self.state)
@@ -900,10 +940,14 @@ class AWBWEnv(gym.Env):
         interval information — never exact HP.
         """
         belief = self._beliefs.get(observer) if hasattr(self, "_beliefs") else None
-        spatial, scalars = encode_state(
-            self.state, observer=observer, belief=belief,
+        encode_state(
+            self.state,
+            observer=observer,
+            belief=belief,
+            out_spatial=self._spatial_obs_buf,
+            out_scalars=self._scalars_obs_buf,
         )
-        return {"spatial": spatial, "scalars": scalars}
+        return {"spatial": self._spatial_obs_buf, "scalars": self._scalars_obs_buf}
 
     # -- Belief bookkeeping ----------------------------------------------------
     def _snapshot_units(self) -> dict[int, dict]:
@@ -1079,7 +1123,7 @@ class AWBWEnv(gym.Env):
             needs_obs_fn = getattr(self.opponent_policy, "needs_observation", None)
             needs_obs = True if needs_obs_fn is None else bool(needs_obs_fn())
             obs = self._get_obs(observer=1) if needs_obs else None
-            mask = _get_action_mask(self.state)
+            mask = _get_action_mask(self.state, out=self._action_mask_buf)
             try:
                 opp_idx = int(self.opponent_policy(obs, mask))
             except Exception:
