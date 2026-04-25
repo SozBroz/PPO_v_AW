@@ -149,6 +149,9 @@ class MapData:
     country_to_player: dict[int, int]                # country_id → 0 red/first or 1 blue/second
     # Optional `data/maps/<map_id>_units.json` — AWBW csv export is terrain-only
     predeployed_specs: list[PredeployedUnitSpec] = field(default_factory=list)
+    # Optional: override opening seat when site GL start disagrees with predeploy count heuristic
+    # (e.g. both sides have units but AWBW gives first move to a specific color).
+    replay_first_mover: int | None = None
 
     def get_enabled_tiers(self) -> list[TierInfo]:
         return [t for t in self.tiers if t.enabled]
@@ -310,6 +313,16 @@ def load_map(
         for s in predeployed
     ]
 
+    rfm = meta.get("replay_first_mover", None)
+    replay_first_mover: int | None = None
+    if rfm is not None:
+        rfm = int(rfm)
+        if rfm not in (0, 1):
+            raise ValueError(
+                f"Map {map_id} ({meta.get('name', '')!r}): replay_first_mover must be 0 or 1, got {rfm!r}"
+            )
+        replay_first_mover = rfm
+
     # ---- Determine win-condition objective (after optional seating remap) ----
     has_hqs  = any(hq_positions[p]  for p in hq_positions)
     has_labs = any(lab_positions[p] for p in lab_positions)
@@ -338,6 +351,7 @@ def load_map(
         lab_positions=lab_positions,
         country_to_player=country_to_player,
         predeployed_specs=predeployed,
+        replay_first_mover=replay_first_mover,
     )
 
 

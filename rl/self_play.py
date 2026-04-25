@@ -24,6 +24,7 @@ import gc
 import json
 import os
 import random
+import sys
 import tempfile
 import time
 import weakref
@@ -34,12 +35,141 @@ from engine.action import Action, ActionStage, ActionType, get_legal_actions
 from engine.game import GameState
 from engine.unit import UnitType
 
-from rl.env import SESSION_GAME_COUNTER_DB_ENV
+from rl.env import SESSION_GAME_COUNTER_DB_ENV, effective_track_per_worker_times
 from rl.paths import GAME_LOG_PATH, LOGS_DIR
 from rl.train_reconfig_log import append_train_reconfig_line
 
 WATCH_LOG_PATH = LOGS_DIR / "watch_log.jsonl"
 FPS_DIAG_PATH = LOGS_DIR / "fps_diag.jsonl"
+_OPPONENT_CUDA_CAP_WARNED = False
+
+# Max Subproc worker indices [0, N) that may use CUDA for checkpoint opponents (VRAM / contention).
+OPPONENT_CUDA_WORKERS_MAX = 4
+
+
+def _default_async_learner_transitions_cap() -> int:
+    """When async and ``async_learner_batch`` is omitted, cap transitions per learner update (VRAM)."""
+    raw = (os.environ.get("AWBW_ASYNC_LEARNER_TRANSITIONS_CAP") or "2048").strip()
+    try:
+        v = int(raw, 10)
+    except ValueError:
+        v = 2048
+    return max(64, v)
+
+
+def _snap_async_learner_batch_to_unroll(batch: int, unroll: int, roll: int) -> int:
+    """Floor ``batch`` to a multiple of ``unroll`` in ``[unroll, roll]`` (IMPALA segment alignment)."""
+    ub = max(4, int(unroll))
+    bv = max(ub, min(int(batch), int(roll)))
+    segs = max(1, bv // ub)
+    return min(int(roll), segs * ub)
+
+
+def _env_flag_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def gpu_opponent_pool_enabled() -> bool:
+    """True when workers should share a global CUDA inference cap (semaphore), not fixed indices."""
+    return _env_flag_truthy("AWBW_GPU_OPPONENT_POOL") and _env_flag_truthy(
+        "AWBW_ALLOW_CUDA_OPPONENT"
+    )
+
+
+def gpu_opponent_pool_permits() -> int:
+    """Concurrent GPU opponent forwards allowed process-wide (semaphore value)."""
+    raw = (os.environ.get("AWBW_GPU_OPPONENT_POOL_SIZE") or "").strip()
+    if raw.isdigit():
+        v = int(raw)
+        return max(1, min(v, 32))
+    return int(OPPONENT_CUDA_WORKERS_MAX)
+
+
+def _install_subproc_worker_excepthook() -> None:
+    """Ensure SubprocVecEnv workers print a traceback before exit (Windows ``spawn``)."""
+
+    def _hook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+        import traceback
+
+        print(
+            "[awbw_subproc_worker] Unhandled exception in env worker:",
+            file=sys.stderr,
+            flush=True,
+        )
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+        sys.stderr.flush()
+
+    sys.excepthook = _hook
+
+
+def _wrap_subproc_vec_env_worker_ipc(vec_env: Any, *, n_envs: int) -> None:
+    """
+    SB3 raises EOFError when a child dies; replace with a message that points to
+    common causes (RAM, CUDA) and any ``[awbw_subproc_worker]`` traceback above.
+    """
+    hints = (
+        "SubprocVecEnv: a worker process exited (IPC pipe closed). "
+        "Each worker loads Torch and a checkpoint opponent — high --n-envs can exhaust RAM "
+        "(OS may kill a child with no Python traceback). Also check CUDA OOM and any "
+        "[awbw_subproc_worker] traceback above. "
+        f"This run uses n_envs={int(n_envs)}."
+    )
+    if sys.platform == "win32":
+        hints += (
+            " On Windows + pc-b, proposed_args often cap n_envs≈4; overriding with much larger "
+            "values frequently triggers this failure."
+        )
+
+    _orig_step_wait = vec_env.step_wait
+    _orig_reset = vec_env.reset
+
+    def step_wait() -> Any:
+        try:
+            return _orig_step_wait()
+        except (EOFError, BrokenPipeError) as e:
+            raise RuntimeError(hints) from e
+
+    def reset(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return _orig_reset(*args, **kwargs)
+        except (EOFError, BrokenPipeError) as e:
+            raise RuntimeError(hints) from e
+
+    vec_env.step_wait = step_wait  # type: ignore[method-assign]
+    vec_env.reset = reset  # type: ignore[method-assign]
+
+    _orig_env_method = getattr(vec_env, "env_method", None)
+    if _orig_env_method is not None:
+        def env_method(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return _orig_env_method(*args, **kwargs)
+            except (EOFError, BrokenPipeError) as e:
+                raise RuntimeError(hints) from e
+
+        vec_env.env_method = env_method  # type: ignore[method-assign]
+
+
+def _policy_torch_compile_skip_note(exc: BaseException) -> str:
+    s = str(exc)
+    if sys.platform == "win32" and "Failed to find C compiler" in s:
+        return (
+            s
+            + " (Windows: install Visual Studio Build Tools with the C++ workload so Triton "
+            "can compile its CUDA driver; ensure CUDA tookits match PyTorch.)"
+        )
+    return s
+
+
+def _windows_torch_compile_opt_in() -> bool:
+    """
+    Triton on Windows still JIT-compiles a small CUDA driver on first use and needs cl.exe.
+    Default off so training works without Visual Studio Build Tools; set AWBW_TORCH_COMPILE=1
+    when the toolchain is installed and you want Inductor speedups.
+    """
+    if sys.platform != "win32":
+        return True
+    v = os.environ.get("AWBW_TORCH_COMPILE", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 # Rotate before append when the log grows large (mirrors ad-hoc JSONL hygiene elsewhere).
 _FPS_DIAG_MAX_BYTES = 32 * 1024 * 1024
 _WORKER_RSS_RESAMPLE_S = 5.0
@@ -416,6 +546,8 @@ class _CheckpointOpponent:
         pool_from_fleet: bool = False,
         cold_opponent: str = "random",
         fleet_opponent_root: Optional[str] = None,
+        inference_device: str = "cpu",
+        gpu_infer_semaphore: Any = None,
     ) -> None:
         self._dir = checkpoint_dir
         self._fleet_opponent_root = fleet_opponent_root
@@ -428,6 +560,13 @@ class _CheckpointOpponent:
                 f"cold_opponent must be one of {_VALID_COLD_OPPONENTS}; got {cold_opponent!r}"
             )
         self._cold_opponent = cold
+        d = str(inference_device or "cpu").strip().lower()
+        if d in ("gpu", "cuda"):
+            self._inference_device = "cuda"
+        else:
+            self._inference_device = "cpu"
+        # Process-shared cap on concurrent CUDA opponent forwards (SubprocVecEnv workers).
+        self._gpu_infer_sem = gpu_infer_semaphore
         self._model = None
         self._n_calls = 0
         # Exposed so AWBWEnv can count per-episode reloads. Incremented
@@ -460,18 +599,45 @@ class _CheckpointOpponent:
         try:
             from rl.ckpt_compat import load_maskable_ppo_compat
 
+            import torch
+
+            dev = self._inference_device
+            if dev == "cuda" and not torch.cuda.is_available():
+                dev = "cpu"
+
             # Load with minimal buffer dims so _setup_model() allocates a tiny
             # rollout buffer (~KB) rather than replicating the learner's full
             # n_steps × n_envs × obs_shape tensor (~GB). Policy weights are
             # preserved; only inference (predict) is used from this model.
             self._model = load_maskable_ppo_compat(
                 path,
-                device="cpu",
+                device=dev,
                 verbose=0,
                 n_envs=1,
                 n_steps=1,
                 batch_size=1,
             )
+
+            if self._model is not None:
+                try:
+                    # Dynamic quantization is CPU-only and breaks .cuda() pool inference.
+                    if dev == "cpu" and self._gpu_infer_sem is None:
+                        from torch.quantization import quantize_dynamic
+
+                        self._model.policy = quantize_dynamic(
+                            self._model.policy,
+                            {torch.nn.Linear},
+                            dtype=torch.qint8,
+                        )
+                    fp16 = os.environ.get("AWBW_FP16_INFERENCE", "").lower() in (
+                        "1",
+                        "true",
+                    )
+                    if fp16:
+                        self._model.policy = self._model.policy.half()
+                except Exception as e:
+                    print(f"[opponent] Quantization/FP16 setup failed: {e}")
+            
             self.reload_count += 1
         except MemoryError as exc:
             print(f"[opponent] OOM loading {path}: {exc} — using random (retry next refresh)")
@@ -575,6 +741,37 @@ class _CheckpointOpponent:
         self._pool_candidates = ckpts
         return len(ckpts)
 
+    def _predict_checkpoint_policy_pool(self, obs: dict, mask: np.ndarray, *, use_cuda: bool) -> int:
+        """Run ``predict`` on CPU or CUDA; always leave policy on CPU after (for VRAM sharing)."""
+        import torch
+
+        m = self._model
+        assert m is not None
+        fp16 = os.environ.get("AWBW_FP16_INFERENCE", "").lower() in ("1", "true")
+        want_cuda = bool(use_cuda and torch.cuda.is_available())
+        pol = m.policy
+        if want_cuda:
+            pol.cuda()
+        else:
+            pol.cpu()
+        try:
+            if fp16 and want_cuda:
+                with torch.cuda.amp.autocast():
+                    action, _ = m.predict(obs, action_masks=mask, deterministic=False)
+            elif fp16 and not want_cuda:
+                try:
+                    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                        action, _ = m.predict(
+                            obs, action_masks=mask, deterministic=False
+                        )
+                except Exception:
+                    action, _ = m.predict(obs, action_masks=mask, deterministic=False)
+            else:
+                action, _ = m.predict(obs, action_masks=mask, deterministic=False)
+            return int(action)
+        finally:
+            pol.cpu()
+
     def __call__(self, obs: dict, mask: np.ndarray) -> int:
         if self._n_calls % self._refresh_every == 0:
             self._load_random()
@@ -590,8 +787,310 @@ class _CheckpointOpponent:
         if self._model is None:
             return self._cold_action(mask)
 
-        action, _ = self._model.predict(obs, action_masks=mask, deterministic=False)
+        if self._gpu_infer_sem is not None:
+            import torch
+
+            acquired = False
+            if torch.cuda.is_available():
+                acquired = bool(self._gpu_infer_sem.acquire(block=False))
+            try:
+                return self._predict_checkpoint_policy_pool(
+                    obs, mask, use_cuda=acquired
+                )
+            finally:
+                if acquired:
+                    self._gpu_infer_sem.release()
+
+        import torch
+
+        fp16 = os.environ.get("AWBW_FP16_INFERENCE", "").lower() in ("1", "true")
+        dev = self._inference_device
+        if dev == "cuda" and not torch.cuda.is_available():
+            dev = "cpu"
+        try:
+            p_dev = next(self._model.policy.parameters()).device
+        except (StopIteration, AttributeError):
+            p_dev = torch.device(dev)
+
+        if fp16 and p_dev.type == "cuda":
+            with torch.cuda.amp.autocast():
+                action, _ = self._model.predict(
+                    obs, action_masks=mask, deterministic=False
+                )
+        elif fp16 and p_dev.type == "cpu":
+            try:
+                with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                    action, _ = self._model.predict(
+                        obs, action_masks=mask, deterministic=False
+                    )
+            except Exception:
+                action, _ = self._model.predict(
+                    obs, action_masks=mask, deterministic=False
+                )
+        else:
+            action, _ = self._model.predict(obs, action_masks=mask, deterministic=False)
+
         return int(action)
+
+
+def _apply_learner_cuda_perf_opts(device: str) -> None:
+    """
+    Optional CUDA matmul / cuDNN toggles for the **learner** process (main only).
+
+    - ``AWBW_CUDA_TF32``: when unset or truthy, enable TF32 for matmul/cudnn on CUDA.
+      Set ``0`` / ``false`` to disable.
+    - ``AWBW_CUDNN_BENCHMARK=1``: enable ``cudnn.benchmark`` (can help static shapes;
+      try off first if you see regressions).
+    """
+    if device != "cuda":
+        return
+    try:
+        import torch
+    except ImportError:
+        return
+    if not torch.cuda.is_available():
+        return
+    raw_tf32 = (os.environ.get("AWBW_CUDA_TF32") or "").strip().lower()
+    if raw_tf32 in ("0", "false", "no", "off"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    else:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    bench = (os.environ.get("AWBW_CUDNN_BENCHMARK") or "").strip().lower()
+    if bench in ("1", "true", "yes", "on"):
+        torch.backends.cudnn.benchmark = True
+
+
+def _subproc_worker_thread_env(worker_index: int) -> None:
+    """
+    Configure BLAS / torch thread counts for one SubprocVecEnv worker.
+
+    Default (no ``AWBW_N_LEAN_WORKERS``): same as legacy — optional global
+    ``AWBW_WORKER_OMP_THREADS``, else OMP/MKL defaults of 1 via setdefault.
+
+    With ``AWBW_N_LEAN_WORKERS=K``: workers ``0..K-1`` use 1 thread; workers
+    ``K..`` use ``AWBW_CPU_WORKER_THREADS``, else ``AWBW_WORKER_OMP_THREADS``,
+    else 4. Aim for ``(n_envs - K) * fat_threads <=`` spare physical cores.
+    """
+    import os as _os
+    import torch as _torch
+
+    lean_raw = (_os.environ.get("AWBW_N_LEAN_WORKERS") or "").strip()
+    n_lean = int(lean_raw) if lean_raw.isdigit() else 0
+    n_lean = min(max(n_lean, 0), 256)
+
+    def _apply_explicit_threads(wt: int) -> None:
+        wt = min(max(int(wt), 1), 64)
+        _os.environ["OMP_NUM_THREADS"] = str(wt)
+        _os.environ["MKL_NUM_THREADS"] = str(wt)
+        _os.environ["OPENBLAS_NUM_THREADS"] = str(wt)
+        _os.environ["NUMEXPR_NUM_THREADS"] = str(wt)
+        try:
+            _torch.set_num_threads(int(wt))
+        except Exception:
+            pass
+
+    if n_lean <= 0:
+        wt_raw = (_os.environ.get("AWBW_WORKER_OMP_THREADS") or "").strip()
+        if wt_raw.isdigit() and int(wt_raw) >= 1:
+            _apply_explicit_threads(int(wt_raw))
+        else:
+            _os.environ.setdefault("OMP_NUM_THREADS", "1")
+            _os.environ.setdefault("MKL_NUM_THREADS", "1")
+            _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+            _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+            try:
+                _torch.set_num_threads(1)
+            except Exception:
+                pass
+        return
+
+    if worker_index < n_lean:
+        _apply_explicit_threads(1)
+        return
+
+    fat_raw = (_os.environ.get("AWBW_CPU_WORKER_THREADS") or "").strip()
+    if not fat_raw.isdigit() or int(fat_raw) < 1:
+        fat_raw = (_os.environ.get("AWBW_WORKER_OMP_THREADS") or "").strip()
+    if fat_raw.isdigit() and int(fat_raw) >= 1:
+        _apply_explicit_threads(int(fat_raw))
+    else:
+        _apply_explicit_threads(4)
+
+
+def _opponent_inference_device_for_worker(worker_index: int) -> str:
+    """
+    Return ``\"cuda\"`` or ``\"cpu\"`` for **initial** checkpoint load (``_load_random``).
+
+    When ``AWBW_GPU_OPPONENT_POOL=1``, always ``\"cpu\"`` (weights stay CPU; ``__call__``
+    moves policy to CUDA only while a process-wide semaphore permit is held).
+
+    Otherwise: ``AWBW_ALLOW_CUDA_OPPONENT`` + ``AWBW_OPPONENT_CUDA_WORKERS`` fixed-index routing.
+    """
+    if gpu_opponent_pool_enabled():
+        return "cpu"
+    global _OPPONENT_CUDA_CAP_WARNED
+    gate = (os.environ.get("AWBW_ALLOW_CUDA_OPPONENT") or "").strip().lower()
+    if gate not in ("1", "true", "yes", "on"):
+        return "cpu"
+    raw_n = (os.environ.get("AWBW_OPPONENT_CUDA_WORKERS") or "").strip()
+    n_gpu = int(raw_n) if raw_n.isdigit() else 0
+    if n_gpu <= 0:
+        return "cpu"
+    cap = int(OPPONENT_CUDA_WORKERS_MAX)
+    if n_gpu > cap:
+        if not _OPPONENT_CUDA_CAP_WARNED:
+            print(
+                f"[self_play] AWBW_OPPONENT_CUDA_WORKERS>{cap} is unsupported; capping at {cap} "
+                "(VRAM / single-GPU contention)."
+            )
+            _OPPONENT_CUDA_CAP_WARNED = True
+        n_gpu = cap
+    if worker_index >= n_gpu:
+        return "cpu"
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    if not torch.cuda.is_available():
+        return "cpu"
+    return "cuda"
+
+
+def _resolve_live_snapshot_pkl_path(live_snapshot_dir: Path, games_id: int) -> str:
+    """
+    Prefer ``<dir>/{games_id}.pkl`` (default live training layout).  Else use
+    ``<dir>/{games_id}/engine_snapshot.pkl`` (e.g. ``replays/amarinner_my_games/`` from
+    ``tools/amarriner_export_my_games_replays.py``).
+    """
+    root = Path(live_snapshot_dir)
+    flat = root / f"{int(games_id)}.pkl"
+    if flat.is_file():
+        return str(flat)
+    nested = root / str(int(games_id)) / "engine_snapshot.pkl"
+    if nested.is_file():
+        return str(nested)
+    return str(flat)
+
+
+class _PicklableEnvFactory:
+    """
+    Zero-arg env builder stored as a class so instances are picklable on Windows
+    ``spawn`` (``multiprocessing.Process`` / async actors). Nested ``def`` factories
+    are not picklable: ``Can't get local object '_make_env_factory.<locals>._init'``.
+    """
+
+    __slots__ = (
+        "map_pool",
+        "checkpoint_dir",
+        "co_p0",
+        "co_p1",
+        "tier_name",
+        "curriculum_broad_prob",
+        "curriculum_tag",
+        "opponent_mix",
+        "pool_from_fleet",
+        "cold_opponent",
+        "fleet_opponent_root",
+        "max_env_steps",
+        "max_p1_microsteps",
+        "live_snapshot_path",
+        "live_games_id",
+        "live_learner_seat",
+        "live_fallback_curriculum",
+        "worker_index",
+        "gpu_infer_semaphore",
+        "opponent_force_cpu",
+    )
+
+    def __init__(
+        self,
+        map_pool: list[dict],
+        checkpoint_dir: str,
+        co_p0: int | None = None,
+        co_p1: int | None = None,
+        tier_name: str | None = None,
+        curriculum_broad_prob: float = 0.0,
+        curriculum_tag: str | None = None,
+        opponent_mix: float = 0.0,
+        pool_from_fleet: bool = False,
+        cold_opponent: str = "random",
+        fleet_opponent_root: str | None = None,
+        max_env_steps: int | None = None,
+        max_p1_microsteps: int | None = None,
+        live_snapshot_path: str | None = None,
+        live_games_id: int | None = None,
+        live_learner_seat: int = 0,
+        live_fallback_curriculum: bool = True,
+        worker_index: int = 0,
+        gpu_infer_semaphore: Any = None,
+        opponent_force_cpu: bool = False,
+    ) -> None:
+        self.map_pool = map_pool
+        self.checkpoint_dir = checkpoint_dir
+        self.co_p0 = co_p0
+        self.co_p1 = co_p1
+        self.tier_name = tier_name
+        self.curriculum_broad_prob = curriculum_broad_prob
+        self.curriculum_tag = curriculum_tag
+        self.opponent_mix = opponent_mix
+        self.pool_from_fleet = pool_from_fleet
+        self.cold_opponent = cold_opponent
+        self.fleet_opponent_root = fleet_opponent_root
+        self.max_env_steps = max_env_steps
+        self.max_p1_microsteps = max_p1_microsteps
+        self.live_snapshot_path = live_snapshot_path
+        self.live_games_id = live_games_id
+        self.live_learner_seat = live_learner_seat
+        self.live_fallback_curriculum = live_fallback_curriculum
+        self.worker_index = worker_index
+        self.gpu_infer_semaphore = gpu_infer_semaphore
+        self.opponent_force_cpu = bool(opponent_force_cpu)
+
+    def __call__(self) -> Any:
+        _install_subproc_worker_excepthook()
+        _subproc_worker_thread_env(int(self.worker_index))
+
+        from rl.env import AWBWEnv, LEARNER_SEAT_ENV
+        from sb3_contrib.common.wrappers import ActionMasker  # type: ignore[import]
+
+        if self.live_snapshot_path:
+            os.environ[LEARNER_SEAT_ENV] = str(int(self.live_learner_seat) & 1)
+        tag = self.curriculum_tag
+        if self.live_games_id is not None and tag is None:
+            tag = f"live-gid-{int(self.live_games_id)}"
+        opp_dev = (
+            "cpu"
+            if self.opponent_force_cpu
+            else _opponent_inference_device_for_worker(int(self.worker_index))
+        )
+        opponent = _CheckpointOpponent(
+            self.checkpoint_dir,
+            opponent_mix=self.opponent_mix,
+            pool_from_fleet=self.pool_from_fleet,
+            cold_opponent=self.cold_opponent,
+            fleet_opponent_root=self.fleet_opponent_root,
+            inference_device=opp_dev,
+            gpu_infer_semaphore=self.gpu_infer_semaphore,
+        )
+        env = AWBWEnv(
+            map_pool=self.map_pool,
+            opponent_policy=opponent,
+            render_mode=None,
+            co_p0=self.co_p0,
+            co_p1=self.co_p1,
+            tier_name=self.tier_name,
+            curriculum_broad_prob=self.curriculum_broad_prob,
+            curriculum_tag=tag,
+            max_env_steps=self.max_env_steps,
+            max_p1_microsteps=self.max_p1_microsteps,
+            live_snapshot_path=self.live_snapshot_path,
+            live_games_id=self.live_games_id,
+            live_fallback_curriculum=self.live_fallback_curriculum,
+        )
+        opponent.attach_env(env)
+        return ActionMasker(env, _mask_fn)
 
 
 def _make_env_factory(
@@ -608,50 +1107,37 @@ def _make_env_factory(
     fleet_opponent_root: str | None = None,
     max_env_steps: int | None = None,
     max_p1_microsteps: int | None = None,
-) -> Callable:
-    """Return a picklable env factory for SubprocVecEnv."""
-    def _init():
-        # Phase 1c (FPS campaign): cap thread oversubscription in this worker.
-        # Each SubprocVecEnv worker imports torch via _CheckpointOpponent +
-        # MaskablePPO.predict; torch defaults to ~physical-core threads per
-        # process. With n_envs=6 we are oversubscribed before the GPU runs.
-        # ``setdefault`` so test harnesses (or operator overrides) can pin
-        # different values via the parent-process environment.
-        import os as _os
-        _os.environ.setdefault("OMP_NUM_THREADS", "1")
-        _os.environ.setdefault("MKL_NUM_THREADS", "1")
-        _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-        _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-        import torch as _torch
-        try:
-            _torch.set_num_threads(1)
-        except Exception:
-            pass
-
-        from rl.env import AWBWEnv
-        from sb3_contrib.common.wrappers import ActionMasker  # type: ignore[import]
-        opponent = _CheckpointOpponent(
-            checkpoint_dir,
-            opponent_mix=opponent_mix,
-            pool_from_fleet=pool_from_fleet,
-            cold_opponent=cold_opponent,
-            fleet_opponent_root=fleet_opponent_root,
-        )
-        env = AWBWEnv(
-            map_pool=map_pool,
-            opponent_policy=opponent,
-            render_mode=None,
-            co_p0=co_p0,
-            co_p1=co_p1,
-            tier_name=tier_name,
-            curriculum_broad_prob=curriculum_broad_prob,
-            curriculum_tag=curriculum_tag,
-            max_env_steps=max_env_steps,
-            max_p1_microsteps=max_p1_microsteps,
-        )
-        opponent.attach_env(env)
-        return ActionMasker(env, _mask_fn)
-    return _init
+    live_snapshot_path: str | None = None,
+    live_games_id: int | None = None,
+    live_learner_seat: int = 0,
+    live_fallback_curriculum: bool = True,
+    worker_index: int = 0,
+    gpu_infer_semaphore: Any = None,
+    opponent_force_cpu: bool = False,
+) -> Callable[[], Any]:
+    """Return a picklable zero-arg env factory (SubprocVecEnv, async IMPALA actors)."""
+    return _PicklableEnvFactory(
+        map_pool,
+        checkpoint_dir,
+        co_p0=co_p0,
+        co_p1=co_p1,
+        tier_name=tier_name,
+        curriculum_broad_prob=curriculum_broad_prob,
+        curriculum_tag=curriculum_tag,
+        opponent_mix=opponent_mix,
+        pool_from_fleet=pool_from_fleet,
+        cold_opponent=cold_opponent,
+        fleet_opponent_root=fleet_opponent_root,
+        max_env_steps=max_env_steps,
+        max_p1_microsteps=max_p1_microsteps,
+        live_snapshot_path=live_snapshot_path,
+        live_games_id=live_games_id,
+        live_learner_seat=live_learner_seat,
+        live_fallback_curriculum=live_fallback_curriculum,
+        worker_index=worker_index,
+        gpu_infer_semaphore=gpu_infer_semaphore,
+        opponent_force_cpu=opponent_force_cpu,
+    )
 
 
 class _EpisodeDiagnosticsCallback:
@@ -797,7 +1283,7 @@ def _build_diagnostics_callback():
             sum_worker = self._diag_cached_sum_worker_rss_mb
             self.logger.record("diag/sum_worker_rss_mb", sum_worker)
 
-            track_steps = os.environ.get("AWBW_TRACK_PER_WORKER_TIMES") == "1"
+            track_steps = effective_track_per_worker_times()
             p99_max = 0.0
             p99_min = 0.0
             mean_p99 = 0.0
@@ -880,19 +1366,24 @@ class SelfPlayTrainer:
     n_envs : int
         Number of parallel SubprocVecEnv workers (default 4).
         Each worker is a separate Python process that runs env simulation and
-        opponent inference on CPU.  More workers raise throughput but cost
-        ~2-3 GB host RAM each.
+        (by default) opponent inference on CPU.         Optional CUDA checkpoint opponents: ``AWBW_ALLOW_CUDA_OPPONENT=1`` plus either
+        ``AWBW_GPU_OPPONENT_POOL=1`` (semaphore, any worker; size ``AWBW_GPU_OPPONENT_POOL_SIZE``)
+        or legacy fixed indices ``AWBW_OPPONENT_CUDA_WORKERS``. More workers raise
+        throughput but cost ~2-3 GB host RAM each.
 
         Step-sync note: the default ``SubprocVecEnv`` waits for the slowest worker
         each ``VecEnv.step()``. Set ``AWBW_ASYNC_VEC=1`` to try
         ``gymnasium.vector.AsyncVectorEnv`` (experimental with MaskablePPO; falls
         back to SubprocVecEnv if construction fails).
+
+        CPU thread caps: ``AWBW_N_LEAN_WORKERS`` / ``AWBW_CPU_WORKER_THREADS`` (legacy split) or
+        uniform ``AWBW_WORKER_OMP_THREADS`` when using the GPU opponent pool bootstrap.
     device : str
-        Torch device for the **learner only** — "cuda", "cpu", or "auto".
-        Opponent inference always runs on CPU with a minimal rollout buffer
-        (``n_envs=1, n_steps=1``) so it does not compete for VRAM or
-        allocate a multi-GB NumPy array.  The learner's VRAM footprint scales
-        with ``n_steps * n_envs * obs_shape``; reduce ``batch_size`` first
+        Torch device for the **learner** — "cuda", "cpu", or "auto".
+        Opponent inference defaults to CPU (minimal rollout buffer
+        ``n_envs=1, n_steps=1``). CUDA opponents duplicate policy VRAM per
+        worker. The learner's VRAM footprint scales with
+        ``n_steps * n_envs * obs_shape``; reduce ``batch_size`` first
         if VRAM is tight, then ``n_steps``.
     save_every : int
         Save checkpoint every N total steps.
@@ -994,9 +1485,31 @@ class SelfPlayTrainer:
         mcts_max_plan_actions: int = 256,
         max_env_steps: int | None = 8000,
         max_p1_microsteps: int | None = 4000,
+        live_games_id: list[int] | None = None,
+        live_learner_seats: list[int] | None = None,
+        live_snapshot_dir: Path | str | None = None,
+        training_backend: str = "sync",
+        async_unroll_length: int | None = None,
+        async_learner_batch: int | None = None,
+        async_queue_max: int = 64,
+        async_gpu_opponent_permits_subtract: int = 2,
+        async_learner_forward_chunk: int | None = None,
+        async_clip_rho: float = 1.0,
+        async_clip_pg_rho: float = 1.0,
+        async_gamma: float = 0.99,
+        async_learning_rate: float = 3e-4,
+        async_vf_coef: float = 0.5,
+        async_max_grad_norm: float = 0.5,
+        async_weight_save_every: int = 1,
+        async_log_rho_floor: float = -20.0,
     ) -> None:
+        tb = str(training_backend or "sync").strip().lower()
+        if tb not in ("sync", "async"):
+            raise ValueError("training_backend must be 'sync' or 'async'")
+        self.training_backend = tb
+
         roll = n_steps * n_envs
-        if batch_size > roll:
+        if self.training_backend == "sync" and batch_size > roll:
             raise ValueError(
                 f"batch_size ({batch_size}) must be <= n_steps * n_envs ({roll})"
             )
@@ -1062,6 +1575,71 @@ class SelfPlayTrainer:
 
         self.max_env_steps = _cap_or_none(max_env_steps)
         self.max_p1_microsteps = _cap_or_none(max_p1_microsteps)
+        self.live_games_id: list[int] = [int(x) for x in (live_games_id or [])]
+        n_live = len(self.live_games_id)
+        if n_live and n_envs < n_live:
+            raise ValueError(
+                f"n_envs ({n_envs}) must be >= number of live games_id ({n_live})"
+            )
+        self.live_learner_seats: list[int] | None = None
+        if n_live:
+            if live_learner_seats is not None:
+                ls = [int(x) & 1 for x in live_learner_seats]
+                if len(ls) != n_live:
+                    raise ValueError(
+                        "live_learner_seats must have the same length as live_games_id"
+                    )
+                self.live_learner_seats = ls
+            else:
+                self.live_learner_seats = [0] * n_live
+        self.live_snapshot_dir: Path = (
+            Path(live_snapshot_dir).resolve()
+            if live_snapshot_dir
+            else (ROOT / ".tmp" / "awbw_live_snapshot")
+        )
+        _unroll = int(async_unroll_length) if async_unroll_length is not None else int(n_steps)
+        self.async_unroll_length = max(4, _unroll)
+        self.async_learner_batch_explicit = async_learner_batch is not None
+        if async_learner_batch is not None:
+            self.async_learner_batch = int(async_learner_batch)
+        elif self.training_backend == "async":
+            # Default ``roll`` is often too large for one MaskablePPO forward on ~12GB GPUs.
+            # Also cap at ``n_envs * unroll`` so the learner tends to consume one wave of actor
+            # chunks per update (reduces queue backpressure / actors blocked on ``queue.put``).
+            _cap = _default_async_learner_transitions_cap()
+            _one_wave = min(roll, self.n_envs * self.async_unroll_length)
+            self.async_learner_batch = min(
+                roll, max(self.async_unroll_length, _cap), _one_wave
+            )
+        else:
+            self.async_learner_batch = roll
+        self.async_learner_batch = max(self.async_unroll_length, self.async_learner_batch)
+        self.async_learner_batch = _snap_async_learner_batch_to_unroll(
+            self.async_learner_batch, self.async_unroll_length, roll
+        )
+        self.async_queue_max = max(2, int(async_queue_max))
+        self.async_gpu_opponent_permits_subtract = max(
+            0, int(async_gpu_opponent_permits_subtract)
+        )
+        self.async_learner_forward_chunk = (
+            int(async_learner_forward_chunk)
+            if async_learner_forward_chunk is not None
+            else None
+        )
+        if (
+            self.async_learner_forward_chunk is not None
+            and self.async_learner_forward_chunk <= 0
+        ):
+            self.async_learner_forward_chunk = None
+        self.async_clip_rho = float(async_clip_rho)
+        self.async_clip_pg_rho = float(async_clip_pg_rho)
+        self.async_gamma = float(async_gamma)
+        self.async_learning_rate = float(async_learning_rate)
+        self.async_vf_coef = float(async_vf_coef)
+        self.async_max_grad_norm = float(async_max_grad_norm)
+        self.async_weight_save_every = max(1, int(async_weight_save_every))
+        self.async_log_rho_floor = float(async_log_rho_floor)
+        self._gpu_pool_manager: Any | None = None
         self._rollout_index: int = 0
         self._applied_reload_requests: set[tuple[str, str | int | None]] = set()
         self.local_checkpoint_mirror = (
@@ -1133,6 +1711,10 @@ class SelfPlayTrainer:
         self.checkpoints = sorted_checkpoint_zip_paths(self.checkpoint_dir)
         self.elo_ratings: dict[str, float] = {"latest": 1200.0}
 
+    def analyze_precision_tradeoffs(self) -> None:
+        """Stub for precision tradeoff analysis (placeholder)."""
+        pass
+
     # ── Opponent helpers ──────────────────────────────────────────────────────
 
     def _make_opponent_policy(self) -> Optional[Callable]:
@@ -1193,10 +1775,54 @@ class SelfPlayTrainer:
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
 
-            factories = [
-                _make_env_factory(self.map_pool, str(self.checkpoint_dir), **env_kw)
-                for _ in range(self.n_envs)
-            ]
+            gpu_sem = None
+            if gpu_opponent_pool_enabled():
+                if self._gpu_pool_manager is None:
+                    from multiprocessing import Manager  # noqa: PLC0415
+
+                    self._gpu_pool_manager = Manager()
+                gpu_sem = self._gpu_pool_manager.BoundedSemaphore(
+                    gpu_opponent_pool_permits()
+                )
+                print(
+                    f"[self_play] GPU opponent semaphore (manager proxy): {gpu_opponent_pool_permits()} "
+                    "concurrent CUDA checkpoint forwards (pool)"
+                )
+
+            n_live = len(self.live_games_id)
+            self.live_snapshot_dir.mkdir(parents=True, exist_ok=True)
+            seats = self.live_learner_seats or [0] * n_live
+            factories: list[Callable[[], Any]] = []
+            for i in range(self.n_envs):
+                if i < n_live:
+                    gid = int(self.live_games_id[i])
+                    spath = _resolve_live_snapshot_pkl_path(self.live_snapshot_dir, gid)
+                    print(
+                        f"[self_play] live env {i}: games_id={gid} snapshot={spath} "
+                        f"learner_seat={(seats[i] if i < len(seats) else 0)}"
+                    )
+                    factories.append(
+                        _make_env_factory(
+                            self.map_pool,
+                            str(self.checkpoint_dir),
+                            live_snapshot_path=spath,
+                            live_games_id=gid,
+                            live_learner_seat=seats[i],
+                            worker_index=i,
+                            gpu_infer_semaphore=gpu_sem,
+                            **env_kw,
+                        )
+                    )
+                else:
+                    factories.append(
+                        _make_env_factory(
+                            self.map_pool,
+                            str(self.checkpoint_dir),
+                            worker_index=i,
+                            gpu_infer_semaphore=gpu_sem,
+                            **env_kw,
+                        )
+                    )
             use_async = (os.environ.get("AWBW_ASYNC_VEC", "") or "").strip().lower() in (
                 "1",
                 "true",
@@ -1208,23 +1834,47 @@ class SelfPlayTrainer:
                 try:
                     from gymnasium.vector import AsyncVectorEnv  # type: ignore[import]
 
-                    vec_env = AsyncVectorEnv(factories, shared_memory=False)
-                    print(f"[self_play] AsyncVectorEnv: {self.n_envs} workers")
+                    # NOTE: AsyncVectorEnv is incompatible with SB3's MaskablePPO.set_env()
+                    # which tries to wrap the env and fails. Fall back to SubprocVecEnv.
+                    # Kept here for future reference if SB3 support improves.
+                    vec_env = AsyncVectorEnv(factories, shared_memory=True)
+                    print(f"[self_play] AsyncVectorEnv: {self.n_envs} workers (shared_memory=True) - NOTE: incompatible with SB3, falling back")
                 except Exception as exc:
                     print(f"[self_play] AsyncVectorEnv failed ({exc}); using SubprocVecEnv")
             if vec_env is None:
                 vec_env = SubprocVecEnv(factories, start_method="spawn")
+                _wrap_subproc_vec_env_worker_ipc(vec_env, n_envs=self.n_envs)
                 print(f"[self_play] SubprocVecEnv: {self.n_envs} workers (spawn)")
             return vec_env
         else:
-            from rl.env import AWBWEnv
+            from rl.env import AWBWEnv, LEARNER_SEAT_ENV
 
+            n_live = len(self.live_games_id)
+            if n_live > 1:
+                raise ValueError("with n_envs=1, pass at most one --live-games-id")
+            self.live_snapshot_dir.mkdir(parents=True, exist_ok=True)
+            lpath = (
+                _resolve_live_snapshot_pkl_path(
+                    self.live_snapshot_dir, int(self.live_games_id[0])
+                )
+                if n_live
+                else None
+            )
+            lgid = int(self.live_games_id[0]) if n_live else None
+            lseat = (self.live_learner_seats or [0])[0] if n_live else 0
+            if n_live:
+                os.environ[LEARNER_SEAT_ENV] = str(int(lseat) & 1)
+            ctag = self.curriculum_tag
+            if n_live and ctag is None:
+                ctag = f"live-gid-{lgid}"
+            opp_dev = _opponent_inference_device_for_worker(0)
             opponent = _CheckpointOpponent(
                 str(self.checkpoint_dir),
                 opponent_mix=self.opponent_mix,
                 pool_from_fleet=self.pool_from_fleet,
                 cold_opponent=self.cold_opponent,
                 fleet_opponent_root=self.fleet_opponent_root,
+                inference_device=opp_dev,
             )
             env = AWBWEnv(
                 map_pool=self.map_pool,
@@ -1234,9 +1884,11 @@ class SelfPlayTrainer:
                 co_p1=self.co_p1,
                 tier_name=self.tier_name,
                 curriculum_broad_prob=self.curriculum_broad_prob,
-                curriculum_tag=self.curriculum_tag,
+                curriculum_tag=ctag,
                 max_env_steps=self.max_env_steps,
                 max_p1_microsteps=self.max_p1_microsteps,
+                live_snapshot_path=lpath,
+                live_games_id=lgid,
             )
             opponent.attach_env(env)
             return ActionMasker(env, _mask_fn)
@@ -1661,13 +2313,21 @@ class SelfPlayTrainer:
             cur_bits.append(f"bc_init={self.bc_init}")
         cur_bits.append(f"cold_opponent={self.cold_opponent}")
         cur_msg = (" | " + " ".join(cur_bits)) if cur_bits else ""
-        print(
-            f"[self_play] Starting | steps={steps_msg} | "
-            f"n_envs={self.n_envs} | n_steps={self.n_steps} "
-            f"(rollout {self.n_steps * self.n_envs:,} env steps) | "
-            f"batch_size={self.batch_size} | device={self.device} | "
-            f"maps={len(self.map_pool)} (Std sampling: {n_std}){cur_msg}"
-        )
+        if self.training_backend == "async":
+            print(
+                f"[self_play] Starting | backend=async (IMPALA+V-trace) | steps={steps_msg} | "
+                f"actors={self.n_envs} | unroll={self.async_unroll_length} "
+                f"| learner_batch>={self.async_learner_batch} | queue_max={self.async_queue_max} | "
+                f"device={self.device} | maps={len(self.map_pool)} (Std sampling: {n_std}){cur_msg}"
+            )
+        else:
+            print(
+                f"[self_play] Starting | steps={steps_msg} | "
+                f"n_envs={self.n_envs} | n_steps={self.n_steps} "
+                f"(rollout {self.n_steps * self.n_envs:,} env steps) | "
+                f"batch_size={self.batch_size} | device={self.device} | "
+                f"maps={len(self.map_pool)} (Std sampling: {n_std}){cur_msg}"
+            )
 
         # Session DB under repo `.tmp/` so scratch stays on the same drive as the checkout.
         session_tmp = ROOT / ".tmp"
@@ -1681,7 +2341,40 @@ class SelfPlayTrainer:
         os.environ[SESSION_GAME_COUNTER_DB_ENV] = session_counter_db
         atexit.register(lambda p=session_counter_db: Path(p).unlink(missing_ok=True))
 
+        if self.training_backend == "async":
+            from rl.async_impala import run_impala_training
+
+            run_impala_training(self)
+            return
+
         vec_env = self._build_vec_env()
+        _apply_learner_cuda_perf_opts(self.device)
+
+        lean_raw = (os.environ.get("AWBW_N_LEAN_WORKERS") or "").strip()
+        if lean_raw.isdigit() and int(lean_raw) > 0:
+            print(
+                f"[self_play] AWBW_N_LEAN_WORKERS={lean_raw}: first {lean_raw} workers "
+                "use 1 BLAS/torch thread; others use AWBW_CPU_WORKER_THREADS / "
+                "AWBW_WORKER_OMP_THREADS / default 4."
+            )
+        if (os.environ.get("AWBW_ALLOW_CUDA_OPPONENT") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            if gpu_opponent_pool_enabled():
+                psz = (os.environ.get("AWBW_GPU_OPPONENT_POOL_SIZE") or "").strip()
+                print(
+                    f"[self_play] CUDA opponents: semaphore pool size "
+                    f"{psz or str(OPPONENT_CUDA_WORKERS_MAX)} (non-blocking GPU or CPU infer)."
+                )
+            else:
+                ocn = (os.environ.get("AWBW_OPPONENT_CUDA_WORKERS") or "").strip()
+                print(
+                    f"[self_play] CUDA opponents enabled: AWBW_OPPONENT_CUDA_WORKERS="
+                    f"{ocn or '0'} (first N worker indices; cap {OPPONENT_CUDA_WORKERS_MAX})."
+                )
 
         # ── PPO hyperparameters (batch_size / n_steps tunable via train.py) ───
         # ent_coef=0.05 drives aggressive early exploration (decay manually later)
@@ -1712,12 +2405,15 @@ class SelfPlayTrainer:
             print(f"[self_play] Resuming from {resume_path}")
             from rl.ckpt_compat import load_maskable_ppo_compat
 
+            # Pass env=None to avoid MaskablePPO.load wrapping AsyncVectorEnv (incompatible).
+            # We set env afterwards via set_env() after loading completes.
             model = load_maskable_ppo_compat(
                 resume_path,
-                env=vec_env,
+                env=None,  # Load without env, set it after to avoid AsyncVectorEnv compat issue
                 device=self.device,
-                custom_objects={"n_steps": self.n_steps},
+                custom_objects={"n_steps": self.n_steps, "n_envs": self.n_envs},
             )
+            model.set_env(vec_env)
             # Checkpoints from another machine (e.g. Main D:\) embed tensorboard_log in the zip;
             # always write TensorBoard under this repo's logs/.
             model.tensorboard_log = str(LOGS_DIR)
@@ -1727,13 +2423,15 @@ class SelfPlayTrainer:
 
             model = load_maskable_ppo_compat(
                 self.bc_init,
-                env=vec_env,
+                env=None,  # Load without env, set it after
                 device=self.device,
                 custom_objects={
                     "n_steps": self.n_steps,
+                    "n_envs": self.n_envs,
                     "batch_size": self.batch_size,
                 },
             )
+            model.set_env(vec_env)
             model.tensorboard_log = str(LOGS_DIR)
         else:
             model = MaskablePPO(
@@ -1756,6 +2454,43 @@ class SelfPlayTrainer:
                 tensorboard_log=str(LOGS_DIR),
             )
 
+        # Tier 1a: torch.compile for 20-40% inference speedup
+        # reduce-overhead targets GPU kernel launch overhead in repeated small-batch inference
+        # Needs a Triton build Inductor accepts (see torch.utils._triton.has_triton). On
+        # Windows use `triton-windows` per requirements.txt; Linux CUDA wheels usually
+        # include a compatible Triton.
+        import torch
+        from torch.cuda.amp import autocast as amp_autocast, GradScaler
+        from torch.utils._triton import has_triton as _inductor_triton_ok
+
+        if hasattr(torch, "compile") and self.device != "cpu":
+            if not _windows_torch_compile_opt_in():
+                print(
+                    "[self_play] torch.compile skipped: Windows default off (Triton needs MSVC "
+                    "on first Inductor run). Set AWBW_TORCH_COMPILE=1 and install VS Build Tools "
+                    "with C++ to enable, or run training on Linux."
+                )
+            elif not _inductor_triton_ok():
+                print(
+                    "[self_play] torch.compile skipped: Triton/Inductor not usable for this install "
+                    "(Windows: `pip install triton-windows` pinned to your PyTorch version, see "
+                    "requirements.txt; Linux: use official PyTorch+CUDA wheels). Incompatible "
+                    "triton-windows vs torch also fails this check."
+                )
+            else:
+                try:
+                    model.policy = torch.compile(
+                        model.policy,
+                        mode="reduce-overhead",
+                        fullgraph=False,
+                    )
+                    print("[self_play] torch.compile applied to policy (mode=reduce-overhead)")
+                except Exception as e:
+                    print(
+                        "[self_play] torch.compile skipped: "
+                        f"{_policy_torch_compile_skip_note(e)}"
+                    )
+
         from rl.fleet_env import (
             new_checkpoint_stem_utc,
             prune_checkpoint_zip_curated,
@@ -1771,26 +2506,30 @@ class SelfPlayTrainer:
         # per-env running counters survive between rollouts.
         diag_callback = _build_diagnostics_callback()
 
-        try:
-            try:
-                while cap is None or steps_done < cap:
-                    if cap is None:
-                        chunk = self.save_every
-                    else:
-                        chunk = min(self.save_every, cap - steps_done)
-                    elapsed = time.time() - t_start
-                    rate = steps_done / elapsed if elapsed > 0 else 0
-                    if cap is None:
-                        eta_str = "—"
-                    else:
-                        rem = cap - steps_done
-                        eta = rem / rate if rate > 0 else float("inf")
-                        eta_str = f"{eta / 60:.1f}min"
-                    print(
-                        f"\n[self_play] Steps {steps_done:,}->{steps_done + chunk:,} | "
-                        f"{rate:,.0f} steps/s | ETA {eta_str}"
-                    )
+        # Mixed precision training
+        scaler = GradScaler()
 
+        try:
+            while cap is None or steps_done < cap:
+                if cap is None:
+                    chunk = self.save_every
+                else:
+                    chunk = min(self.save_every, cap - steps_done)
+                elapsed = time.time() - t_start
+                rate = steps_done / elapsed if elapsed > 0 else 0
+                if cap is None:
+                    eta_str = "-"
+                else:
+                    rem = cap - steps_done
+                    eta = rem / rate if rate > 0 else float("inf")
+                    eta_str = f"{eta / 60:.1f}min"
+                print(
+                    f"\n[self_play] Steps {steps_done:,}->{steps_done + chunk:,} | "
+                    f"{rate:,.0f} steps/s | ETA {eta_str}"
+                )
+                
+                # Wrap the learn call with autocast for mixed precision
+                with amp_autocast():
                     model.learn(
                         total_timesteps=chunk,
                         reset_num_timesteps=False,
@@ -1838,13 +2577,20 @@ class SelfPlayTrainer:
                     tail = self.checkpoint_pool_size if self.checkpoint_pool_size > 0 else None
                     all_ck = sorted_checkpoint_zip_paths(self.checkpoint_dir)
                     self.checkpoints = all_ck[-tail:] if tail else all_ck
-            except KeyboardInterrupt:
+        except KeyboardInterrupt:
                 print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
                 saved = self._save_checkpoint_with_publish(
                     model, "latest", also_publish_as_latest=False
                 )
                 print(f"[self_play] Saved -> {saved}")
         finally:
+            mgr = self._gpu_pool_manager
+            if mgr is not None:
+                try:
+                    mgr.shutdown()
+                except Exception:
+                    pass
+                self._gpu_pool_manager = None
             if self._publisher is not None:
                 drained = self._publisher.drain(timeout_s=self.publisher_drain_timeout_s)
                 print(
@@ -1902,7 +2648,11 @@ def watch_game(
     print(f"[watch] P0: CO#{co_p0}  P1: CO#{co_p1}")
 
     map_data = load_map(map_id, POOL_PATH, MAPS_DIR)
-    state = make_initial_state(map_data, co_p0, co_p1, starting_funds=0, tier_name=tier_name)
+    _mks: dict = {"starting_funds": 0, "tier_name": tier_name}
+    rfm = getattr(map_data, "replay_first_mover", None)
+    if rfm is not None:
+        _mks["replay_first_mover"] = int(rfm)
+    state = make_initial_state(map_data, co_p0, co_p1, **_mks)
     opening_player = int(state.active_player)
 
     step_count = 0

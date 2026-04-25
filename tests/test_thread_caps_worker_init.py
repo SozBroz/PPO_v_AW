@@ -73,6 +73,55 @@ def test_init_respects_pre_existing_env_var_values(
     assert os.environ.get("OMP_NUM_THREADS") == "4"
 
 
+def test_init_lean_worker_one_thread_when_n_lean_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AWBW_N_LEAN_WORKERS", "2", prepend=False)
+    monkeypatch.setenv("AWBW_CPU_WORKER_THREADS", "7", prepend=False)
+
+    lean_init = _make_env_factory(
+        map_pool=_single_map_pool(),
+        checkpoint_dir=str(tmp_path),
+        co_p0=1,
+        co_p1=1,
+        tier_name="T3",
+        worker_index=0,
+    )
+    try:
+        lean_init()
+    except BaseException:
+        pass
+    assert os.environ.get("OMP_NUM_THREADS") == "1"
+
+    for key in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    fat_init = _make_env_factory(
+        map_pool=_single_map_pool(),
+        checkpoint_dir=str(tmp_path),
+        co_p0=1,
+        co_p1=1,
+        tier_name="T3",
+        worker_index=3,
+    )
+    try:
+        fat_init()
+    except BaseException:
+        pass
+    assert os.environ.get("OMP_NUM_THREADS") == "7"
+
+
 def test_init_torch_set_num_threads_does_not_crash_when_torch_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

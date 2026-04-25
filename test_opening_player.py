@@ -55,9 +55,15 @@ class TestStdPoolOpeningPlayer(unittest.TestCase):
                 md = load_map(map_id, POOL, MAPS_DIR)
                 n0 = sum(1 for s in md.predeployed_specs if s.player == 0)
                 n1 = sum(1 for s in md.predeployed_specs if s.player == 1)
-                expected = _expected_opener(n0, n1)
+                if md.replay_first_mover is not None:
+                    expected = int(md.replay_first_mover)
+                else:
+                    expected = _expected_opener(n0, n1)
 
-                st = make_initial_state(md, 1, 7, starting_funds=0, tier_name="T2")
+                mks: dict = {"starting_funds": 0, "tier_name": "T2"}
+                if md.replay_first_mover is not None:
+                    mks["replay_first_mover"] = int(md.replay_first_mover)
+                st = make_initial_state(md, 1, 7, **mks)
                 self.assertEqual(
                     st.active_player, expected,
                     f"map {map_id}: P0 units={n0} P1 units={n1} "

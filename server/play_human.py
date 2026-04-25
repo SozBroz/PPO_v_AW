@@ -491,7 +491,11 @@ def new_session(
         return {"session_id": "", "ok": False, "error": msg}, msg
 
     map_data = load_map(mid, POOL_PATH, MAPS_DIR)
-    state = make_initial_state(map_data, p0, p1, starting_funds=0, tier_name=tier_name)
+    _mkp: dict = {"starting_funds": 0, "tier_name": tier_name}
+    rfm = getattr(map_data, "replay_first_mover", None)
+    if rfm is not None:
+        _mkp["replay_first_mover"] = int(rfm)
+    state = make_initial_state(map_data, p0, p1, **_mkp)
 
     sid = str(uuid.uuid4())
     with _session_io_lock:

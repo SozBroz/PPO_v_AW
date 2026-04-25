@@ -21,3 +21,11 @@ dist/
 third_party/
 AWBW-Replay-Player/
 .pytest_cache/
+
+# Cython / extension builds (``python setup.py build_ext --inplace`` or ``pip install -e .``)
+build/
+*.pyd
+*.so
+engine/_action_cython.c
+engine/_occupancy_cython.c
+rl/_encoder_cython.c

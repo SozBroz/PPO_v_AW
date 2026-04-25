@@ -12,6 +12,10 @@ this script just reads. SSH-driven probes are deferred to Phase 10f.
 Audit trail: every tick appends one or more rows to
 logs/fleet_orchestrator.jsonl (one row per decision class —
 heartbeat-check, mcts health, proposed_args, curate, eval, promote, reload).
+
+If a tick raises before completing, a traceback is written to
+``logs/fleet_orchestrator_last_crash.txt`` (same directory as the audit log)
+and the process re-raises (so supervisors see a non-zero exit).
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -42,6 +47,8 @@ from rl.fleet_env import (  # noqa: E402
     sorted_checkpoint_zip_paths,
     verdict_summary_from_symmetric_json,
 )
+from rl.live_games_resync import resync_live_games_for_train_cmd  # noqa: E402
+from rl.train_launch_env import environ_for_train_subprocess  # noqa: E402
 from rl.train_reconfig_log import append_train_reconfig_line  # noqa: E402
 
 # tools/ is not a regular package (no __init__.py); load the health gate by path.
@@ -99,6 +106,7 @@ DecKind = Literal[
     "reload_request",
     "proposed_args",
     "restart_train",
+    "train_zombie_heal",
     "train_restart_suppressed",
     "train_reconfig_applied",
     "mcts_health",
@@ -196,6 +204,40 @@ PPO_RECONFIG_ALLOWLIST: frozenset[str] = frozenset(
 )
 OPERATOR_TRAIN_ARGS_OVERRIDE_NAME = "operator_train_args_override.json"
 
+# ``refresh_proposed_train_args_documents`` rebuilds ``args`` from ``propose_from_probe`` +
+# curriculum; these keys are copied from the *previous* ``proposed_args.json`` when present
+# so ``start_solo_training`` injects (live PPO, async backend, …) survive orchestrator ticks.
+_PRESERVE_TRAIN_ARGS_FROM_PREVIOUS_PROPOSED: frozenset[str] = frozenset(
+    {
+        "--live-games-id",
+        "--live-snapshot-dir",
+        "--live-learner-seats",
+        "--training-backend",
+    }
+)
+
+# Train subprocess defaults: Cython hot paths on unless ``train_launch_cmd.json``
+# ``env`` sets these keys to ``"0"`` (explicit entries win in ``_merge_train_launch_env``).
+DEFAULT_TRAIN_PERF_ENV: dict[str, str] = {
+    "AWBW_CYTHON_BFS": "1",
+    "AWBW_USE_CYTHON_ENCODER": "1",
+    # Keep env-level Phi and engine-side capture shaping gate aligned before
+    # ``engine.game`` imports in train workers.
+    "AWBW_REWARD_SHAPING": "phi",
+    # Small pressure against endless shaped-reward slogs; at 8000 P0 steps this
+    # is -0.4 plus the fixed truncation penalty below.
+    "AWBW_TIME_COST": "0.00005",
+    "AWBW_TRUNCATION_PENALTY": "0.25",
+}
+
+
+def _merge_train_launch_env(existing: Any) -> dict[str, str]:
+    out = {**DEFAULT_TRAIN_PERF_ENV}
+    if isinstance(existing, dict):
+        for k, v in existing.items():
+            out[str(k)] = str(v)
+    return out
+
 
 def _arg_diff_keys(
     proposed_args: dict[str, Any], applied_args: dict[str, Any]
@@ -270,8 +312,10 @@ def build_train_argv_from_proposed_args(
     emit_optional(head, processed, "--tier", "T3")
     emit_optional(head, processed, "--co-p0", 1)
     emit_optional(head, processed, "--co-p1", 1)
-    emit_optional(head, processed, "--cold-opponent", "greedy_capture")
-    emit_optional(head, processed, "--learner-greedy-mix", 0.3)
+    # Match train.py defaults; stage A/B (capture bootstrap) comes from curriculum
+    # ``args_overrides`` after orchestrator merge — do not pre-inject draft 10g here.
+    emit_optional(head, processed, "--cold-opponent", "random")
+    emit_optional(head, processed, "--learner-greedy-mix", 0.0)
     head.extend(
         [
             "--max-env-steps",
@@ -300,6 +344,21 @@ def build_train_argv_from_proposed_args(
     if lr is True or lr == _curriculum_advisor.FLAG_PRESENT:
         head.append("--log-replay-frames")
         processed.add("--log-replay-frames")
+
+    fd = g("--fps-diag", None)
+    if fd is True or fd == _curriculum_advisor.FLAG_PRESENT:
+        head.append("--fps-diag")
+        processed.add("--fps-diag")
+
+    live_raw = g("--live-games-id", None)
+    if live_raw is not None:
+        processed.add("--live-games-id")
+        if isinstance(live_raw, list):
+            live_ids = [int(x) for x in live_raw]
+        else:
+            live_ids = [int(live_raw)]
+        for gid in live_ids:
+            head.extend(["--live-games-id", str(gid)])
 
     for key in sorted(args_map.keys()):
         if key in processed:
@@ -360,6 +419,96 @@ def _terminate_train_process_tree(pid: int, timeout_s: float = 30.0) -> None:
             p.kill()
         except psutil.NoSuchProcess:
             pass
+
+
+def _cmdline_mentions_train_py(cmdline: list[str]) -> bool:
+    return any(part and "train.py" in part for part in cmdline)
+
+
+def _cmdline_machine_id_match(cmdline: list[str], machine_id: str) -> bool:
+    flat = " ".join(cmdline)
+    if f"--machine-id {machine_id}" in flat or f"--machine-id={machine_id}" in flat:
+        return True
+    i = 0
+    while i < len(cmdline):
+        if cmdline[i] == "--machine-id" and i + 1 < len(cmdline):
+            return cmdline[i + 1] == machine_id
+        if cmdline[i].startswith("--machine-id="):
+            return cmdline[i].split("=", 1)[-1] == machine_id
+        i += 1
+    return False
+
+
+def _process_matches_fleet_train(
+    proc: Any, machine_id: str, cmdline: list[str]
+) -> bool:
+    import psutil
+
+    if not _cmdline_mentions_train_py(cmdline):
+        return False
+    if _cmdline_machine_id_match(cmdline, machine_id):
+        return True
+    try:
+        env = proc.environ()
+    except (psutil.Error, AttributeError):
+        env = {}
+    return env.get("AWBW_MACHINE_ID") == machine_id
+
+
+def list_fleet_train_pids_for_machine(machine_id: str) -> list[int]:
+    """PIDs of Python processes running ``train.py`` for this fleet ``machine_id``."""
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover
+        return []
+    out: list[int] = []
+    self_pid = os.getpid()
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        pid = proc.info.get("pid")
+        if pid is None or int(pid) == self_pid:
+            continue
+        raw = proc.info.get("cmdline")
+        if not raw:
+            continue
+        cmdline = list(raw)
+        name = (proc.info.get("name") or "").lower()
+        if not name.startswith("python"):
+            continue
+        try:
+            if _process_matches_fleet_train(proc, machine_id, cmdline):
+                out.append(int(pid))
+        except (psutil.Error, TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def _cleanup_fleet_train_processes_for_machine(machine_id: str) -> list[int]:
+    """Terminate every ``train.py`` cohort for *machine_id* (best-effort)."""
+    killed: list[int] = []
+    for pid in list_fleet_train_pids_for_machine(machine_id):
+        try:
+            _terminate_train_process_tree(pid)
+            killed.append(pid)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("cleanup train pid %s for %s: %s", pid, machine_id, exc)
+    return killed
+
+
+def _train_pid_identity_matches_machine(pid: int, machine_id: str) -> bool:
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+        raw = proc.cmdline()
+    except (psutil.Error, OSError, TypeError, ValueError):
+        return False
+    if not raw:
+        return False
+    cmdline = list(raw)
+    name = (proc.name() or "").lower()
+    if not name.startswith("python"):
+        return False
+    return _process_matches_fleet_train(proc, machine_id, cmdline)
 
 
 def read_mcts_health(
@@ -514,6 +663,8 @@ class FleetOrchestrator:
         curriculum_window_games: int = 100,
         curriculum_state_file_template: str = "fleet/{machine_id}/curriculum_state.json",
         reconfig_ack_timeout_s: float = 120.0,
+        train_zombie_heal_cooldown_s: float = 120.0,
+        train_bootstrap_grace_s: float = 0.0,
         host_machine_id: str = "pc-b",
         enable_mcts_here: bool = False,
         mcts_health_window: int = 200,
@@ -549,6 +700,8 @@ class FleetOrchestrator:
         self.curriculum_window_games = int(curriculum_window_games)
         self.curriculum_state_file_template = str(curriculum_state_file_template)
         self.reconfig_ack_timeout_s = float(reconfig_ack_timeout_s)
+        self.train_zombie_heal_cooldown_s = float(train_zombie_heal_cooldown_s)
+        self.train_bootstrap_grace_s = float(train_bootstrap_grace_s)
         self.host_machine_id = str(host_machine_id)
         self.enable_mcts_here = bool(enable_mcts_here)
         self.mcts_health_window = int(mcts_health_window)
@@ -557,6 +710,7 @@ class FleetOrchestrator:
         self._last_apply_at_by_machine: dict[str, float] = {}
         self._train_restart_times_by_machine: dict[str, list[float]] = {}
         self._circuit_open_until_by_machine: dict[str, float] = {}
+        self._last_zombie_heal_at_by_machine: dict[str, float] = {}
         state_doc = self._load_state()
         self._laggard_cycles: dict[str, int] = self._coerce_int_dict(
             state_doc.get("laggard_cycles")
@@ -969,6 +1123,43 @@ class FleetOrchestrator:
                     merged_args[k] = ov
                     applied_overrides[k] = ov
 
+            old_doc = read_proposed_args(mid, self.shared_root)
+            pin_args: dict[str, Any] = {}
+            if isinstance(old_doc, dict):
+                opa = old_doc.get("args")
+                if isinstance(opa, dict):
+                    for k in _PRESERVE_TRAIN_ARGS_FROM_PREVIOUS_PROPOSED:
+                        if k not in opa:
+                            continue
+                        v = opa[k]
+                        if v is None:
+                            continue
+                        if k == "--live-games-id" and isinstance(v, list) and len(v) == 0:
+                            continue
+                        pin_args[k] = v
+            # Fallback: a bad tick can strip pins from proposed before this code shipped;
+            # applied_args often still holds the last trainer the operator actually ran.
+            applied_pin_path = self.shared_root / "fleet" / mid / "applied_args.json"
+            applied_pin = _read_json_path(applied_pin_path)
+            if isinstance(applied_pin, dict):
+                apa = applied_pin.get("args")
+                if isinstance(apa, dict):
+                    for k in _PRESERVE_TRAIN_ARGS_FROM_PREVIOUS_PROPOSED:
+                        if k in pin_args:
+                            continue
+                        if k not in apa:
+                            continue
+                        v = apa[k]
+                        if v is None:
+                            continue
+                        if k == "--live-games-id" and isinstance(v, list) and len(v) == 0:
+                            continue
+                        pin_args[k] = v
+            for k, v in pin_args.items():
+                if k in applied_overrides:
+                    continue
+                merged_args[k] = v
+
             reasoning_parts = [str(base_doc.get("reasoning") or "")]
             if self.curriculum_enabled and curriculum_reason:
                 reasoning_parts.append(f"curriculum: {curriculum_reason}")
@@ -982,7 +1173,6 @@ class FleetOrchestrator:
             reasoning = "; ".join(p for p in reasoning_parts if p)
 
             prev_auto = True
-            old_doc = read_proposed_args(mid, self.shared_root)
             if isinstance(old_doc, dict):
                 prev_auto = bool(old_doc.get("auto_apply", True))
 
@@ -1095,12 +1285,11 @@ class FleetOrchestrator:
         cmd = raw.get("cmd")
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
             return None
-        env_extra = raw.get("env") or {}
-        if not isinstance(env_extra, dict):
-            env_extra = {}
+        env_extra = _merge_train_launch_env(raw.get("env"))
         cwd_raw = raw.get("cwd")
         cwd = str(cwd_raw) if cwd_raw else str(self.repo_root)
-        env_full = {**os.environ, **{str(k): str(v) for k, v in env_extra.items()}}
+        resync_live_games_for_train_cmd(self.repo_root, cmd, cwd=Path(cwd))
+        env_full = {**environ_for_train_subprocess(), **env_extra}
         kw: dict[str, Any] = {"cwd": cwd, "env": env_full}
         if sys.platform == "win32":
             kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
@@ -1207,46 +1396,70 @@ class FleetOrchestrator:
                 )
                 continue
 
-            if not pid_path.is_file():
-                _LOG.warning("train pid file missing for %s: %s", mid, pid_path)
-                out.append(
-                    TickDecision(
-                        kind="restart_train",
-                        machine_id=mid,
-                        details={"pid_path": str(pid_path)},
-                        applied=False,
-                        reason="train pid file missing (orchestrator does not spawn train)",
+            grace = float(self.train_bootstrap_grace_s or 0.0)
+            if grace > 0.0:
+                try:
+                    applied_age = now - float(applied.get("applied_at", 0.0))
+                except (TypeError, ValueError):
+                    applied_age = grace + 1.0
+                if applied_age < grace:
+                    p0 = (
+                        proposed.get("args")
+                        if isinstance(proposed.get("args"), dict)
+                        else {}
                     )
-                )
-                continue
-
-            try:
-                pid = int(pid_path.read_text(encoding="utf-8").strip().split()[0])
-            except (OSError, ValueError, IndexError):
-                _LOG.warning("train pid file unreadable for %s: %s", mid, pid_path)
-                out.append(
-                    TickDecision(
-                        kind="restart_train",
-                        machine_id=mid,
-                        details={"pid_path": str(pid_path)},
-                        applied=False,
-                        reason="train pid file missing or unreadable",
+                    a0 = (
+                        applied.get("args")
+                        if isinstance(applied.get("args"), dict)
+                        else {}
                     )
-                )
-                continue
+                    dk0 = sorted(_arg_diff_keys(p0, a0))
+                    out.append(
+                        TickDecision(
+                            kind="train_restart_suppressed",
+                            machine_id=mid,
+                            details={
+                                "proposed_hash": prop_h,
+                                "previous_hash": prev_h,
+                                "suppress_reason": "bootstrap_grace",
+                                "bootstrap_grace_s": grace,
+                                "applied_age_s": applied_age,
+                                "arg_diff_keys": dk0,
+                            },
+                            applied=False,
+                            reason=(
+                                f"bootstrap grace ({applied_age:.1f}s < {grace:g}s): "
+                                f"deferred args-drift restart; diff={dk0}"
+                            ),
+                        )
+                    )
+                    _LOG.info(
+                        "train_restart_suppressed bootstrap_grace machine_id=%s "
+                        "applied_age_s=%.2f diff_keys=%s",
+                        mid,
+                        applied_age,
+                        dk0,
+                    )
+                    continue
 
-            if not _train_pid_process_alive(pid):
+            pid: Optional[int] = None
+            if pid_path.is_file():
+                try:
+                    pid = int(
+                        pid_path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+                    )
+                except (OSError, ValueError, IndexError):
+                    _LOG.warning("train pid file unreadable for %s: %s", mid, pid_path)
+                    pid = None
+            else:
+                _LOG.warning(
+                    "train pid file missing for %s: %s (orchestrator will respawn if launch ok)",
+                    mid,
+                    pid_path,
+                )
+
+            if pid is not None and not _train_pid_process_alive(pid):
                 _LOG.warning("train pid %s not running for %s", pid, mid)
-                out.append(
-                    TickDecision(
-                        kind="restart_train",
-                        machine_id=mid,
-                        details={"pid": pid},
-                        applied=False,
-                        reason="train pid stale or process not running",
-                    )
-                )
-                continue
 
             if not launch_path.is_file():
                 _LOG.error("train launch cmd file missing for %s: %s", mid, launch_path)
@@ -1368,17 +1581,32 @@ class FleetOrchestrator:
                 continue
 
             t_hard0 = time.time()
+            _LOG.info(
+                "train hard_restart begin machine_id=%s file_pid=%s arg_diff_keys=%s "
+                "proposed_hash=%s previous_hash=%s",
+                mid,
+                pid,
+                sorted(diff_k),
+                prop_h,
+                prev_h,
+            )
             try:
-                _terminate_train_process_tree(pid)
+                cleaned = _cleanup_fleet_train_processes_for_machine(mid)
+                _LOG.info(
+                    "train restart cleanup machine_id=%s file_pid=%s terminated=%s",
+                    mid,
+                    pid,
+                    cleaned,
+                )
             except Exception as exc:  # noqa: BLE001
-                _LOG.error("failed to terminate train pid %s: %s", pid, exc)
+                _LOG.error("failed to cleanup train processes for %s: %s", mid, exc)
                 out.append(
                     TickDecision(
                         kind="restart_train",
                         machine_id=mid,
                         details={"pid": pid, "error": str(exc)},
                         applied=False,
-                        reason="terminate train failed",
+                        reason="terminate train cohort failed",
                     )
                 )
                 continue
@@ -1392,8 +1620,7 @@ class FleetOrchestrator:
             launch_payload["cmd"] = build_train_argv_from_proposed_args(
                 proposed, repo_root=self.repo_root
             )
-            if "env" not in launch_payload:
-                launch_payload["env"] = {}
+            launch_payload["env"] = _merge_train_launch_env(launch_payload.get("env"))
             if "cwd" not in launch_payload:
                 launch_payload["cwd"] = str(self.repo_root)
             _atomic_write_json(launch_path, launch_payload)
@@ -1467,9 +1694,196 @@ class FleetOrchestrator:
                         "new_pid": new_pid,
                         "proposed_hash": prop_h,
                         "applied_path": str(applied_path),
+                        "arg_diff_keys": sorted(diff_k),
                     },
                     applied=True,
                     reason="proposed_args content changed",
+                )
+            )
+        return out
+
+    def maybe_heal_stale_train(self, _state: FleetState) -> list[TickDecision]:
+        """
+        When ``proposed_args.json`` and ``applied_args.json`` already agree but ``train.py``
+        is missing, dead, duplicated, or the pid file no longer matches the live cohort,
+        terminate stray ``train.py`` processes for this machine and respawn one trainer
+        from ``train_launch_cmd.json`` (cmd/env refreshed from current ``proposed``).
+
+        Gated by ``auto_apply`` and ``train_zombie_heal_cooldown_s``. Skipped when
+        ``dry_run`` (no subprocesses). Does not trip the hash-drift restart circuit breaker.
+        """
+        out: list[TickDecision] = []
+        now = time.time()
+        try:
+            import psutil  # noqa: F401, PLC0415
+        except ImportError:
+            return out
+        if self.dry_run:
+            return out
+        if not self.auto_apply:
+            return out
+        for mid in self.pools:
+            proposed = read_proposed_args(mid, self.shared_root)
+            if proposed is None:
+                continue
+            prop_h = proposed_args_content_sha256(proposed)
+            if prop_h is None:
+                continue
+            applied_path = (self.shared_root / "fleet" / mid / "applied_args.json").resolve()
+            applied = _read_json_path(applied_path) if applied_path.is_file() else None
+            if applied is None:
+                continue
+            prev_h = applied.get("args_content_sha256")
+            if not isinstance(prev_h, str):
+                prev_h = proposed_args_content_sha256({"args": applied.get("args")})
+            if prev_h != prop_h:
+                continue
+
+            launch_path = self._resolve_train_sidecar_path(
+                mid, self.train_launch_cmd_file_template
+            )
+            pid_path = self._resolve_train_sidecar_path(mid, self.train_pid_file_template)
+            if not launch_path.is_file():
+                continue
+
+            grace = float(self.train_bootstrap_grace_s or 0.0)
+            if grace > 0.0:
+                try:
+                    applied_age = now - float(applied.get("applied_at", 0.0))
+                except (TypeError, ValueError):
+                    applied_age = grace + 1.0
+                if applied_age < grace:
+                    _LOG.info(
+                        "maybe_heal_stale_train skip bootstrap_grace machine_id=%s "
+                        "applied_age_s=%.2f (trainer may still be starting)",
+                        mid,
+                        applied_age,
+                    )
+                    continue
+
+            alive_trains = list_fleet_train_pids_for_machine(mid)
+            file_pid: Optional[int] = None
+            if pid_path.is_file():
+                try:
+                    file_pid = int(
+                        pid_path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+                    )
+                except (OSError, ValueError, IndexError):
+                    file_pid = None
+
+            healthy = (
+                len(alive_trains) == 1
+                and file_pid is not None
+                and alive_trains[0] == file_pid
+                and _train_pid_identity_matches_machine(file_pid, mid)
+            )
+            if healthy:
+                continue
+
+            _LOG.info(
+                "train_zombie_heal triggered machine_id=%s file_pid=%s alive_trains=%s "
+                "healthy=False",
+                mid,
+                file_pid,
+                alive_trains,
+            )
+
+            last_heal = float(self._last_zombie_heal_at_by_machine.get(mid, 0.0))
+            if now - last_heal < self.train_zombie_heal_cooldown_s:
+                out.append(
+                    TickDecision(
+                        kind="train_restart_suppressed",
+                        machine_id=mid,
+                        details={
+                            "suppress_reason": "zombie_heal_cooldown",
+                            "seconds_since_last": now - last_heal,
+                            "cooldown_s": self.train_zombie_heal_cooldown_s,
+                        },
+                        applied=False,
+                        reason="train zombie heal cooldown active",
+                    )
+                )
+                continue
+
+            try:
+                cleaned = _cleanup_fleet_train_processes_for_machine(mid)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.error("zombie heal cleanup failed machine_id=%s: %s", mid, exc)
+                out.append(
+                    TickDecision(
+                        kind="train_zombie_heal",
+                        machine_id=mid,
+                        details={"error": str(exc)},
+                        applied=False,
+                        reason="zombie heal cleanup failed",
+                    )
+                )
+                continue
+
+            raw_launch = _read_json_path(launch_path)
+            launch_payload: dict[str, Any]
+            if isinstance(raw_launch, dict):
+                launch_payload = {**raw_launch}
+            else:
+                launch_payload = {}
+            launch_payload["cmd"] = build_train_argv_from_proposed_args(
+                proposed, repo_root=self.repo_root
+            )
+            launch_payload["env"] = _merge_train_launch_env(launch_payload.get("env"))
+            if "cwd" not in launch_payload:
+                launch_payload["cwd"] = str(self.repo_root)
+            _atomic_write_json(launch_path, launch_payload)
+
+            new_pid = self._respawn_train_from_launch_file(launch_path)
+            if new_pid is None:
+                out.append(
+                    TickDecision(
+                        kind="train_zombie_heal",
+                        machine_id=mid,
+                        details={},
+                        applied=False,
+                        reason="zombie heal respawn failed (bad train_launch_cmd.json)",
+                    )
+                )
+                continue
+
+            _atomic_write_text(pid_path, str(new_pid) + "\n")
+            self._last_zombie_heal_at_by_machine[mid] = now
+            _LOG.info(
+                "train_zombie_heal machine_id=%s cleaned=%s new_pid=%s file_pid_was=%s alive_was=%s",
+                mid,
+                cleaned,
+                new_pid,
+                file_pid,
+                alive_trains,
+            )
+            try:
+                life = self.shared_root / "logs" / "orchestrator_train_lifecycle.log"
+                life.parent.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                with life.open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        f"{ts} machine_id={mid} event=zombie_heal cleaned={cleaned!s} "
+                        f"new_pid={new_pid} file_pid_was={file_pid!s}\n"
+                    )
+            except OSError as exc:  # pragma: no cover
+                _LOG.warning("could not append orchestrator_train_lifecycle.log: %s", exc)
+
+            out.append(
+                TickDecision(
+                    kind="train_zombie_heal",
+                    machine_id=mid,
+                    details={
+                        "new_pid": new_pid,
+                        "cleaned_pids": cleaned,
+                        "file_pid_was": file_pid,
+                        "alive_trains_was": alive_trains,
+                    },
+                    applied=True,
+                    reason=(
+                        "respawned train.py (hashes aligned; missing pid, dead pid, stale pid, "
+                        "and/or duplicate cohort)"
+                    ),
                 )
             )
         return out
@@ -1759,8 +2173,8 @@ class FleetOrchestrator:
 
         Runs *after* ``refresh_proposed_train_args_documents`` (which
         merges --mcts-mode/--mcts-sims when the health gate passes) and
-        *before* ``maybe_restart_train_for_proposed_args`` so any
-        DOUBLE / DROP_TO_OFF mutation flows through the same restart
+        *before* ``maybe_heal_stale_train`` / ``maybe_restart_train_for_proposed_args``
+        so any DOUBLE / DROP_TO_OFF mutation flows through the same restart
         path the same tick.
         """
         out: list[TickDecision] = []
@@ -2089,6 +2503,7 @@ class FleetOrchestrator:
         all_d.extend(self.read_mcts_health_decisions())
         all_d.extend(self.read_fleet_diagnosis_decisions())
         all_d.extend(self.read_proposed_train_arg_docs())
+        all_d.extend(self.maybe_heal_stale_train(st))
         all_d.extend(self.maybe_restart_train_for_proposed_args(st))
         all_d.extend(self.curate_pools(st))
         ev_decs, ev_map = self.run_symmetric_evals(st)
@@ -2120,7 +2535,22 @@ class FleetOrchestrator:
     def run_forever(self, tick_minutes: float) -> None:
         try:
             while True:
-                self.tick()
+                try:
+                    self.tick()
+                except Exception:
+                    p = self.audit_log.parent / "fleet_orchestrator_last_crash.txt"
+                    try:
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_text(
+                            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                            + "\n"
+                            + "".join(traceback.format_exception(*sys.exc_info())),
+                            encoding="utf-8",
+                        )
+                    except OSError as wexc:  # pragma: no cover - best-effort
+                        _LOG.warning("could not write %s: %s", p, wexc)
+                    _LOG.exception("fleet_orchestrator tick failed")
+                    raise
                 time.sleep(tick_minutes * 60.0)
         except KeyboardInterrupt:
             pass
@@ -2190,6 +2620,26 @@ def main() -> int:
         type=float,
         default=120.0,
         help="Wall seconds to wait for train_reconfig_request ack before hard restart.",
+    )
+    ap.add_argument(
+        "--train-zombie-heal-cooldown-s",
+        type=float,
+        default=120.0,
+        help=(
+            "Minimum seconds between automatic train.py respawns when proposed/applied "
+            "hashes already match but the cohort is missing, dead, duplicated, or stale "
+            "(default 120)."
+        ),
+    )
+    ap.add_argument(
+        "--train-bootstrap-grace-s",
+        type=float,
+        default=0.0,
+        help=(
+            "After applied_args.json is written, suppress hash-drift restarts and "
+            "zombie-heal for this many seconds (0=off). Solo bootstrap uses ~180s to "
+            "avoid killing train.py while the first orchestrator tick merges curriculum/MCTS."
+        ),
     )
     ap.add_argument(
         "--train-pid-file",
@@ -2308,6 +2758,8 @@ def main() -> int:
         curriculum_window_games=int(args.curriculum_window_games),
         curriculum_state_file_template=str(args.curriculum_state_file),
         reconfig_ack_timeout_s=float(args.reconfig_ack_timeout_s),
+        train_zombie_heal_cooldown_s=float(args.train_zombie_heal_cooldown_s),
+        train_bootstrap_grace_s=float(args.train_bootstrap_grace_s),
         host_machine_id=str(args.host_machine_id),
         enable_mcts_here=bool(args.enable_mcts_here),
         mcts_health_window=int(args.mcts_health_window),

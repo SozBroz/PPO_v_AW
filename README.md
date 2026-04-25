@@ -14,6 +14,24 @@ Advance Wars engine, AI training pipeline, in-browser replay, and zip export too
 
 **Textures:** `python tools/sync_awbw_textures.py` pulls PNGs + JSON metadata from raw GitHub (no clone required).
 
+## Native extensions (Cython)
+
+`engine` and `rl` ship `.pyx` modules (`setup.py` at repo root). From the repo root, after installing build deps (`pip install numpy cython setuptools wheel`), run either:
+
+- `python setup.py build_ext --inplace` — places compiled modules next to packages, or  
+- `pip install -e .` — editable install (also runs the build; needs a C compiler: **build-essential** on Linux, **Build Tools for Visual Studio** on Windows).
+
+CI (`.github/workflows/ci.yml`) installs `build-essential` + `python3-dev` on Ubuntu, then `pip install -e .` before `pytest`, so `import engine.action` and encoder Cython paths resolve in automation.
+
+**Windows:** If `build_ext --inplace` fails with *Access is denied* on `*.pyd`, another process (e.g. `train.py`, tests, REPL) still has the DLL loaded. Stop it, then run `build_ext --inplace` again—or use `python scripts/rebuild_cython_extensions.py`, which builds into `build/` and copies (same lock rules apply to the copy step).
+
+## Optional: `torch.compile` on Windows (`AWBW_TORCH_COMPILE`)
+
+GPU training can wrap the policy with `torch.compile` for a potential inference-side speedup (see `rl/self_play.py`). On **Windows** this is **off by default**: Inductor/Triton’s first run may need the **MSVC** C++ compiler (`cl.exe`), which is *not* bundled with the usual PyTorch+CUDA wheel. Machines that have CUDA for training but no **Visual Studio Build Tools** (C++ workload) should keep the default so training runs without a compiler install.
+
+- **Enable on Windows:** install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (workload: **Desktop development with C++**) or a full Visual Studio with that workload, ensure `cl.exe` is available to the process, then set `AWBW_TORCH_COMPILE=1` (or `true` / `yes` / `on`) for the training session.
+- **Linux and typical CI:** no variable needed; the code treats non-Windows as opted-in when CUDA and Triton/Inductor are usable.
+
 ## Fleet training (main + optional auxiliary PCs)
 
 Main training is **sovereign**: `python train.py` uses only the local repo’s `checkpoints/` (or `--checkpoint-dir`) and does not require a network share, eval fleet, or promoted `best.zip`.

@@ -1,6 +1,6 @@
 # AWBW-RL Master Plan
 
-*Last updated: 2026-04-23*
+*Last updated: 2026-04-24*
 
 This document is the strategic north star for the AWBW reinforcement learning project.
 It records where we are, where we are going, and — critically — the concrete thresholds
@@ -252,6 +252,29 @@ MCTS leaf evaluation is **V(s) on the leaf state distribution**. A value head tr
 - [ ] Engine can simulate a full turn in < 5ms (required for real-time MCTS)
 - [ ] `explained_variance` > 0.6 (V(s) must be a strong evaluator for MCTS to work **on the states you will search**)
 
+### Production MCTS (AWBW live / competitive play)
+
+AWBW is **turn-based**, not RTS: the binding constraint for a **production** agent is usually **wall-clock per decision**, not a fixed iteration count inside a training loop. Branching is still combinatorial (many units × many legal sub-steps per turn), so **efficiency** matters even when you can search for tens of seconds.
+
+**Anytime search:** In production, prefer a **time budget per P0 turn** (e.g. 30–60s, tunable by match rules and hardware) and run **best-effort MCTS until the budget expires**, rather than a single hard-coded sim count. Fleet **training / symmetric eval** may keep **fixed sim counts** for reproducibility until a time-based mode is validated. Scaling rule: **more compute generally helps** if the value head is accurate on the positions you search; doubling search time often yields measurable Elo gains **until** bias or diminishing returns dominate.
+
+**Move / turn narrowing:** Do **not** expand raw full legal sub-step trees. Use the **policy** to concentrate search on high-prior lines (in-repo: turn-level children sampled via policy rollouts and `root_plans` / priors in `rl/mcts.py`). Literature and practice for large action spaces: cap expansion to **top-N policy mass** per decision point (analogous to “top 10–20” ideas **per branching point** — our tree already aggregates a **whole turn** into one edge; widen with **more distinct turn samples** and **progressive widening**, not exhaustive legal enumeration).
+
+**Breadth vs depth:** **Breadth** (many plausible **variations of the current turn** and immediate replies) is usually the bottleneck in AWBW-style combinatorial turns. **Depth** helps but **diminishing returns** set in after roughly **10–12 player-turns** of lookahead in uncertain positions; extra wall time often buys more from **wider** search at tactical depths than from chasing very deep speculative lines. This aligns with **turn-level** nodes: each node already collapses one player’s full turn; “go wider” = more / smarter **turn-plan children**, not micro-step explosion.
+
+**Training vs production (intent):**
+
+| Aspect | Training / fleet eval (typical) | Production (standard play) |
+|--------|----------------------------------|------------------------------|
+| Gating | Fixed sim counts, reproducible seeds | **Clock time** (anytime algorithm) |
+| Budget anchor | Hundreds–low thousands of sims / root for sweeps | **Seconds per turn**; may imply **10k–100k+** rollouts on strong hardware if each sim is cheap enough |
+| Exploration | Dirichlet / temperature on policy or visits | **Exploitation-forward**: low noise, **deterministic** final pick from visit counts (or very low temperature) |
+| Reference point | AlphaZero-class agents often cite **~1.6k sims** in **sub-second** chess settings; AWBW turn-level sims are **not** 1:1 comparable — expect **higher** effective rollouts for similar strength if rollouts are heavier. |
+
+**Search-control heuristic (optional but valuable):** Spend **more wall time** on turns with **high unit density / contested frontlines**; spend **less** on phases where tactics are narrower (e.g. early property rhythm) **if** a cheap complexity signal agrees with telemetry. Implement as **multiplier on time budget** or **dynamic root K**, not silent behavior change without logging.
+
+**Plan pointer:** Operational details, profiling order, and todos live in [`.cursor/plans/mcts_optimization_campaign.plan.md`](.cursor/plans/mcts_optimization_campaign.plan.md).
+
 ---
 
 ## 5. Phase 3 — Hierarchical RL (Macro/Micro)
@@ -400,15 +423,17 @@ comfortable with the implementation risk. **Do not** treat MCTS prototype milest
 
 ---
 
-## 8. Future track — Fog of war (separate project)
+## 8. Future track — Fog, high funds, and ladder expansion (separate project)
 
-This is **not** on the critical path for Phases 1–3 above, which assume **full observation** on Global League **Std** maps (no tile fog in current training). Treat fog as a **parallel, later programme** once the full-obs stack is proven—or if you explicitly prioritize ranked **Fog** maps as a product goal.
+This is **not** on the critical path for Phases 1–3 above, which assume **full observation** on Global League **Std** maps and “normal” economy defaults in training. Treat **fog of war** and **high-funds (HF) ranked** ladder play as a **parallel, later programme** once the full-obs / standard-economy stack is proven—or if you explicitly prioritize those **ranked** rulesets as a product goal.
 
 ### 8.1 Policy: no shared weights with full-obs training
 
-**Fog and non-fog do not share checkpoints.** Policy and value weights trained under perfect information optimize a different objective than under partial observability; merging training runs or “fine-tune std → fog” as if it were the same model invites gradient conflict and misleading value metrics. Plan for **separate training runs, separate checkpoints, and a separate eval ladder** for fog. Success on Phase 1 Full (std, full obs) **does not** certify a fog agent.
+**Fog and non-fog do not share checkpoints** as a single undifferentiated artifact. Policy and value weights trained under perfect information optimize a different objective than under partial observability; naively merging training runs or “fine-tune std → fog” **without** mode separation, masking, and metrics discipline invites gradient conflict and misleading value metrics. Plan for **separate training runs, separate checkpoints, and a separate eval ladder** per major ruleset (e.g. fog, high funds). Success on Phase 1 Full (std, full obs) **does not** certify a fog or HF agent.
 
-*(Optional later experiment: initialize fog training with random weights only, or small controlled studies with frozen low-level features—still **not** “the same weights” as production std.)*
+**Transfer vs identity:** Structured transfer (§8.7–8.9)—frozen backbone, multi-task heads, or progressive columns—can **initialize** from a strong Standard network, but the **shipped** fog/HF policy should still be **versioned and evaluated** on its own ladder. “We froze the trunk” is not the same as “one checkpoint serves every mode in production” unless you deliberately commit to a unified MTL model (§8.8) and prove it does not regress Standard.
+
+*(Optional later experiment: initialize specialized tracks from random weights only, for ablation—contrast with §8.7–8.9.)*
 
 ### 8.2 What this track must include (engineering summary)
 
@@ -418,9 +443,78 @@ This is **not** on the critical path for Phases 1–3 above, which assume **full
 - **Metrics:** Separate TensorBoard / `game_log` tags for fog; reinterpret or replace `explained_variance` if the critic sees hidden state (privileged critic) vs the policy.
 - **Phase 2 / 3 (if fog ever gets search or HRL):** MCTS needs belief / information-set style search, not leaf `V(s)` on the true board; macro/micro inputs must be belief-consistent.
 
-### 8.3 Relationship to the dependency stack
+### 8.3 The “Waypoints” hierarchical approach (HRL for FOG pathing)
 
-Fog does **not** sit under Phase 1 Full as a hidden dependency. It is a **second product line**: duplicate investment in engine correctness, encoding, env stepping, training, and gates—only after you choose to fund it.
+Instead of having the RL agent pick **every** micro-step, plan for a **hierarchical** setup aligned with §5 (macro/micro), but with a dedicated pathing role:
+
+- **High-level actor** — Chooses the **target destination** and the **intent** (e.g. attack, capture, wait). This is the “where and why,” not the full tile-by-tile path.
+- **Low-level “pathing” head** — A smaller sub-network (or a specialized layer) that **only needs to be fully engaged under FOG**. It takes **(start, end)** coordinates (from the high level) and outputs either a **pathing mask** over reachable tiles or a **sequence of direction tokens** that realize the move.
+
+**Why it helps:** In **Standard** (full-obs) mode, the pathing head can be **bypassed** in favour of a deterministic planner (e.g. A* shortest-path search to the destination). In **FOG**, the model can learn that a **curved route through woods** is higher value than a **straight line on a road** when exposure matters—behaviour that is awkward to get from a single flat action index per step with no structure.
+
+This composes with §5’s macro/micro split: fog-specific training mainly stresses **consistency** between declared goals and **pathing under partial vision**, not a second unrelated policy.
+
+### 8.4 Action masking and pointer / tile attention
+
+**Pointer-style outputs (optional but strong fit for long moves):** Instead of a single monolithic action index, consider a **pointer network** or **transformer attention** that **“points to” a sequence of tiles** (or a compact representation of the path) so credit assignment for multi-tile movement is not fighting the 35k flat head alone.
+
+- **Strict action masking (non-negotiable):** The legal set must be **player-local and engine-true**. If a unit has e.g. **6 movement**, the mask only allows destination tiles (or path segments) **within that reach**—no oracle leaks through extra logits.
+- **Bounded path hypotheses:** For the pathing sub-problem, **do not** enumerate every permutation of N steps. **Discretize** to a small menu of **2–3** viable path classes (e.g. **“most direct”** vs **“most hidden / off-road”**), selected by the pathing head or by a post-process on top-`k` A* / BFS candidates. That keeps the **pointer / sequence** head trainable and interpretable.
+
+MaskablePPO already assumes masks; a fog build must extend that contract to **fog-legal** actions and any new path head.
+
+### 8.5 FOG as a “vision channel” (one network, two regimes)
+
+To keep a **single** policy–value network (separate **checkpoints** per §8.1, but one **architecture**), treat **field-of-view** as an explicit **input channel** (e.g. a **bitmask** or multi-bit encoding aligned with the spatial grid):
+
+- **Standard / full-obs** — The vision channel is **all ones** (or equivalent: “fully seen”).
+- **FOG** — The channel is a **mix of** visible tiles, **unseen** (e.g. zeros), and **last-seen / memory** where rules permit (ties to the **belief / POMDP** bullet in §8.2).
+
+**Joint or staged training:** If the policy is trained on **both** regimes (or curriculum from full → mixed), it can learn that when the **vision channel** is sparse (many zeros), the **pathing head** and tactical choices should be **more conservative**—without a hard-coded `if fog:` branch in code.
+
+### 8.6 Relationship to the dependency stack
+
+Fog and HF ladder expansion do **not** sit under Phase 1 Full as a hidden dependency. They are a **second product line**: duplicate investment in engine correctness, encoding, env stepping, training, and gates—only after you choose to fund them.
+
+### 8.6a Std meta vs high-funds tech — Stealth bans and submarine rarity
+
+**Known shortcoming:** Phase 1–3 training on Global League **Std** skews away from several **high-funds-relevant** unit lines:
+
+- **Stealth** is **banned on many Std maps** (`unit_bans` in `data/gl_map_pool.json`). The policy therefore gets **little training signal** on hide/unhide, fuel curves while hidden, and **Fighter/Stealth-only** targeting rules—even though the engine implements them.
+- **Submarines** are legal on many Std maps but **rarely built in human Std meta**; self-play and replay-derived behaviour may **under-sample** dive/surface, **submerged** interaction (only Cruiser and Sub may attack), and naval scouting that matters more when economies go long.
+
+**High-funds (HF) ranked** and **high-treasury endgames** push toward tech (Stealth on allowed maps, subs, heavier naval/air). **Do not assume** Std-trained competence transfers to that regime without **HF-oriented curriculum, eval, and metrics** (see §8.1, §8.7–8.8). Separately, the encoder’s **14-way unit-type bucket** collapses many late tech types (`rl/encoder.py`); that tightens the case for **mode-specific** training or encoder upgrades when HF or rare units become a product target.
+
+### 8.7 Frozen backbone (Standard feature extraction → FOG / HF heads)
+
+A **superhuman Standard** (full-obs) bot’s **early and middle layers** have already learned a reusable “language” of AWBW: base placement, threat geometry, terrain value, and unit affordances. That representation is a natural **backbone** for new rulesets if you do not want to re-learn vision from scratch.
+
+- **The move** — Load the Standard network and **freeze** the backbone (conv / ResNet blocks and shared stem): **no gradients** into those layers during the new training phase.
+- **The addition** — Attach **new, randomly initialised** modules: task-specific **policy / value heads**, and where needed (§8.3) a **FOG pathing** head or, for **high funds**, an **HF-macro** head (economy tempo, tech pacing, and scale that differ from low-income training).
+- **Transfer** — During FOG or HF training, **only the new parameters update**. The frozen backbone should **not** “forget” how Standard worked; the new heads learn to **reinterpret** the same spatial features under fog masks, partial observability, or different fund curves.
+
+**Trade-off:** Simpler and stable for the backbone, but the new heads may be **underpowered** if the frozen features lack channels that only matter under fog (e.g. explicit belief memory)—you may need **thin adapter layers** (trained) between frozen trunk and new heads, or unfreeze the trunk later with a **very small** LR (see §8.8).
+
+### 8.8 Multi-task learning (unified model across Standard, FOG, HF)
+
+If the goal is a **single deployable model** that can play **multiple ladder modes**, train one **shared backbone** with **task-specific heads** (and/or task-specific small towers), instead of a permanently frozen std-only network.
+
+- **The setup** — **Shared** feature extractor, then **separate** heads for Standard vs FOG vs high funds (or a head for “pathing / macro” that only receives gradients in the relevant mode).
+- **The transition** — **Initialise** the shared backbone from your strongest **Standard** weights; initialise new heads from scratch (or from small pre-training).
+- **Mode awareness** — Add a **one-hot** or **learned embedding** “game mode” vector **concatenated to** the flat feature vector (or added as bias to heads). The network then knows whether the episode is `standard`, `fog`, or `high_funds` (or GL ruleset id).
+- **The result** — When `mode=standard`, the policy can **retain** behaviours that already work; when `mode=fog`, it **routes** spatial understanding through FOG-specific heads and the vision channel (§8.5). **Risk:** **interference** between modes is real—use **sampling** across modes per batch, **gradient balancing**, or **loss weighting** so HF or fog does not wash out Standard. Validate **each** mode on **its** ladder, not only aggregate loss.
+
+This is the natural counterpart to a permanently frozen backbone (§8.7): more **unified capacity**, more **governance** (metrics, ablations, regression on Standard when training fog/HF).
+
+### 8.9 Progressive neural networks (lateral transfer without overwriting Standard)
+
+If the concern is **catastrophic forgetting**—FOG or HF training **degrading** Standard play even with care—a **ProgressiveNN**-style design keeps a **dedicated column** for the original task and **adds** capacity for the new one.
+
+- **Column 1** — The **Standard** superhuman network, **frozen** (or updated only on Standard batches if using MTL in parallel).
+- **Column 2+** — **New** weight columns for FOG, and optionally a third for **high funds** macro.
+- **Lateral connections** — Later columns take **not only** the current input but also **activations** (or pre-specified feature slices) from earlier columns, so the new task can **reuse** “where units are and what matters” without **overwriting** Column 1’s weights.
+
+**Use when:** you need **strong** reuse of Standard competence and a **provable** separation of trainable parameters for the new mode. **Cost:** more parameters, more engineering to wire lateral features and keep inference latency acceptable on the training stack.
 
 ---
 
@@ -547,26 +641,208 @@ Document the command line and seed in the run notes so regressions are comparabl
 
 ---
 
-## 12. Native compilation & low-level perf (SHELVED — multi-week)
+## 12. Native compilation & low-level perf (ACTIVE — NN bottleneck shifted)
 
-**Status:** Deferred. Shelved 2026-04-22 after train.py FPS validation showed engine code is no longer the dominant cost. Expected revisit window: only after the FPS campaign Phase 6 (`n_envs` sweep) is finalized AND a real-run cProfile shows engine cost > 30% of wall.
+**Status:** Active. Re-opened 2026-04-23 after Claude Code performance analysis identified that the restart architecture's larger NN (70ch encoder, 10× ResBlock@128, 256-dim trunk, 35k output head) has shifted the bottleneck profile from the cold-opponent baseline.
 
-**Why shelved:** At n_envs=4 / cold-opp random on pc-b, real `env_steps_per_s_total` is ~165 vs `env_steps_per_s_collect` ~720 — the **77% non-engine fraction** (PPO update + IPC + lockstep wait) cannot be reduced by Python→native compilation. Even a 10× engine speedup would only lift total fps from ~165 to ~200-250.
+**Context shift:** The original §12 analysis was based on cold-opponent runs where inference cost was negligible. The current architecture (§1) includes:
+- 70 spatial channels (vs ~59 before restart)
+- 10× ResBlock@128 in AWBWFeaturesExtractor
+- 256-dim trunk → 35k-dim policy head (8.96M params in a single Linear)
+- Factored spatial head (already implemented) + MOVE band 1818..2717
 
-### 12.1 Options (ordered by ROI per week of work)
+This changes the cost profile: what was 77% non-engine overhead with a small NN now has a significant inference component.
+
+### 12.0 Profile Before Fixing (MANDATORY first step)
+
+The bottleneck location is now unknown. Run this to determine which fixes actually matter:
+
+```python
+# Add to train.py or self_play.py temporarily
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+
+with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+             record_shapes=True, with_stack=True) as prof:
+    # Run ~100 steps
+    trainer.model.learn(total_timesteps=100 * args.n_steps * args.n_envs)
+
+prof.export_chrome_trace("perf_trace.json")
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+```
+
+This tells you whether the bottleneck is **inference** (forward pass), **PPO update** (backward pass), or **IPC** (env communication) — which determines which fixes below actually matter.
+
+### 12.1 Tier 1: Free Wins (1–2 hours, no architecture risk)
+
+| # | Fix | Expected Impact | Risk |
+|---|-----|-----------------|------|
+| 1a | `torch.compile(model.policy, mode="reduce-overhead")` | 20–40% speedup on forward pass | Low — fullgraph=False safe with MaskablePPO hooks |
+| 1b | Mixed precision inference (`torch.amp.autocast` in forward) | 30–50% faster on modern GPUs for conv layers | Low — value/policy heads handled by SB3 |
+| 1c | Tune `n_steps` × `n_envs` for new NN size | Amortize expensive PPO updates | Low — adjust to fit VRAM |
+
+**torch.compile details:**
+```python
+# In rl/self_play.py, after model creation
+import torch
+if hasattr(torch, "compile"):
+    model.policy = torch.compile(
+        model.policy,
+        mode="reduce-overhead",  # best for repeated same-shape calls
+        fullgraph=False,          # False = safer with MaskablePPO hooks
+    )
+```
+The `reduce-overhead` mode specifically targets GPU kernel launch overhead that hurts small-batch repeated inference.
+
+**Mixed precision details:**
+```python
+# In AWBWFeaturesExtractor.forward() and policy forward
+from torch.amp import autocast
+
+def forward(self, obs):
+    with autocast(device_type="cuda", dtype=torch.float16):
+        spatial = obs["spatial"]
+        # ... rest of forward
+```
+
+**n_steps tuning:** Current `n_steps=512, n_envs=4` gives 2048 rollout steps per update. With a larger NN, PPO update cost is higher relative to collection. Try:
+```python
+n_steps=1024, n_envs=8  # 8192 steps/update — same wall time per step,
+                        # but 4× fewer expensive PPO updates
+```
+
+### 12.2 Tier 2: Medium Effort, High Impact
+
+| # | Fix | Expected Impact | Risk |
+|---|-----|-----------------|------|
+| 2a | `AsyncVectorEnv` with `shared_memory=True` (replace SubprocVecEnv) | +10–30% IPC speedup | Medium — test pickle serialization |
+| 2b | Actor-Learner threading split | Overlap GPU update with env stepping | High — SB3 integration complexity |
+
+**AsyncVectorEnv details:**
+
+The 30×30×63 spatial obs is 1.7× larger than before (63 vs ~37 effective channels). Every step serializes this over the pipe in SubprocVecEnv.
+
+```python
+# In rl/self_play.py
+from stable_baselines3.common.vec_env import AsyncVectorEnv  # or gymnasium's
+
+# Instead of:
+env = SubprocVecEnv([make_env_fn(i) for i in range(n_envs)])
+
+# Use:
+env = AsyncVectorEnv([make_env_fn(i) for i in range(n_envs)],
+                      shared_memory=True)
+```
+
+**Actor-Learner split (conceptual):**
+
+This is the architectural fix that solves the large-NN problem at scale. The core issue: with SubprocVecEnv, GPU sits idle while workers step the engine, and CPU envs sit idle while GPU does PPO update.
+
+```python
+# Concept — wire into rl/self_play.py
+import threading
+import queue
+
+rollout_queue = queue.Queue(maxsize=3)  # bounded so learner doesn't fall behind
+
+def actor_thread():
+    """Runs envs + inference on CPU, pushes rollout buffers."""
+    while True:
+        rollout = collect_rollout(env, policy_cpu_copy)
+        rollout_queue.put(rollout)
+
+def learner_loop():
+    """Pulls rollouts, does GPU update, pushes weights back."""
+    while True:
+        rollout = rollout_queue.get()
+        model.learn_from_rollout(rollout)
+        # copy updated weights → actor's CPU policy
+        actor_policy.load_state_dict(model.policy.state_dict())
+```
+
+Not trivial to wire into SB3, but it's the right architecture for large NNs. The GPU update and env stepping overlap instead of alternating.
+
+### 12.3 Tier 3: NN Architecture — Don't Shrink, Restructure
+
+If throughput is still insufficient after Tiers 1–2, restructure the network for efficiency rather than reducing capability:
+
+| # | Fix | Expected Impact | Risk |
+|---|-----|-----------------|------|
+| 3a | Depthwise separable convs in ResNet blocks | ~8× fewer MACs on 3×3 convs | Medium — test equivalence |
+| 3b | **Factored output head** (256→512→900+38 vs 256→35000) | 97% reduction: 9M→240k params | Low — lossless restructuring |
+
+**3a: Depthwise Separable Convolutions:**
+
+If the network went wider (e.g., 64→256 channels), most compute is in 3×3 convolutions. Replace with depthwise separable:
+
+```python
+# In rl/network.py AWBWFeaturesExtractor
+class EfficientResBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            # Depthwise: spatial mixing, cheap
+            nn.Conv2d(channels, channels, 3, padding=1, groups=channels),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+            # Pointwise: channel mixing
+            nn.Conv2d(channels, channels, 1),
+            nn.BatchNorm2d(channels),
+        )
+
+    def forward(self, x):
+        return F.relu(x + self.conv(x))
+```
+
+Same representational power for spatial + channel mixing, ~8× fewer multiply-adds.
+
+**3b: Factored Output Head (HIGHEST LEVERAGE):**
+
+The 256→35k output layer is almost certainly dominating inference time:
+- 256-dim → 35,000-dim linear = **8.96M parameters** just in the policy head
+
+This is already partially addressed in §1 (factored spatial head + scatter to 35k flat), but verify the implementation matches:
+
+```python
+# Instead of one 256→35000 linear:
+# 35000 = 30*30*38 + small_actions ≈ tiles × actions_per_tile
+# Factor as: 256 → 512 → [tile_logits(900) + action_logits(38)]
+# Then combine: full_logit[tile, action] = tile_score[tile] + action_score[action]
+
+class FactoredPolicyHead(nn.Module):
+    def __init__(self, feat_dim=256, n_tiles=900, n_action_types=38):
+        super().__init__()
+        self.tile_head = nn.Linear(feat_dim, n_tiles)    # 230k params
+        self.action_head = nn.Linear(feat_dim, n_action_types)  # 9.7k params
+        # vs 8.96M params before
+
+    def forward(self, features):
+        tile_logits = self.tile_head(features)      # [B, 900]
+        action_logits = self.action_head(features)  # [B, 38]
+        # Outer sum to get [B, 900*38] ≈ [B, 34200], then pad/mask to 35000
+        return (tile_logits.unsqueeze(2) + action_logits.unsqueeze(1)).view(B, -1)
+```
+
+This reduces the output head from 9M → 240k params while preserving expressivity for the tile-action decomposition.
+
+**Verify channel count propagation:** The HP belief channels added 4 spatial channels (59→63). Ensure the first conv layer's input size reflects this change cleanly — a silent doubling would add ~40% to first-layer compute.
+
+### 12.5 Options (ordered by ROI per week of work)
+
+These remain relevant for engine-level optimizations AFTER the NN bottlenecks are addressed:
 
 | Option | Effort | Expected total-fps gain | Training-data safe? |
 |---|---|---|---|
 | Shared-memory `AsyncVectorEnv` (replace `SubprocVecEnv`) | 1 week | +10-30% | ✅ Yes |
 | `cProfile` train.py end-to-end (decision input only) | 2 hours | (informational) | ✅ Yes |
-| Flat-array engine refactor (occupancy/terrain as `np.int8`) | 3-5 days | +5-15% on engine, **enables Numba** | ⚠️ See §12.2 |
+| Flat-array engine refactor (occupancy/terrain as `np.int8`) | 3-5 days | +5-15% on engine, **enables Numba** | ⚠️ See §12.6 |
 | Numba `@njit` on `compute_reachable_costs` after flat-array | 1-2 days | 5-10× on engine, ~3-5% total | ✅ Yes |
 | mypyc compile of typed engine module | 1 week | 1.5-3× on engine, ~5% total | ✅ Yes |
-| Cython `cdef class` rewrite of `Unit`/`GameState` | 2-3 weeks | 3-10× on engine, ~10-15% total | ⚠️ See §12.2 |
+| Cython `cdef class` rewrite of `Unit`/`GameState` | 2-3 weeks | 3-10× on engine, ~10-15% total | ⚠️ See §12.6 |
 | PyPy alternative interpreter | — | (incompatible with PyTorch + spawn) | N/A — skip |
 | Nuitka whole-program compile | — | (poor fit for hot loops) | N/A — skip |
 
-### 12.2 Training-data compatibility (CRITICAL)
+### 12.6 Training-data compatibility (CRITICAL)
 
 **Most native-compilation options preserve trained weights.** Model weights (`AWBWFeaturesExtractor` + policy head + value head) depend only on the **observation tensor shape, action-space layout, and network architecture** — not on how the engine internally computes things.
 
@@ -593,15 +869,18 @@ Document the command line and seed in the run notes so regressions are comparabl
 ```
 If we cannot make that test pass, the change forces a fresh training run — quote the cost up front.
 
-### 12.3 Re-entry conditions
+### 12.7 Re-entry conditions (legacy)
 
-Revisit this section ONLY when ALL hold:
-- [ ] Phase 6 `n_envs` sweep formalized in orchestrator (`proposed_args.json` with hard caps per machine)
-- [ ] Real-run cProfile (Phase 0 redux on `train.py`, not microbench) shows engine cost > 30% of wall
-- [ ] We have a 2-week sustained engineering budget AND a clean checkpoint we want to preserve
-- [ ] AsyncVectorEnv swap (option 1 above) has been tried first
+These conditions are now **superseded** by §12.0 (profile first). The bottleneck profile has shifted with the larger NN — engine cost dominance is no longer the prerequisite for optimization work.
 
-Until then: extract pure-Python wins, hold the line on per-step cost, keep the orchestrator and MCTS the priority.
+**Original conditions (archived):**
+- [x] Phase 6 `n_envs` sweep formalized
+- [x] Profile shows non-engine bottleneck — **now known to be stale** (NN changed)
+- [ ] Tier 1 free wins completed (torch.compile, mixed precision, n_steps tuning)
+- [ ] Tier 2 medium-effort items evaluated (AsyncVectorEnv)
+- [ ] If still insufficient: Tier 3 architectural changes
+
+Until Tier 1 is exhausted: focus on NN-level optimizations, not engine-native compilation.
 
 ---
 

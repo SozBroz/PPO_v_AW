@@ -9,8 +9,18 @@ The environment wraps the AWBW game engine and exposes:
 By default the trained agent controls engine seat 0; the other seat is stepped
 automatically (checkpoint opponent or random). With ``AWBW_SEAT_BALANCE=1`` the
 learner seat is sampled 50/50 each episode (ego-centric obs + learner-frame Φ).
+
+``AWBW_VECENV_OBS_COPY`` (default on): return C-contiguous observation copies from
+``_get_obs`` so ``SubprocVecEnv`` workers do not pickle arrays that alias reused
+buffers; helps Windows multiprocessing when ``n_envs`` is large. Set ``0`` to
+restore zero-copy returns (slightly faster single-process / tests).
 """
+from rl import _win_triton_warnings
+
+_win_triton_warnings.apply()
+
 import collections
+import copy
 import json
 import os
 import random
@@ -24,6 +34,10 @@ from threading import Lock
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+
+# Keep the env's default reward mode and engine-side capture-shaping gate aligned.
+# ``engine.game`` reads this at import time to suppress legacy capture bonuses.
+os.environ.setdefault("AWBW_REWARD_SHAPING", "phi")
 
 from engine.game import GameState, make_initial_state, MAX_TURNS
 from engine.map_loader import MapData, load_map
@@ -57,6 +71,8 @@ SLOW_GAME_WALL_S_ENV = "AWBW_SLOW_GAME_WALL_S"
 
 # Optional per-P0-step stall penalty (subtracted from reward while episode continues).
 TIME_COST_ENV = "AWBW_TIME_COST"
+# Optional fixed penalty when an episode truncates without an engine terminal result.
+TRUNCATION_PENALTY_ENV = "AWBW_TRUNCATION_PENALTY"
 # Terminal shaping: ``AWBW_INCOME_TERM_COEF`` × (income_props_p0 − p1) / cap_limit when episode ends.
 INCOME_TERM_COEF_ENV = "AWBW_INCOME_TERM_COEF"
 # When ``1``, zero all BUILD action-mask entries except ``INFANTRY`` (narrow bootstrap).
@@ -72,6 +88,33 @@ LEARNER_GREEDY_MIX_ENV = "AWBW_LEARNER_GREEDY_MIX"
 # buffer for FPS / straggler diagnostics (SubprocVecEnv). Default off — zero deque
 # allocation and no extra timers in the hot path.
 TRACK_PER_WORKER_TIMES_ENV = "AWBW_TRACK_PER_WORKER_TIMES"
+FPS_DIAG_ENV = "AWBW_FPS_DIAG"
+MACHINE_ID_ENV = "AWBW_MACHINE_ID"
+# Default on: ``_get_obs`` returns C-contiguous copies so ``SubprocVecEnv`` IPC
+# pickling never aliases buffers that are reused on the next step (helps Windows
+# pipe / multiprocessing stability when ``n_envs`` is high). Set ``0`` to opt out.
+VECENV_OBS_COPY_ENV = "AWBW_VECENV_OBS_COPY"
+
+
+def effective_track_per_worker_times() -> bool:
+    """
+    Whether to sample per-``step()`` wall times in each env (Subproc workers).
+
+    ``AWBW_TRACK_PER_WORKER_TIMES=0/false/...`` forces off; ``=1`` forces on.
+    When unset, default **on** if ``AWBW_FPS_DIAG`` or a non-empty
+    ``AWBW_MACHINE_ID`` is set (fleet / ``train.py --fps-diag`` / ``--machine-id``).
+    """
+    raw = (os.environ.get(TRACK_PER_WORKER_TIMES_ENV) or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    fps = (os.environ.get(FPS_DIAG_ENV) or "").strip().lower()
+    if fps in ("1", "true", "yes", "on"):
+        return True
+    if (os.environ.get(MACHINE_ID_ENV) or "").strip():
+        return True
+    return False
 
 # Phase 1b: reuse env-owned numpy buffers for ``encode_state`` and ``_get_action_mask``
 # in the hot path. Set to ``0`` to use fresh allocations (parity / A–B). Default on.
@@ -528,6 +571,9 @@ class AWBWEnv(gym.Env):
         max_env_steps: int | None = None,
         max_p1_microsteps: int | None = None,
         max_turns: int | None = None,
+        live_snapshot_path: str | Path | None = None,
+        live_games_id: int | None = None,
+        live_fallback_curriculum: bool = True,
     ) -> None:
         super().__init__()
 
@@ -588,9 +634,24 @@ class AWBWEnv(gym.Env):
             (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32
         )
         self._scalars_obs_buf = np.zeros((N_SCALARS,), dtype=np.float32)
-        self._use_preallocated_buffers: bool = (
-            os.environ.get(PREALLOCATED_BUFFERS_ENV, "1") == "1"
-        )
+        
+        # --- Memory optimization additions ---
+        # Buffer pool for reusable numpy arrays
+        self._buffer_pool: deque[np.ndarray] = collections.deque(maxlen=10)
+        
+        # Pinned memory buffers for GPU transfer (also sets ``_reusable_tensors``).
+        self._pinned_buffers: dict[str, np.ndarray] = {}
+        self._init_pinned_memory()
+
+        # Memory profile tracking
+        self._memory_profile: dict[str, list] = {
+            "allocations": [],
+            "deallocations": []
+        }
+        
+        # Read AWBW_PREALLOCATED_BUFFERS env var at init; defaults to True for performance.
+        # Set to "0" to disable and test with fresh allocations (used by golden A<->B tests).
+        self._use_preallocated_buffers: bool = os.environ.get(PREALLOCATED_BUFFERS_ENV, "1") == "1"
 
         # Phase 4: env-scoped legal-action cache. Populated lazily by
         # self._get_legal(); invalidated after every state.step in
@@ -641,16 +702,24 @@ class AWBWEnv(gym.Env):
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
 
         self._step_times: collections.deque[float] | None = (
-            collections.deque(maxlen=100)
-            if os.environ.get(TRACK_PER_WORKER_TIMES_ENV) == "1"
-            else None
+            collections.deque(maxlen=100) if effective_track_per_worker_times() else None
         )
+        # Live PPO: optional pickle path written by the training process / refresh
+        # script; workers copy.deepcopy on each reset and skip curriculum / replay walk.
+        self._live_snapshot_path: str | None = (
+            str(live_snapshot_path) if live_snapshot_path else None
+        )
+        self._live_games_id: int | None = (
+            int(live_games_id) if live_games_id is not None else None
+        )
+        self._live_fallback_curriculum: bool = bool(live_fallback_curriculum)
 
     def get_step_time_stats(self) -> dict[str, float]:
         """Return percentile summary of recent ``step()`` wall times, or ``{}`` if tracking is off.
 
-        Enabled only when ``AWBW_TRACK_PER_WORKER_TIMES=1`` at env construction
-        (SubprocVecEnv workers inherit env at spawn).
+        See :func:`effective_track_per_worker_times` (explicit ``=1``/``=0`` or
+        defaults when ``AWBW_FPS_DIAG`` / ``AWBW_MACHINE_ID`` is set). Subproc
+        workers inherit env at spawn.
         """
         if self._step_times is None:
             return {}
@@ -711,6 +780,81 @@ class AWBWEnv(gym.Env):
         if map_id not in self._map_cache:
             self._map_cache[map_id] = load_map(map_id, POOL_PATH, MAPS_DIR)
         return self._map_cache[map_id]
+        
+    # --- Memory Management Methods ---
+    def _init_pinned_memory(self) -> None:
+        """Create pinned memory buffers for GPU transfers."""
+        # Create pinned buffers for observation tensors
+        self._pinned_buffers = {
+            "spatial": self._allocate_pinned_buffer((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), np.float32),
+            "scalars": self._allocate_pinned_buffer((N_SCALARS,), np.float32),
+            "action_mask": self._allocate_pinned_buffer((ACTION_SPACE_SIZE,), np.bool_)
+        }
+        
+        # Initialize reusable tensors with pinned buffers
+        self._reusable_tensors = {
+            "spatial": self._pinned_buffers["spatial"],
+            "scalars": self._pinned_buffers["scalars"],
+            "action_mask": self._pinned_buffers["action_mask"]
+        }
+        
+    def _allocate_pinned_buffer(self, shape: tuple, dtype: np.dtype) -> np.ndarray:
+        """Allocate a pinned memory buffer for GPU transfers."""
+        # Calculate size in bytes
+        size = int(np.prod(shape)) * np.dtype(dtype).itemsize
+        
+        # Allocate using ctypes to get page-locked memory
+        import ctypes
+        buffer = (ctypes.c_byte * size)()
+        
+        # Create numpy array view of the buffer
+        arr = np.frombuffer(buffer, dtype=dtype).reshape(shape)
+        arr.flags.writeable = True
+        
+        # Track memory allocation
+        if hasattr(self, '_memory_profile'):
+            self._memory_profile["allocations"].append({
+                "shape": shape,
+                "dtype": str(dtype),
+                "size": size,
+                "pinned": True
+            })
+        
+        return arr
+        
+    def _get_buffer(self, shape: tuple, dtype: np.dtype) -> np.ndarray:
+        """Get a buffer from the pool or create a new one."""
+        # Try to find a matching buffer in the pool
+        for buf in self._buffer_pool:
+            if buf.shape == shape and buf.dtype == dtype:
+                self._buffer_pool.remove(buf)
+                return buf
+                
+        # Allocate new buffer if none found
+        return np.zeros(shape, dtype=dtype)
+        
+    def _return_buffer(self, buf: np.ndarray) -> None:
+        """Return a buffer to the pool for reuse."""
+        # Clear the buffer before returning
+        if np.issubdtype(buf.dtype, np.floating):
+            buf.fill(0.0)
+        elif np.issubdtype(buf.dtype, np.integer):
+            buf.fill(0)
+        elif np.issubdtype(buf.dtype, np.bool_):
+            buf.fill(False)
+            
+        # Add to pool if there's space
+        if len(self._buffer_pool) < self.BUFFER_POOL_SIZE:
+            self._buffer_pool.append(buf)
+        
+    def _track_memory_allocation(self, size: int) -> None:
+        """Track memory allocation for profiling."""
+        if hasattr(self, '_memory_profile'):
+            self._memory_profile["allocations"].append({
+                "time": time.time(),
+                "size": size,
+                "stack": traceback.format_stack(limit=5) if 'traceback' in globals() else []
+            })
 
     def _sample_config(self) -> tuple[int, str, int, int, str]:
         """
@@ -719,13 +863,22 @@ class AWBWEnv(gym.Env):
         With ``curriculum_broad_prob > 0``, sometimes delegates to full random
         sampling for mixture training. Fixed ``tier_name`` / ``co_p0`` / ``co_p1``
         implement narrow curriculum when broad sampling is not taken.
+
+        Live / ladder workers (``live_snapshot_path`` set) never use broad: every
+        reset that falls through to curriculum sampling must respect the pinned
+        matchup so we do not replace ladder replays with random GL draws.
         """
+        broad = (
+            0.0
+            if self._live_snapshot_path
+            else float(self.curriculum_broad_prob)
+        )
         return sample_training_matchup(
             self._sample_map_pool,
             co_p0=self.co_p0,
             co_p1=self.co_p1,
             tier_name=self.tier_name,
-            curriculum_broad_prob=self.curriculum_broad_prob,
+            curriculum_broad_prob=broad,
             rng=None,
         )
 
@@ -744,56 +897,120 @@ class AWBWEnv(gym.Env):
         self._scalars_obs_buf.fill(0.0)
         self._action_mask_buf.fill(False)
 
-        if options is not None and options.get("map_id") is not None:
-            map_id = int(options["map_id"])
-            narrow = [m for m in self._sample_map_pool if m.get("map_id") == map_id]
-            if not narrow:
-                raise ValueError(
-                    f"map_id {map_id} not found in env map pool (sample_map_pool)"
-                )
-            map_id, tier_name, p0_co, p1_co, map_name = sample_training_matchup(
-                narrow,
-                co_p0=self.co_p0,
-                co_p1=self.co_p1,
-                tier_name=self.tier_name,
-                curriculum_broad_prob=0.0,
-                rng=None,
-            )
-        else:
-            map_id, tier_name, p0_co, p1_co, map_name = self._sample_config()
-        map_data = self._load_map(map_id)
+        from rl.live_snapshot import load_live_snapshot_dict  # local: optional dep in workers
 
-        _mk: dict = dict(starting_funds=0, tier_name=tier_name)
-        if self._max_turns is not None:
-            _mk["max_turns"] = self._max_turns
-        if seed is not None:
-            _mk["luck_seed"] = int(seed)
-        self.state = make_initial_state(map_data, p0_co, p1_co, **_mk)
+        self.state = None
+        from_live: bool = False
+        lpath = self._live_snapshot_path
+        if lpath and Path(lpath).is_file():
+            try:
+                raw = load_live_snapshot_dict(lpath)
+                st = copy.deepcopy(raw["state"])
+                # Subproc live workers set AWBW_LEARNER_SEAT from --live-learner-seats; prefer
+                # that over a stale ``learner_seat`` in the pickle (e.g. export used 0 for all).
+                _envls = (os.environ.get(LEARNER_SEAT_ENV) or "").strip()
+                if _envls in ("0", "1"):
+                    self._learner_seat = int(_envls) & 1
+                elif raw.get("learner_seat") is not None:
+                    self._learner_seat = int(raw["learner_seat"]) & 1
+                else:
+                    try:
+                        self._learner_seat = int(os.environ.get(LEARNER_SEAT_ENV, "0"))
+                    except ValueError:
+                        self._learner_seat = 0
+                if int(st.active_player) != int(self._learner_seat):
+                    if not self._live_fallback_curriculum:
+                        raise RuntimeError(
+                            f"Live snapshot {lpath!s}: active_player={st.active_player} "
+                            f"but learner_seat={self._learner_seat}. Refresh the pickle when it "
+                            "is your turn, or enable live_fallback_curriculum."
+                        )
+                else:
+                    self.state = st
+                    from_live = True
+            except (OSError, ValueError, KeyError) as exc:
+                if not self._live_fallback_curriculum:
+                    raise
+                print(
+                    f"[AWBWEnv] live snapshot load failed ({exc!r}); using curriculum."
+                )
+        if self._live_snapshot_path and not Path(self._live_snapshot_path).is_file():
+            if not self._live_fallback_curriculum:
+                raise FileNotFoundError(
+                    f"Live snapshot path set but file missing: {self._live_snapshot_path}"
+                )
+
+        if self.state is None:
+            if options is not None and options.get("map_id") is not None:
+                map_id = int(options["map_id"])
+                narrow = [m for m in self._sample_map_pool if m.get("map_id") == map_id]
+                if not narrow:
+                    raise ValueError(
+                        f"map_id {map_id} not found in env map pool (sample_map_pool)"
+                    )
+                map_id, tier_name, p0_co, p1_co, map_name = sample_training_matchup(
+                    narrow,
+                    co_p0=self.co_p0,
+                    co_p1=self.co_p1,
+                    tier_name=self.tier_name,
+                    curriculum_broad_prob=0.0,
+                    rng=None,
+                )
+            else:
+                map_id, tier_name, p0_co, p1_co, map_name = self._sample_config()
+            map_data = self._load_map(map_id)
+
+            _mk: dict = dict(starting_funds=0, tier_name=tier_name)
+            if self._max_turns is not None:
+                _mk["max_turns"] = self._max_turns
+            if seed is not None:
+                _mk["luck_seed"] = int(seed)
+            rfm = getattr(map_data, "replay_first_mover", None)
+            if rfm is not None:
+                _mk["replay_first_mover"] = int(rfm)
+            self.state = make_initial_state(map_data, p0_co, p1_co, **_mk)
         self._invalidate_legal_cache()
-        # Who opens (engine seat 0 or 1) per make_initial_state predeploy rule; see engine/game.py.
+        # Who opens (engine seat 0 or 1) per make_initial_state / snapshot.
         self._opening_player = int(self.state.active_player)
 
-        _bal = (os.environ.get(SEAT_BALANCE_ENV, "") or "").strip().lower()
-        if _bal in ("1", "true", "yes", "on"):
-            self._learner_seat = int(self.np_random.integers(0, 2))
+        if from_live and self.state is not None:
+            self._enemy_seat = 1 - self._learner_seat
         else:
-            try:
-                self._learner_seat = int(os.environ.get(LEARNER_SEAT_ENV, "0"))
-            except ValueError:
+            _bal = (os.environ.get(SEAT_BALANCE_ENV, "") or "").strip().lower()
+            if _bal in ("1", "true", "yes", "on"):
+                self._learner_seat = int(self.np_random.integers(0, 2))
+            else:
+                try:
+                    self._learner_seat = int(os.environ.get(LEARNER_SEAT_ENV, "0"))
+                except ValueError:
+                    self._learner_seat = 0
+            if self._learner_seat not in (0, 1):
                 self._learner_seat = 0
-        if self._learner_seat not in (0, 1):
-            self._learner_seat = 0
-        self._enemy_seat = 1 - self._learner_seat
+            self._enemy_seat = 1 - self._learner_seat
 
-        self._episode_info = {
-            "map_id": map_id,
-            "map_name": map_name,
-            "tier": tier_name,
-            "p0_co": p0_co,
-            "p1_co": p1_co,
-            "learner_seat": self._learner_seat,
-            "episode_started_at": time.time(),  # Track episode start time
-        }
+        if from_live and self.state is not None:
+            self._episode_info = {
+                "map_id": int(self.state.map_data.map_id),
+                "map_name": str(self.state.map_data.name),
+                "tier": str(self.state.tier_name),
+                "p0_co": int(self.state.co_states[0].co_id),
+                "p1_co": int(self.state.co_states[1].co_id),
+                "learner_seat": self._learner_seat,
+                "episode_started_at": time.time(),
+                "live": True,
+            }
+            if self._live_games_id is not None:
+                self._episode_info["games_id"] = int(self._live_games_id)
+        else:
+            self._episode_info = {
+                "map_id": map_id,
+                "map_name": map_name,
+                "tier": tier_name,
+                "p0_co": p0_co,
+                "p1_co": p1_co,
+                "learner_seat": self._learner_seat,
+                "episode_started_at": time.time(),  # Track episode start time
+            }
         if self.curriculum_tag:
             self._episode_info["curriculum_tag"] = self.curriculum_tag
 
@@ -838,7 +1055,13 @@ class AWBWEnv(gym.Env):
 
         # If the non-learner opens, autoplay that seat until the learner's clock.
         # Phase 0a.2: count opening autoplay as wall_p1_s (enemy-side wall bucket).
-        if not self.state.done and int(self.state.active_player) != self._learner_seat:
+        # Live snapshots already reflect the site's clock after load_replay; do not
+        # simulate the opponent to "catch up" (would desync from the real game).
+        if (
+            not from_live
+            and not self.state.done
+            and int(self.state.active_player) != self._learner_seat
+        ):
             _t_open = time.perf_counter()
             if self.opponent_policy is not None:
                 self._run_policy_opponent(0.0)
@@ -950,15 +1173,6 @@ class AWBWEnv(gym.Env):
                 reward = self._run_random_opponent(reward)
             _p1_delta = time.perf_counter() - _t_p1
 
-        # Apply Φ-delta AFTER opponent loop so the snapshot brackets the full
-        # P0-action-to-next-P0-decision transition. On terminal we use Φ:=0 so
-        # trajectory shaping telescopes to −Φ(s_0) and terminal ±1.0 is not
-        # double-counted with material/property potential.
-        if self._reward_shaping_mode == "phi":
-            phi_after = 0.0 if self.state.done else self._compute_phi(self.state)
-            reward += phi_after - phi_before
-
-        obs = self._get_obs(observer=self._learner_seat)
         terminated = bool(self.state.done)
         p1_cap_trunc = bool(self._p1_truncated_mid_turn)
         self._p1_truncated_mid_turn = False
@@ -974,6 +1188,24 @@ class AWBWEnv(gym.Env):
                 truncation_reason = "max_env_steps"
             elif p1_cap_trunc:
                 truncation_reason = "max_p1_microsteps"
+
+        # Apply Φ-delta AFTER opponent loop so the snapshot brackets the full
+        # P0-action-to-next-P0-decision transition. Engine terminals and forced
+        # truncations both use Φ:=0; otherwise a max-step slog can bank material /
+        # property potential without actually converting the game.
+        if self._reward_shaping_mode == "phi":
+            phi_after = 0.0 if (terminated or truncated) else self._compute_phi(self.state)
+            reward += phi_after - phi_before
+
+        if truncated and not terminated:
+            raw_tp = os.environ.get(TRUNCATION_PENALTY_ENV, "0").strip()
+            if raw_tp:
+                try:
+                    reward -= float(raw_tp)
+                except ValueError:
+                    pass
+
+        obs = self._get_obs(observer=self._learner_seat)
         info = {
             **self._episode_info,
             "turn": self.state.turn,
@@ -1092,32 +1324,39 @@ class AWBWEnv(gym.Env):
         """Render observation from ``observer``'s perspective, honouring the
         HP belief overlay so enemy units leak only bucket + formula-narrowed
         interval information — never exact HP.
-
+        
         When ``observer`` is omitted, use the current learner seat (after ``reset``).
         """
         if observer is None:
             observer = int(getattr(self, "_learner_seat", 0))
         belief = self._beliefs.get(observer) if hasattr(self, "_beliefs") else None
-        if self._use_preallocated_buffers:
-            encode_state(
-                self.state,
-                observer=observer,
-                belief=belief,
-                out_spatial=self._spatial_obs_buf,
-                out_scalars=self._scalars_obs_buf,
-            )
-            return {
-                "spatial": self._spatial_obs_buf,
-                "scalars": self._scalars_obs_buf,
-            }
-        spatial, scalars = encode_state(
+        
+        # Use reusable tensors from buffer pool to avoid allocations
+        spatial_buf = self._get_buffer((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), np.float32)
+        scalars_buf = self._get_buffer((N_SCALARS,), np.float32)
+        
+        # Encode state into reusable buffers
+        encode_state(
             self.state,
             observer=observer,
             belief=belief,
-            out_spatial=None,
-            out_scalars=None,
+            out_spatial=spatial_buf,
+            out_scalars=scalars_buf,
         )
-        return {"spatial": spatial, "scalars": scalars}
+
+        # Track memory usage
+        self._track_memory_allocation(spatial_buf.nbytes + scalars_buf.nbytes)
+
+        raw_copy = (os.environ.get(VECENV_OBS_COPY_ENV) or "1").strip().lower()
+        if raw_copy not in ("0", "false", "no", "off"):
+            return {
+                "spatial": np.array(spatial_buf, copy=True, order="C"),
+                "scalars": np.array(scalars_buf, copy=True, order="C"),
+            }
+        return {
+            "spatial": spatial_buf,
+            "scalars": scalars_buf,
+        }
 
     # -- Belief bookkeeping ----------------------------------------------------
     def _belief_early_exit_enabled(self) -> bool:

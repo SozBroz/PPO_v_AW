@@ -15,12 +15,13 @@ import collections
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Optional
+import numpy as np
 
 if TYPE_CHECKING:
     from engine.game import GameState
 
 from engine.unit import UnitType, UNIT_STATS, Unit
-from engine.terrain import get_terrain, get_move_cost, INF_PASSABLE
+from engine.terrain import get_terrain, INF_PASSABLE
 from engine.weather import effective_move_cost
 
 import os as _os
@@ -30,6 +31,9 @@ import os as _os
 # exist in range. Default OFF — replays call step() directly and never hit
 # get_legal_actions, so they are unaffected.
 _CAPTURE_MOVE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
+
+import engine._action_cython as _action_cython
+from engine._occupancy_cython import build_occupancy as _cy_build_occupancy
 
 
 # ---------------------------------------------------------------------------
@@ -193,17 +197,23 @@ def units_can_join(mover: Unit, occupant: Unit) -> bool:
 # ---------------------------------------------------------------------------
 
 def _build_occupancy(state: GameState) -> dict[tuple[int, int], Unit]:
-    """Build per-call (row, col) -> Unit lookup over alive units in both players.
-
-    Phase 2c (extended Phase 2d): replaces O(N) state.get_unit_at scans with
-    O(1) dict lookups. Caller must guarantee state.units is not mutated for
-    the lifetime of the dict (true throughout get_legal_actions and helpers).
-    """
-    occ: dict[tuple[int, int], Unit] = {}
-    for player_units in state.units.values():
+    """Build per-call (row, col) -> Unit lookup over alive units in both players."""
+    unit_positions: list[list[int]] = []
+    for player, player_units in state.units.items():
         for u in player_units:
             if u.is_alive:
-                occ[u.pos] = u
+                unit_positions.append([player, u.pos[0], u.pos[1]])
+    if not unit_positions:
+        return {}
+    np_unit_positions = np.array(unit_positions, dtype=np.int32)
+    num_players = len(state.units)
+    occ_dict = _cy_build_occupancy(np_unit_positions, num_players)
+    occ: dict[tuple[int, int], Unit] = {}
+    for (r, c), player_id in occ_dict.items():
+        for u in state.units[player_id]:
+            if u.is_alive and u.pos == (r, c):
+                occ[(r, c)] = u
+                break
     return occ
 
 
@@ -211,31 +221,12 @@ def _build_occupancy(state: GameState) -> dict[tuple[int, int], Unit]:
 # Movement reachability (Dijkstra/BFS with fuel as cost)
 # ---------------------------------------------------------------------------
 
-def compute_reachable_costs(
-    state: GameState,
-    unit: Unit,
-    *,
-    occupancy: dict[tuple[int, int], Unit] | None = None,
-) -> dict[tuple[int, int], int]:
-    """
-    Return a mapping of legal end-tile positions to the minimum movement-point
-    cost the unit pays to reach them. Movement cost equals the sum of terrain
-    move-points along the cheapest path; this same value is consumed from
-    ``unit.fuel`` when the engine commits the move (see ``_move_unit``).
 
-    Rules:
-    - Cap on movement: ``min(stats.move_range + CO bonuses, unit.fuel)``. A unit
-      with zero fuel can only stay put.
-    - Cannot pass through enemy-occupied tiles.
-    - Cannot end on a friendly unit unless loading into a transport with room,
-      or joining (same type) onto an injured ally.
-    """
-    if occupancy is None:
-        occupancy = _build_occupancy(state)
-
-    stats      = UNIT_STATS[unit.unit_type]
+def _effective_move_range_cap(state: GameState, unit: Unit) -> int:
+    """Max movement points this unit may spend this turn (CO bonuses, fuel-capped)."""
+    stats = UNIT_STATS[unit.unit_type]
     move_range = stats.move_range
-    co         = state.co_states[unit.player]
+    co = state.co_states[unit.player]
 
     # Adder: +1 move (COP +1, SCOP +2 on top of DTD +1)
     if co.co_id == 11:
@@ -281,64 +272,78 @@ def compute_reachable_costs(
     if co.co_id == 21 and co.cop_active:
         move_range += 1
 
-    # Fuel hard-caps movement: a unit cannot spend more MP than it has fuel.
-    move_range = min(move_range, unit.fuel)
+    return min(move_range, unit.fuel)
 
-    start   = unit.pos
-    visited: dict[tuple[int, int], int] = {start: 0}
-    queue: collections.deque[tuple[tuple[int, int], int]] = collections.deque([(start, 0)])
 
-    # Phase 2b: per-call effective_move_cost memoization. unit and state are fixed
-    # for this BFS; the same tid is hit many times during neighbor expansion.
-    # Cache lives only inside this function call's stack frame -> no cross-call
-    # invalidation risk (weather/CO changes invalidate by re-entering this fn).
-    # Phase 2e: lookup inlined into the BFS loop body to remove ~200 closure
-    # invocations per BFS call (1M+ over a single-proc 5000-step microbench);
-    # behavior is byte-identical to the prior _cached_cost helper.
-    _cost_cache: dict[int, int] = {}
-
-    while queue:
-        (r, c), fuel_used = queue.popleft()
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < state.map_data.height and 0 <= nc < state.map_data.width):
-                continue
-            tid  = state.map_data.terrain[nr][nc]
-            cost = _cost_cache.get(tid)
-            if cost is None:
-                cost = effective_move_cost(state, unit, tid)
-                _cost_cache[tid] = cost
-            if cost >= INF_PASSABLE:
-                continue
-            new_fuel = fuel_used + cost
-            if new_fuel > move_range:
-                continue
-
-            # Cannot pass through enemy units
-            occupant = occupancy.get((nr, nc))
-            if occupant is not None and occupant.player != unit.player:
-                continue
-
-            if (nr, nc) not in visited or visited[(nr, nc)] > new_fuel:
-                visited[(nr, nc)] = new_fuel
-                queue.append(((nr, nc), new_fuel))
-
-    # Filter to tiles where the unit can legally stop, preserving the cost.
+def _filter_legal_stop_tiles(
+    unit: Unit,
+    occupancy: dict[tuple[int, int], Unit],
+    raw: dict[tuple[int, int], int],
+) -> dict[tuple[int, int], int]:
+    """Drop reachable tiles that are not legal end positions (transport load / join)."""
     result: dict[tuple[int, int], int] = {}
-    for pos, cost in visited.items():
+    for pos, cost in raw.items():
         occupant = occupancy.get(pos)
         if occupant is None or pos == unit.pos:
             result[pos] = cost
         elif occupant.player == unit.player:
-            # Can stop here only to load into this transport
             cap = UNIT_STATS[occupant.unit_type].carry_capacity
             if cap > 0 and unit.unit_type in get_loadable_into(occupant.unit_type):
                 if len(occupant.loaded_units) < cap:
                     result[pos] = cost
             elif units_can_join(unit, occupant):
                 result[pos] = cost
-
     return result
+
+
+def compute_reachable_costs(
+    state: GameState,
+    unit: Unit,
+    *,
+    occupancy: dict[tuple[int, int], Unit] | None = None,
+) -> dict[tuple[int, int], int]:
+    """
+    Return a mapping of legal end-tile positions to the minimum movement-point
+    cost the unit pays to reach them. Movement cost equals the sum of terrain
+    move-points along the cheapest path; this same value is consumed from
+    ``unit.fuel`` when the engine commits the move (see ``_move_unit``).
+
+    Rules:
+    - Cap on movement: ``min(stats.move_range + CO bonuses, unit.fuel)``. A unit
+      with zero fuel can only stay put.
+    - Cannot pass through enemy-occupied tiles.
+    - Cannot end on a friendly unit unless loading into a transport with room,
+      or joining (same type) onto an injured ally.
+    """
+    move_range = _effective_move_range_cap(state, unit)
+    terrain = np.asarray(state.map_data.terrain, dtype=np.int32)
+
+    occ_grid = np.zeros((state.map_data.height, state.map_data.width), dtype=np.int8)
+    if occupancy is None:
+        occupancy = _build_occupancy(state)
+    for (r, c), unit_obj in occupancy.items():
+        if unit_obj.player == 0:
+            occ_grid[r, c] = 1
+        elif unit_obj.player == 1:
+            occ_grid[r, c] = 2
+
+    h, w = state.map_data.height, state.map_data.width
+    move_costs = np.empty((h, w), dtype=np.int32)
+    for r in range(h):
+        for c in range(w):
+            move_costs[r, c] = effective_move_cost(state, unit, int(terrain[r, c]))
+
+    raw = _action_cython.compute_reachable_costs_bfs(
+        terrain,
+        occ_grid,
+        move_costs,
+        move_range,
+        unit.fuel,
+        unit.player,
+        unit.pos[0],
+        unit.pos[1],
+    )
+    return _filter_legal_stop_tiles(unit, occupancy, raw)
 
 
 def reconstruct_shortest_move_path(
@@ -361,39 +366,7 @@ def reconstruct_shortest_move_path(
     if occupancy is None:
         occupancy = _build_occupancy(state)
 
-    stats = UNIT_STATS[unit.unit_type]
-    move_range = stats.move_range
-    co = state.co_states[unit.player]
-
-    if co.co_id == 11:
-        move_range += 1
-        if co.cop_active:
-            move_range += 1
-        if co.scop_active:
-            move_range += 2
-
-    if co.co_id == 8:
-        if stats.unit_class == "infantry":
-            if co.scop_active:
-                move_range += 2
-            elif co.cop_active:
-                move_range += 1
-
-    if co.co_id == 20 and co.scop_active:
-        if stats.unit_class in ("infantry", "mech", "vehicle", "pipe"):
-            move_range += 3
-
-    if co.co_id == 14 and (co.cop_active or co.scop_active):
-        if stats.unit_class == "vehicle":
-            move_range += 2
-
-    if co.co_id == 1 and co.scop_active:
-        move_range += 1
-
-    if co.co_id == 21 and co.cop_active:
-        move_range += 1
-
-    move_range = min(move_range, unit.fuel)
+    move_range = _effective_move_range_cap(state, unit)
 
     start = unit.pos
     if start == destination:

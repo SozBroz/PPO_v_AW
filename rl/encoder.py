@@ -50,6 +50,7 @@ policy weights without a stem transplant. See ``docs/hp_belief.md``.
 """
 from __future__ import annotations
 
+import os
 import numpy as np
 
 from engine.belief import BeliefState
@@ -58,6 +59,13 @@ from engine.map_loader import MapData
 from engine.terrain import get_terrain
 from engine.threat import compute_influence_planes
 from engine.unit import UnitType
+
+# Flag to enable/disable Cython optimizations
+USE_CYTHON = True
+try:
+    from . import _encoder_cython
+except ImportError:
+    USE_CYTHON = False
 
 GRID_SIZE = 30
 N_UNIT_CHANNELS = 28       # 14 unit types × 2 players
@@ -218,12 +226,33 @@ def _refresh_map_static_caches_if_needed(md: MapData, *, force: bool = False) ->
         (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS), dtype=np.float32
     )
     defense_block = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
-    for r in range(H_md):
-        for c in range(W_md):
-            tid = int(tids_live[r, c])
-            cat = _get_terrain_category(tid)
-            terrain_block[r, c, cat] = 1.0
-            defense_block[r, c] = _defense_norm_for_tid(tid)
+
+    cython_terrain_filled = False
+    try:
+        from ._encoder_cython import fill_terrain_channels
+
+        fill_terrain_channels(
+            terrain_block,
+            tids_live,
+            _TERRAIN_CATEGORY_TABLE,
+            _DEFENSE_NORM_TABLE,
+        )
+        cython_terrain_filled = True
+    except ImportError:
+        for r in range(H_md):
+            for c in range(W_md):
+                tid = int(tids_live[r, c])
+                cat = _get_terrain_category(tid)
+                terrain_block[r, c, cat] = 1.0
+                defense_block[r, c] = _defense_norm_for_tid(tid)
+
+    # Cython one-hot only touches terrain_block; keep defense in lockstep with Python.
+    if cython_terrain_filled:
+        for r in range(H_md):
+            for c in range(W_md):
+                tid = int(tids_live[r, c])
+                defense_block[r, c] = _defense_norm_for_tid(tid)
+    
     try:
         md._encoded_terrain_channels = terrain_block
         md._encoded_defense_stars = defense_block
@@ -248,6 +277,16 @@ def _get_terrain_category(terrain_id: int) -> int:
     if cached is not None:
         return cached
     return _compute_terrain_category_uncached(terrain_id)
+
+
+# Cython bridge setup
+CYTHON_AVAILABLE = False
+try:
+    from rl import _encoder_cython
+    CYTHON_AVAILABLE = True
+except ImportError:
+    # Fallback to pure Python implementation
+    pass
 
 
 def encode_state(
@@ -282,6 +321,16 @@ def encode_state(
     """
     H = min(state.map_data.height, GRID_SIZE)
     W = min(state.map_data.width, GRID_SIZE)
+    
+    # Feature flag for Cython
+    USE_CYTHON = os.environ.get("AWBW_USE_CYTHON_ENCODER", "1") == "1" and CYTHON_AVAILABLE
+    
+    # Memory-efficient channel encoding
+    # Use float16 for spatial data to reduce memory footprint
+    spatial_dtype = np.float16 if os.environ.get("AWBW_USE_FLOAT16", "0") == "1" else np.float32
+    
+    # Use more compact representation for unit channels
+    UNIT_CHANNEL_COMPRESSION = int(os.environ.get("AWBW_UNIT_CHANNEL_COMPRESSION", "1"))
 
     if out_spatial is not None:
         spatial = out_spatial
@@ -318,74 +367,152 @@ def encode_state(
     cap_ch0 = N_UNIT_CHANNELS + N_HP_CHANNELS + N_TERRAIN_CHANNELS + N_PROPERTY_CHANNELS
     cap_ch1 = cap_ch0 + 1
     neutral_inc_ch = cap_ch1 + 1
-    for prop in state.properties:
-        r, c = prop.row, prop.col
-        if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
-            continue
-
-        if prop.is_hq or prop.is_lab:
-            ptype = _PROP_TYPE_HQ_LAB
-        elif prop.is_base:
-            ptype = _PROP_TYPE_BASE
-        elif prop.is_airport:
-            ptype = _PROP_TYPE_AIRPORT
-        elif prop.is_port:
-            ptype = _PROP_TYPE_PORT
-        else:
-            ptype = _PROP_TYPE_CITY
-
-        if prop.owner is None:
-            ownership = 0
-        elif prop.owner == observer:
-            ownership = 1  # me
-        else:
-            ownership = 2  # enemy
-
-        spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
-
-        if prop.owner is None and not prop.is_comm_tower and not prop.is_lab:
-            spatial[r, c, neutral_inc_ch] = 1.0
-
-        if prop.capture_points < 20:
-            occ = state.get_unit_at(r, c)
-            if occ is not None:
-                prog = (20 - prop.capture_points) / 20.0
-                if occ.player == observer:
-                    spatial[r, c, cap_ch0] = max(spatial[r, c, cap_ch0], prog)
-                elif occ.player != observer:
-                    spatial[r, c, cap_ch1] = max(spatial[r, c, cap_ch1], prog)
-
-    # ── Unit presence + HP belief channels (me then enemy) ──────────────────
-    for idx, player in enumerate((observer, 1 - observer)):
-        player_ch_offset = _N_UNIT_TYPES * idx  # 0 = me, 14 = enemy
-        for unit in state.units[player]:
-            r, c = unit.pos
+    
+    # Use Cython for property encoding if available
+    if USE_CYTHON:
+        from rl import _encoder_cython
+        _encoder_cython.encode_properties(
+            spatial,
+            state,
+            state.properties,
+            observer,
+            prop_ch_offset,
+            cap_ch0,
+            cap_ch1,
+            neutral_inc_ch,
+        )
+    else:
+        for prop in state.properties:
+            r, c = prop.row, prop.col
             if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
                 continue
-            ch = UNIT_TO_CHANNEL[unit.unit_type] + player_ch_offset
-            spatial[r, c, ch] = 1.0
 
-            # HP belief interval (own units collapse to exact).
-            if unit.player == observer or belief is None:
-                hp_norm = unit.hp / 100.0
-                hp_lo = hp_hi = hp_norm
+            if prop.is_hq or prop.is_lab:
+                ptype = _PROP_TYPE_HQ_LAB
+            elif prop.is_base:
+                ptype = _PROP_TYPE_BASE
+            elif prop.is_airport:
+                ptype = _PROP_TYPE_AIRPORT
+            elif prop.is_port:
+                ptype = _PROP_TYPE_PORT
             else:
-                b = belief.get(unit.unit_id)
-                if b is None:
-                    # Enemy unit with no belief entry — fall back to the full
-                    # visible bucket (happens for units spawned by CO powers
-                    # that bypass the built event; defensive).
-                    bucket = (unit.hp + 9) // 10
-                    hp_lo = max(0, bucket * 10 - 9) / 100.0
-                    hp_hi = max(0, bucket * 10) / 100.0
+                ptype = _PROP_TYPE_CITY
+
+            if prop.owner is None:
+                ownership = 0
+            elif prop.owner == observer:
+                ownership = 1  # me
+            else:
+                ownership = 2  # enemy
+
+            spatial[r, c, prop_ch_offset + ptype * 3 + ownership] = 1.0
+
+            if prop.owner is None and not prop.is_comm_tower and not prop.is_lab:
+                spatial[r, c, neutral_inc_ch] = 1.0
+
+            if prop.capture_points < 20:
+                occ = state.get_unit_at(r, c)
+                if occ is not None:
+                    prog = (20 - prop.capture_points) / 20.0
+                    if occ.player == observer:
+                        spatial[r, c, cap_ch0] = max(spatial[r, c, cap_ch0], prog)
+                    elif occ.player != observer:
+                        spatial[r, c, cap_ch1] = max(spatial[r, c, cap_ch1], prog)
+
+    # ── Unit presence + HP belief channels (me then enemy) ──────────────────
+    hp_lo_ch = N_UNIT_CHANNELS
+    hp_hi_ch = N_UNIT_CHANNELS + 1
+    
+    # Use Cython for unit encoding if available
+    if USE_CYTHON:
+        from . import _encoder_cython
+        # BeliefState stores UnitBelief in _beliefs; expose as id -> belief for Cython.
+        belief_dict = (
+            {b.unit_id: b for b in belief.all()} if belief is not None else {}
+        )
+        
+        # Encode observer units
+        _encoder_cython.encode_units(
+            spatial,
+            state.units[observer],
+            observer,
+            belief_dict,
+            hp_lo_ch,
+            hp_hi_ch,
+            _N_UNIT_TYPES,
+            0,
+        )
+        # Encode enemy units
+        _encoder_cython.encode_units(
+            spatial,
+            state.units[1 - observer],
+            observer,
+            belief_dict,
+            hp_lo_ch,
+            hp_hi_ch,
+            _N_UNIT_TYPES,
+            _N_UNIT_TYPES,
+        )
+    else:
+        for idx, player in enumerate((observer, 1 - observer)):
+            player_ch_offset = _N_UNIT_TYPES * idx  # 0 = me, 14 = enemy
+            for unit in state.units[player]:
+                r, c = unit.pos
+                if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
+                    continue
+                ch = UNIT_TO_CHANNEL[unit.unit_type] + player_ch_offset
+                spatial[r, c, ch] = 1.0
+
+                # HP belief interval (own units collapse to exact).
+                if unit.player == observer or belief is None:
+                    hp_norm = unit.hp / 100.0
+                    hp_lo = hp_hi = hp_norm
                 else:
-                    hp_lo = b.hp_min / 100.0
-                    hp_hi = b.hp_max / 100.0
-            # Latest unit written wins on stacked tiles — acceptable for
-            # non-transport boards; transports stack own+loaded which is a
-            # known rendering ambiguity, unchanged from the pre-belief layout.
-            spatial[r, c, hp_lo_ch] = hp_lo
-            spatial[r, c, hp_hi_ch] = hp_hi
+                    b = belief.get(unit.unit_id)
+                    if b is None:
+                        # Enemy unit with no belief entry — fall back to the full
+                        # visible bucket (happens for units spawned by CO powers
+                        # that bypass the built event; defensive).
+                        bucket = (unit.hp + 9) // 10
+                        hp_lo = max(0, bucket * 10 - 9) / 100.0
+                        hp_hi = max(0, bucket * 10) / 100.0
+                    else:
+                        hp_lo = b.hp_min / 100.0
+                        hp_hi = b.hp_max / 100.0
+                # Latest unit written wins on stacked tiles — acceptable for
+                # non-transport boards; transports stack own+loaded which is a
+                # known rendering ambiguity, unchanged from the pre-belief layout.
+                spatial[r, c, hp_lo_ch] = hp_lo
+                spatial[r, c, hp_hi_ch] = hp_hi
+                
+    # ── Terrain cache building optimization ─────────────────────────────────
+    if USE_CYTHON and terrain_block is None:
+        from rl import _encoder_cython
+        H_md = min(md.height, GRID_SIZE)
+        W_md = min(md.width, GRID_SIZE)
+        tids_live = np.empty((H_md, W_md), dtype=np.int32)
+        for r in range(H_md):
+            tids_live[r, :] = md.terrain[r][:W_md]
+        
+        terrain_block = np.zeros(
+            (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS), dtype=np.float32
+        )
+        defense_block = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        
+        _encoder_cython.build_terrain_cache(
+            tids_live,
+            terrain_block,
+            defense_block,
+            H_md,
+            W_md
+        )
+        
+        try:
+            md._encoded_terrain_channels = terrain_block
+            md._encoded_defense_stars = defense_block
+            md._encoded_terrain_tid_snapshot = tids_live.copy()
+        except (AttributeError, TypeError):
+            pass
 
     # ── Influence planes (63..68) ────────────────────────────────────────────
     infl_base = N_INFLUENCE_CHANNEL_BASE

@@ -26,7 +26,10 @@ class TestPredeployedMap133665(unittest.TestCase):
 
     def test_make_initial_state_spawns_units(self) -> None:
         md = load_map(133665, POOL, MAPS_DIR)
-        st = make_initial_state(md, 1, 7, starting_funds=0, tier_name="T2")
+        mks: dict = {"starting_funds": 0, "tier_name": "T2"}
+        if md.replay_first_mover is not None:
+            mks["replay_first_mover"] = int(md.replay_first_mover)
+        st = make_initial_state(md, 1, 7, **mks)
         n = len(st.units[0]) + len(st.units[1])
         self.assertEqual(n, len(md.predeployed_specs))
         self.assertGreater(len(st.units[0]), 0)
@@ -37,7 +40,10 @@ class TestUnitWipeCombatOnly(unittest.TestCase):
     def test_global_check_does_not_army_wipe(self) -> None:
         """Empty vs non-empty alone must not end the game (build / economy)."""
         md = load_map(133665, POOL, MAPS_DIR)
-        st = make_initial_state(md, 1, 7, starting_funds=0, tier_name="T2")
+        mks2: dict = {"starting_funds": 0, "tier_name": "T2"}
+        if md.replay_first_mover is not None:
+            mks2["replay_first_mover"] = int(md.replay_first_mover)
+        st = make_initial_state(md, 1, 7, **mks2)
         st.units = {
             0: st.units[0],
             1: [],
@@ -50,7 +56,10 @@ class TestUnitWipeCombatOnly(unittest.TestCase):
 
     def test_wipe_after_attack_eliminates_last_unit(self) -> None:
         md = load_map(133665, POOL, MAPS_DIR)
-        st = make_initial_state(md, 1, 7, starting_funds=0, tier_name="T2")
+        mks3: dict = {"starting_funds": 0, "tier_name": "T2"}
+        if md.replay_first_mover is not None:
+            mks3["replay_first_mover"] = int(md.replay_first_mover)
+        st = make_initial_state(md, 1, 7, **mks3)
         # Two infantries adjacent orthogonally: P0 at (0,2), move to (1,2) and hit P1 at (1,3)?
         # Simpler: place both on same row adjacent
         inf = UNIT_STATS[UnitType.INFANTRY]

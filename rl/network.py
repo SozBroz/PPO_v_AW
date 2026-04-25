@@ -69,15 +69,20 @@ class AWBWFeaturesExtractor(BaseFeaturesExtractor):
     def forward(self, observations: dict) -> torch.Tensor:
         spatial = observations["spatial"]
         scalars = observations["scalars"]
-        x = spatial.permute(0, 3, 1, 2).contiguous()
-        x = self.stem(x)
-        for blk in self.trunk_blocks:
-            x = blk(x)
-        b = scalars.shape[0]
-        sp = self.scalar_to_plane(scalars).view(b, SCALAR_PLANES, 1, 1)
-        sp = sp.expand(-1, -1, GRID_SIZE, GRID_SIZE)
-        xf = torch.cat([x, sp], dim=1)
-        g = torch.nn.functional.adaptive_avg_pool2d(xf, (1, 1)).flatten(1)
+        # Tier 1b: mixed precision for 30-50% speedup on conv layers
+        # Only wrap the CNN trunk - keep final FC in float32 to avoid dtype mismatch
+        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=(spatial.device.type == "cuda")):
+            x = spatial.permute(0, 3, 1, 2).contiguous()
+            x = self.stem(x)
+            for blk in self.trunk_blocks:
+                x = blk(x)
+            b = scalars.shape[0]
+            sp = self.scalar_to_plane(scalars).view(b, SCALAR_PLANES, 1, 1)
+            sp = sp.expand(-1, -1, GRID_SIZE, GRID_SIZE)
+            xf = torch.cat([x, sp], dim=1)
+            g = torch.nn.functional.adaptive_avg_pool2d(xf, (1, 1)).flatten(1)
+        # FC layer expects float32 input (matching policy/value head expectations)
+        g = g.float()
         return self.fc(g)
 
     def _init_weights(self) -> None:
@@ -238,17 +243,23 @@ class AWBWNet(nn.Module):
 
 
 class _ResBlock128(nn.Module):
-    """Residual block 128→128, 3×3, BN + ReLU."""
+    """Residual block 128→128 with depthwise separable convolutions and GroupNorm."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(128, 128, 3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(128)
-        self.conv2 = nn.Conv2d(128, 128, 3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(128)
+        # Depthwise convolution
+        self.depthwise1 = nn.Conv2d(128, 128, 3, padding=1, groups=128, bias=False)
+        # Pointwise convolution
+        self.pointwise1 = nn.Conv2d(128, 128, 1, bias=False)
+        self.gn1 = nn.GroupNorm(8, 128)
+        
+        self.depthwise2 = nn.Conv2d(128, 128, 3, padding=1, groups=128, bias=False)
+        self.pointwise2 = nn.Conv2d(128, 128, 1, bias=False)
+        self.gn2 = nn.GroupNorm(8, 128)
+        
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.act(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.act(self.gn1(self.pointwise1(self.depthwise1(x))))
+        out = self.gn2(self.pointwise2(self.depthwise2(out)))
         return self.act(out + x)

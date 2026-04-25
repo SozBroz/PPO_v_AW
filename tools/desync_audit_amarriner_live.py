@@ -657,6 +657,77 @@ def _audit_live_game(
     return base
 
 
+def build_live_engine_state(
+    session: requests.Session,
+    meta: dict[str, Any],
+    *,
+    map_pool: Path,
+    maps_dir: Path,
+    sleep_s: float = 0.35,
+) -> tuple[GameState, dict[int, int]]:
+    """
+    Rebuild a :class:`~engine.game.GameState` for an **in-progress** Amarriner game
+    by walking the same live ``load_replay.php`` stream as the desync audit (no
+    finished-game zip). Requires ``meta`` with ``games_id``, ``map_id``,
+    ``co_p0_id``, ``co_p1_id`` (e.g. from GL catalog) and optional ``tier``.
+
+    Returns the final state after all envelopes, plus ``awbw_to_engine`` for
+    player-id mapping. Raises the original exception if the oracle path fails
+    (same as a divergent live audit run).
+    """
+    gid = int(meta["games_id"])
+    envelopes, snap0, live_gs0, per_turn_units = _fetch_live_envelopes(
+        session, games_id=gid, sleep_s=sleep_s
+    )
+    return build_live_engine_state_from_fetched(
+        meta,
+        envelopes,
+        snap0,
+        live_gs0,
+        per_turn_units,
+        map_pool=map_pool,
+        maps_dir=maps_dir,
+    )
+
+
+def build_live_engine_state_from_fetched(
+    meta: dict[str, Any],
+    envelopes: list[tuple[int, int, list[dict[str, Any]]]],
+    snap0: dict[str, Any],
+    live_gs0: dict[str, Any],
+    per_turn_units: list[dict[str, Any]],
+    *,
+    map_pool: Path,
+    maps_dir: Path,
+) -> tuple[GameState, dict[int, int]]:
+    """
+    Same as :func:`build_live_engine_state` but uses a **pre-fetched** envelope
+    stream (one ``_fetch_live_envelopes`` call for both JSON export and pkl).
+    """
+    co_p0, co_p1 = pair_catalog_cos_ids(meta)
+    map_id = _meta_int(meta, "map_id")
+    tier = str(meta.get("tier", ""))
+    awbw_to_engine = map_snapshot_player_ids_to_engine(snap0, co_p0, co_p1)
+    map_data = load_map(map_id, map_pool, maps_dir)
+    first_mover = resolve_replay_first_mover(envelopes, snap0, awbw_to_engine)
+    state = make_initial_state(
+        map_data,
+        co_p0,
+        co_p1,
+        starting_funds=0,
+        tier_name=tier or "T2",
+        replay_first_mover=first_mover,
+    )
+    _sync_engine_unit_ids_from_live_gamestate(state, live_gs0)
+    progress = _ReplayProgress()
+    exc = _run_live_replay_instrumented(
+        state, envelopes, awbw_to_engine, progress, per_turn_units
+    )
+    if exc is not None:
+        raise exc
+    return state, awbw_to_engine
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--catalog", type=Path, default=ROOT / "data/amarriner_gl_current_list_p1.json")

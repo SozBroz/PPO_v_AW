@@ -2,11 +2,12 @@
 AWBW DRL Bot — Training entry point.
 
 Usage:
-  python train.py                              # headless, 6 envs, CUDA, unlimited steps
+  python train.py                              # headless, 14 envs, CUDA, unlimited steps
   python train.py --iters 1000000             # stop after 1M timesteps
   python train.py --n-envs 4                  # 4 parallel game workers
   python train.py --device cpu                # force CPU (no GPU)
   python train.py --map-id 133665             # train on one map only
+  python train.py --map-id std               # GL std map pool (random; same as omitting --map-id)
   python train.py --watch-only                # watch a single random game (debug)
   python train.py --watch-only --map-id 133665 --co-p0 7 --co-p1 1
   python train.py --stage1-narrow
@@ -14,15 +15,38 @@ Usage:
   python train.py --n-envs 12 --n-steps 2048 --map-id 123858 --tier T3 --co-p0 1 --co-p1 1
   python train.py --log-replay-frames         # game_log rows include frames for /replay/
   python train.py --machine-id pc-b           # stamp game_log machine_id (fleet parity)
+  python train.py --fps-diag                  # AWBW_FPS_DIAG=1; fps_diag.jsonl (+ async [fps_diag] stdout)
   python train.py --rank                      # compute CO rankings from game log
   python train.py --features                  # compute map features from CSVs
 """
 import argparse
 import os
 import signal
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.resolve()
+
+
+def _parse_map_id_cli(value: str) -> int | None:
+    """
+    ``--map-id`` as a non-negative int, or the literals ``std`` / ``gl-std`` (case-insensitive)
+    meaning the Global League **std** map pool with per-episode random map — same as omitting
+    ``--map-id`` and distinct from a fixed id (e.g. 123858 Misery).
+    """
+    s = (value or "").strip()
+    if s.lower() in ("std", "gl-std"):
+        return None
+    try:
+        n = int(s, 10)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"invalid --map-id {value!r}: use a non-negative map id, or 'std' / 'gl-std' "
+            f"for the GL std map pool"
+        ) from e
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"--map-id must be non-negative, got {n}")
+    return n
 
 
 def _load_dotenv(path: Path) -> None:
@@ -37,6 +61,43 @@ def _load_dotenv(path: Path) -> None:
         key, val = key.strip(), val.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = val
+
+
+def _print_native_implementation_diag() -> None:
+    """
+    One-line report of which Cython extension paths are active in this process.
+    Aligns with ``rl.encoder`` (``CYTHON_AVAILABLE`` + ``AWBW_USE_CYTHON_ENCODER``)
+    and ``engine`` action/occupancy extension modules.
+    """
+    try:
+        from rl import encoder as _encoder_mod
+    except Exception as exc:  # pragma: no cover — training cannot run without encoder
+        print(f"[train] native: encoder=unavailable ({exc!r})")
+        return
+    use_enc = os.environ.get("AWBW_USE_CYTHON_ENCODER", "1") == "1" and getattr(
+        _encoder_mod, "CYTHON_AVAILABLE", False
+    )
+    enc = "cython" if use_enc else "python"
+    try:
+        import engine._action_cython as _action_cython_mod
+        import engine._occupancy_cython as _occ_mod
+    except Exception as exc:  # pragma: no cover
+        print(
+            f"[train] native: encoder={enc}, action=unavailable, occupancy=unavailable ({exc!r})"
+        )
+        return
+
+    def _ext_label(mod) -> str:
+        path = (getattr(mod, "__file__", None) or "").lower()
+        if path.endswith((".pyd", ".so")):
+            return "cython"
+        if path.endswith(".py"):
+            return "python"
+        return "cython" if path else "unknown"
+
+    act = _ext_label(_action_cython_mod)
+    occ = _ext_label(_occ_mod)
+    print(f"[train] native: encoder={enc}, action={act}, occupancy={occ}")
 
 
 def _apply_stage1_narrow_defaults(args: argparse.Namespace) -> None:
@@ -59,6 +120,23 @@ def _apply_stage1_narrow_defaults(args: argparse.Namespace) -> None:
     )
 
 
+def _sync_worker_inherited_env_flags(args: argparse.Namespace) -> None:
+    """
+    Subproc / async actors read ``AWBW_LEARNER_GREEDY_MIX`` and ``AWBW_CAPTURE_MOVE_GATE``
+    from this process environment.  After :func:`rl.train_launch_env.pop_train_cli_owned_keys_from_os_environ`
+    and stripped parent env at spawn, only this function (from parsed CLI) repopulates them.
+    """
+    if float(args.learner_greedy_mix) > 0.0:
+        os.environ["AWBW_LEARNER_GREEDY_MIX"] = str(float(args.learner_greedy_mix))
+    else:
+        os.environ.pop("AWBW_LEARNER_GREEDY_MIX", None)
+
+    if args.capture_move_gate:
+        os.environ["AWBW_CAPTURE_MOVE_GATE"] = "1"
+    else:
+        os.environ.pop("AWBW_CAPTURE_MOVE_GATE", None)
+
+
 def build_train_argument_parser() -> argparse.ArgumentParser:
     """CLI parser for ``train.py`` (also used by ``rl.ai_vs_ai`` to mirror a live run)."""
     parser = argparse.ArgumentParser(description="AWBW DRL Bot")
@@ -67,13 +145,14 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         help="Total training timesteps (default: unlimited)",
     )
     parser.add_argument(
-        "--n-envs", type=int, default=6,
+        "--n-envs", type=int, default=14,
         help=(
-            "Parallel SubprocVecEnv game workers (default: 6). "
-            "More workers raise throughput (steps/s) but cost ~2-3 GB host RAM each "
-            "and keep the step loop synchronous — every step waits for the slowest env. "
-            "Scaling tip: if GPU utilization is low and host RAM has headroom, "
-            "raising n_envs is the most effective throughput lever."
+            "Parallel game workers: SubprocVecEnv (sync) or IMPALA actors (async). "
+            "Default 14 matches a typical high-throughput desktop; each process holds "
+            "env + policy (~2-3 GiB RSS order-of-magnitude). Expect a short-lived RAM "
+            "commit spike at spawn (queue + parallel loads); steady state is usually lower. "
+            "Sync: every step waits for the slowest env. Async: raise page file if Windows "
+            "kills children during the initial wave. Lower with --n-envs if host RAM is tight."
         ),
     )
     parser.add_argument(
@@ -82,7 +161,8 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "PPO rollout length per env before each update (default: 512). "
             "Increasing gives longer on-policy trajectories (can improve credit assignment) "
             "at the cost of more VRAM (rollout buffer grows linearly). "
-            "Scaling tip: safe to raise if n_steps * n_envs still fits in VRAM after --batch-size is tuned."
+            "Scaling tip: safe to raise if n_steps * n_envs still fits in VRAM after --batch-size is tuned. "
+            "With larger NN (MASTERPLAN §12.1c), consider n_steps=1024 to amortize PPO update cost."
         ),
     )
     parser.add_argument(
@@ -107,8 +187,13 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--map-id", type=int, default=None,
-        help="Train/watch on a specific map ID only",
+        "--map-id",
+        type=_parse_map_id_cli,
+        default=None,
+        help=(
+            "Fixed map id (int), or 'std' / 'gl-std' for the GL std map pool (random map per "
+            "episode; same as omitting this flag). Default when omitted: same std-pool behavior."
+        ),
     )
     parser.add_argument(
         "--watch-only", action="store_true",
@@ -248,6 +333,16 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--fps-diag",
+        action="store_true",
+        help=(
+            "Set AWBW_FPS_DIAG=1. Sync: SubprocVecEnv worker step stats + "
+            "rl/self_play diagnostics to logs/fps_diag.jsonl. Async: same file + "
+            "[fps_diag] stdout each learner step (collect vs learner wall split). "
+            "Workers inherit AWBW_FPS_DIAG when AWBW_TRACK_PER_WORKER_TIMES is not forced off."
+        ),
+    )
+    parser.add_argument(
         "--shared-root", type=str, default=None,
         help="Override AWBW_SHARED_ROOT (aux default Z:\\; main must match repo or be unset)",
     )
@@ -275,6 +370,63 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shared-training", action="store_true",
         help="Reserved for MASTERPLAN §10 async weight sync (not implemented)",
+    )
+    parser.add_argument(
+        "--training-backend",
+        type=str,
+        default="sync",
+        choices=("sync", "async"),
+        help=(
+            "sync (default): SubprocVecEnv + MaskablePPO. "
+            "async: IMPALA-style parallel env actors + V-trace learner (decoupled stepping)."
+        ),
+    )
+    parser.add_argument(
+        "--async-unroll-length",
+        type=int,
+        default=None,
+        help=(
+            "async only: env transitions per actor chunk sent to the learner "
+            "(default: same as --n-steps)."
+        ),
+    )
+    parser.add_argument(
+        "--async-learner-batch",
+        type=int,
+        default=None,
+        help=(
+            "async only: transitions per learner update (multiple of unroll). "
+            "Default when omitted: min(--n-steps * --n-envs, "
+            "max(unroll, AWBW_ASYNC_LEARNER_TRANSITIONS_CAP or 2048), "
+            "--n-envs * unroll) snapped to a multiple of unroll (reduces actor queue stalls). "
+            "CUDA also microbatches evaluate_actions (see --async-learner-forward-chunk)."
+        ),
+    )
+    parser.add_argument(
+        "--async-queue-max",
+        type=int,
+        default=64,
+        help="async only: max queued actor chunks (backpressure when the learner falls behind).",
+    )
+    parser.add_argument(
+        "--async-gpu-opponent-permits-subtract",
+        type=int,
+        default=2,
+        help=(
+            "async only, when AWBW_GPU_OPPONENT_POOL is on: reduce concurrent CUDA opponent "
+            "forwards vs hybrid pool size (default 2; floor 1 permit). Frees VRAM for the "
+            "learner on ~12GB GPUs. Use 0 for full pool size."
+        ),
+    )
+    parser.add_argument(
+        "--async-learner-forward-chunk",
+        type=int,
+        default=None,
+        help=(
+            "async only, CUDA: observations per evaluate_actions chunk (default 256 via "
+            "AWBW_ASYNC_LEARNER_FORWARD_CHUNK; lowers peak learner VRAM). "
+            "0 or omitted uses env/default. CPU: ignored (single forward)."
+        ),
     )
     parser.add_argument(
         "--cold-opponent", type=str, default="random",
@@ -321,7 +473,8 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "Probability that the learner action is overridden by the same "
             "capture-greedy heuristic that bootstraps the opponent (DAGGER-lite). "
             "Set in (0, 0.5] for early training, then restart at 0 to decay. "
-            "Sets AWBW_LEARNER_GREEDY_MIX env var; SubprocVecEnv workers inherit."
+            "Sets AWBW_LEARNER_GREEDY_MIX for workers; 0 removes it so parent-shell "
+            "values cannot override curriculum."
         ),
     )
     parser.add_argument(
@@ -414,6 +567,29 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         default=256,
         help="Phase 11c: Cap on actions per simulated turn rollout.",
     )
+    parser.add_argument(
+        "--live-games-id",
+        type=int,
+        action="append",
+        default=None,
+        help=(
+            "In-progress Amarriner game id(s) for live PPO: first N Subproc envs load "
+            ".pkl from --live-snapshot-dir (use tools/amarriner_write_live_snapshot.py). "
+            "Requires --n-envs >= number of ids."
+        ),
+    )
+    parser.add_argument(
+        "--live-learner-seats",
+        type=str,
+        default=None,
+        help="Comma-separated engine seats (0/1) for each --live-games-id; default all 0.",
+    )
+    parser.add_argument(
+        "--live-snapshot-dir",
+        type=Path,
+        default=None,
+        help="Directory containing {games_id}.pkl snapshots (default: .tmp/awbw_live_snapshot).",
+    )
     return parser
 
 
@@ -431,10 +607,24 @@ def _install_sigint_first_only() -> None:
 
 
 def main() -> None:
+    from rl import _win_triton_warnings
+
+    _win_triton_warnings.apply()
+
     _load_dotenv(ROOT / ".env")
+    from rl.train_launch_env import pop_train_cli_owned_keys_from_os_environ
+
+    pop_train_cli_owned_keys_from_os_environ()
+    # Linux: can reduce allocator fragmentation. Windows PyTorch builds often omit this
+    # (warning if set); skip there.
+    if os.name != "nt":
+        os.environ.setdefault(
+            "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+        )
     parser = build_train_argument_parser()
     args = parser.parse_args()
     _apply_stage1_narrow_defaults(args)
+    _print_native_implementation_diag()
 
     # ── Resolve device ────────────────────────────────────────────────────────
     if args.device == "auto":
@@ -470,38 +660,86 @@ def main() -> None:
 
     # ── Training ──────────────────────────────────────────────────────────────
     print(f"[train] Device  : {device}")
+    print(f"[train] Backend : {args.training_backend}")
     print(f"[train] Envs    : {args.n_envs} parallel workers")
+    if args.training_backend == "async":
+        from rl.self_play import _snap_async_learner_batch_to_unroll
+
+        _unroll = int(args.async_unroll_length) if args.async_unroll_length is not None else int(args.n_steps)
+        _unroll = max(4, _unroll)
+        _roll = int(args.n_steps) * int(args.n_envs)
+        if args.async_learner_batch is not None:
+            _lb = int(args.async_learner_batch)
+        else:
+            try:
+                _cap = int((os.environ.get("AWBW_ASYNC_LEARNER_TRANSITIONS_CAP") or "2048").strip())
+            except ValueError:
+                _cap = 2048
+            _cap = max(64, _cap)
+            _one_wave = min(_roll, int(args.n_envs) * _unroll)
+            _lb = min(_roll, max(_unroll, _cap), _one_wave)
+        _lb = _snap_async_learner_batch_to_unroll(_lb, _unroll, _roll)
+        _lb_note = (
+            ""
+            if args.async_learner_batch is not None or _lb >= _roll
+            else ", default VRAM cap"
+        )
+        print(
+            f"[train] Async   : IMPALA actors | unroll={_unroll} | "
+            f"learner_batch~{_lb} (rollout={_roll}{_lb_note}) | queue_max={args.async_queue_max} | "
+            f"gpu_opp_permits_subtract={args.async_gpu_opponent_permits_subtract}"
+        )
     print(
         f"[train] PPO     : n_steps={args.n_steps} batch_size={args.batch_size} "
         f"(rollout {args.n_steps * args.n_envs:,} env steps/update)"
     )
     print(f"[train] Steps   : {args.iters if args.iters is not None else 'unlimited'}")
-    print(f"[train] Map     : {args.map_id or 'all'}")
+    _map_line = "std (GL pool)" if args.map_id is None else str(int(args.map_id))
+    print(f"[train] Map     : {_map_line}")
     if args.tier or args.co_p0 is not None or args.co_p1 is not None:
         print(
             f"[train] Curriculum: tier={args.tier!r} co_p0={args.co_p0} co_p1={args.co_p1} "
             f"broad_prob={args.curriculum_broad_prob} tag={args.curriculum_tag!r}"
         )
+    if args.live_games_id:
+        print(
+            f"[train] Live PPO: games_id={args.live_games_id} "
+            f"seats={args.live_learner_seats!r} dir={args.live_snapshot_dir!r}"
+        )
 
-    if args.learner_greedy_mix and args.learner_greedy_mix > 0.0:
-        os.environ["AWBW_LEARNER_GREEDY_MIX"] = str(float(args.learner_greedy_mix))
-
-    if args.capture_move_gate:
-        os.environ["AWBW_CAPTURE_MOVE_GATE"] = "1"
+    _sync_worker_inherited_env_flags(args)
 
     if args.log_replay_frames:
         os.environ["AWBW_LOG_REPLAY_FRAMES"] = "1"
+
+    if args.fps_diag:
+        os.environ["AWBW_FPS_DIAG"] = "1"
 
     if args.machine_id is not None:
         mid = str(args.machine_id).strip()
         if mid:
             os.environ["AWBW_MACHINE_ID"] = mid
 
+    # Non-interactive: if machine_id is in the environment (e.g. .env) but CLI did not
+    # pass --fps-diag, still stamp fps_diag for throughput visibility in fleet layouts.
+    if (os.environ.get("AWBW_MACHINE_ID") or "").strip() and not (
+        (os.environ.get("AWBW_FPS_DIAG") or "").strip()
+    ):
+        os.environ["AWBW_FPS_DIAG"] = "1"
+
+    # Defaults used by fleet launchers as well; set here for direct ``train.py``
+    # runs before ``rl.self_play`` imports ``rl.env`` / ``engine.game``.
+    os.environ.setdefault("AWBW_REWARD_SHAPING", "phi")
+    os.environ.setdefault("AWBW_TIME_COST", "0.00005")
+    os.environ.setdefault("AWBW_TRUNCATION_PENALTY", "0.25")
+
     _env_flags = [
         ("AWBW_TIME_COST", os.environ.get("AWBW_TIME_COST")),
+        ("AWBW_TRUNCATION_PENALTY", os.environ.get("AWBW_TRUNCATION_PENALTY")),
         ("AWBW_INCOME_TERM_COEF", os.environ.get("AWBW_INCOME_TERM_COEF")),
         ("AWBW_BUILD_MASK_INFANTRY_ONLY", os.environ.get("AWBW_BUILD_MASK_INFANTRY_ONLY")),
         ("AWBW_LOG_REPLAY_FRAMES", os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
+        ("AWBW_FPS_DIAG", os.environ.get("AWBW_FPS_DIAG")),
         ("AWBW_LEARNER_GREEDY_MIX", os.environ.get("AWBW_LEARNER_GREEDY_MIX")),
         ("AWBW_CAPTURE_MOVE_GATE", os.environ.get("AWBW_CAPTURE_MOVE_GATE")),
         ("AWBW_SEAT_BALANCE", os.environ.get("AWBW_SEAT_BALANCE")),
@@ -509,6 +747,7 @@ def main() -> None:
         ("AWBW_PFSP", os.environ.get("AWBW_PFSP")),
         ("AWBW_ASYNC_VEC", os.environ.get("AWBW_ASYNC_VEC")),
         ("AWBW_REWARD_SHAPING", os.environ.get("AWBW_REWARD_SHAPING")),
+        ("AWBW_TRACK_PER_WORKER_TIMES", os.environ.get("AWBW_TRACK_PER_WORKER_TIMES")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
     if _active:
@@ -560,6 +799,13 @@ def main() -> None:
         None if args.max_p1_microsteps <= 0 else int(args.max_p1_microsteps)
     )
 
+    live_games_id = list(args.live_games_id) if args.live_games_id else None
+    live_learner_seats = None
+    if args.live_learner_seats:
+        live_learner_seats = [
+            int(x.strip()) for x in str(args.live_learner_seats).split(",") if x.strip()
+        ]
+
     from rl.self_play import SelfPlayTrainer
     trainer = SelfPlayTrainer(
         total_timesteps=args.iters,
@@ -608,6 +854,15 @@ def main() -> None:
         mcts_max_plan_actions=args.mcts_max_plan_actions,
         max_env_steps=max_env_steps,
         max_p1_microsteps=max_p1_microsteps,
+        live_games_id=live_games_id,
+        live_learner_seats=live_learner_seats,
+        live_snapshot_dir=args.live_snapshot_dir,
+        training_backend=args.training_backend,
+        async_unroll_length=args.async_unroll_length,
+        async_learner_batch=args.async_learner_batch,
+        async_queue_max=args.async_queue_max,
+        async_gpu_opponent_permits_subtract=args.async_gpu_opponent_permits_subtract,
+        async_learner_forward_chunk=args.async_learner_forward_chunk,
     )
     _install_sigint_first_only()
     trainer.train()

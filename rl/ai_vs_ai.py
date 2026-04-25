@@ -10,6 +10,10 @@ Usage
   python -m rl.ai_vs_ai --random                # force random vs random
   python -m rl.ai_vs_ai --no-open               # don't open replay output folder
   python -m rl.ai_vs_ai --no-follow-train       # never read train.py from memory
+  python -m rl.ai_vs_ai --from-latest-export    # newest ``engine_snapshot.pkl`` under
+                                                # replays/amarinner_my_games
+  python -m rl.ai_vs_ai --from-live-games-dir replays/amarinner_my_games
+                                                # one zip per game (+10d cap each)
 
 Unless ``--no-follow-train`` is set, this process scans for a **training**
 ``train.py`` process, parses its CLI, and uses that as the **base** run (same
@@ -20,8 +24,9 @@ comes from the live trainer (checkpoint dir, promoted load, curriculum
 broad prob, capture gate when not overridden, etc.).
 
 After export, the **AWBW Replay Player** desktop app is started with the new
-``.zip`` (see ``AWBW_REPLAY_PLAYER_EXE`` and ``third_party/AWBW-Replay-Player``).
-If the exe is missing, the replay folder is opened in the file manager.
+``.zip`` (see ``rl.paths.REPLAY_PLAYER_EXE_ENV`` and
+``rl.paths.REPLAY_PLAYER_THIRD_PARTY_DIR``). If the exe is missing, the replay
+folder is opened in the file manager.
 
 If no suitable ``train.py`` process is found, falls back to the legacy defaults
 (random Std map, tier T2, checkpoint: ``Z:\\checkpoints\\latest.zip`` when that
@@ -76,15 +81,20 @@ if str(_REPO) not in sys.path:
 
 from engine.action import Action, ActionType, get_legal_actions
 from engine.game import GameState, make_initial_state
-from engine.map_loader import load_map
+from engine.map_loader import MapData, load_map
 from rl.env import _action_to_flat, _flat_to_action, _get_action_mask, sample_training_matchup
 from rl.encoder import encode_state
+from rl.paths import REPLAY_PLAYER_EXE_ENV, REPLAY_PLAYER_THIRD_PARTY_DIR, resolve_awbw_replay_player_exe
 
 _MAP_POOL_PATH = _REPO / "data" / "gl_map_pool.json"
 _MAPS_DIR      = _REPO / "data" / "maps"
 _CKPT_DEFAULT  = _REPO / "checkpoints" / "latest.zip"
 _Z_PREFERRED_CKPT = Path("Z:/checkpoints/latest.zip")
 _REPLAY_OUT    = _REPO / "replays"
+
+# From ``engine_snapshot.pkl`` / live export: extend the calendar day cap by this
+# many in-game days from the snapshot (simple short validation run).
+LIVE_SNAPSHOT_CALENDAR_CAP_DAYS = 10
 
 
 def _default_ckpt_path() -> Path:
@@ -114,12 +124,24 @@ def _argv_for_this_module() -> list[str]:
     Must not pass ``ai_vs_ai.py`` through to :mod:`argparse` (unrecognized argument),
     which previously aborted the run before export — especially with
     ``python -u …/ai_vs_ai.py …`` where the old logic left the script path in *user*.
+
+    ``python -m rl.ai_vs_ai`` does **not** put ``-m`` in ``sys.argv``; CPython sets
+    ``sys.argv[0]`` to this module's path and places all flags in ``argv[1:]``.
+    Without the ``Path(sys.argv[0]) == __file__`` fast-path, the scan below could
+    treat ``--max-turns 2``'s ``2`` as a bogus "script" token and return ``[]``,
+    wiping out every CLI flag (``--max-turns``, ``--random``, …).
     """
     a = sys.argv[1:]
     if not a:
         return []
     if a[0] == "-c":
         return []
+
+    try:
+        if Path(sys.argv[0]).resolve() == Path(__file__).resolve():
+            return a
+    except OSError:
+        pass
 
     for i, arg in enumerate(a):
         if arg == "-m" and i + 1 < len(a):
@@ -366,7 +388,6 @@ def _capture_move_gate_effective(train_ns: Any, user: list[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 _CAPTURE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
-_REPLAY_PLAYER_EXE_ENV = "AWBW_REPLAY_PLAYER_EXE"
 
 
 def _log_capture_move_gate_status() -> None:
@@ -376,61 +397,55 @@ def _log_capture_move_gate_status() -> None:
         _log(f"env: {_CAPTURE_GATE_ENV}={raw!r} (infantry/mech MOVE mask active)")
 
 
-def _resolve_awbw_replay_player_exe(repo: Path) -> Path | None:
-    """
-    Locate the desktop AWBW Replay Player (see ``desync-triage-viewer`` §4a).
-
-    Order: ``AWBW_REPLAY_PLAYER_EXE``, then Release/Debug ``net*`` folders under
-    ``third_party/AWBW-Replay-Player/AWBWApp.Desktop/bin/``.
-    """
-    env = os.environ.get(_REPLAY_PLAYER_EXE_ENV, "").strip()
-    if env:
-        p = Path(env)
-        if p.is_file():
-            return p.resolve()
-    base = repo / "third_party" / "AWBW-Replay-Player" / "AWBWApp.Desktop" / "bin"
-    for cfg in ("Release", "Debug"):
-        for tfm in ("net8.0", "net7.0", "net6.0"):
-            cand = base / cfg / tfm / "AWBW Replay Player.exe"
-            if cand.is_file():
-                return cand.resolve()
-    for cfg in ("Release", "Debug"):
-        d = base / cfg
-        if not d.is_dir():
-            continue
-        for sub in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
-            if sub.is_dir() and sub.name.startswith("net"):
-                exe = sub / "AWBW Replay Player.exe"
-                if exe.is_file():
-                    return exe.resolve()
-    return None
-
-
 def _open_replay_in_desktop_viewer(replay_zip: Path) -> None:
     """
     Start the AWBW Replay Player with the given ``.zip`` (argv: exe + absolute zip).
+
+    On Windows we use ``cmd /c start "" exe zip`` so that:
+
+    * A **new** top-level process is spawned (single-instance / COM apps that
+      ignore a second direct ``CreateProcess`` still get a fresh window).
+    * We do **not** pass ``CREATE_NO_WINDOW`` to the viewer itself — spawning the
+      desktop player with that flag can prevent the WPF window from appearing.
+
+    The ``cmd.exe`` process may use hidden-console flags only to avoid a flash;
+    the Replay Player child is started by ``start`` and is not hidden.
+
     Falls back to opening the containing folder if the exe is missing or spawn fails.
     """
     zp = replay_zip.resolve()
-    exe = _resolve_awbw_replay_player_exe(_REPO)
+    exe = resolve_awbw_replay_player_exe(_REPO)
     if exe is None:
         _log(
-            f"viewer: AWBW Replay Player.exe not found - set {_REPLAY_PLAYER_EXE_ENV} "
-            "or build third_party/AWBW-Replay-Player (see README / desync-triage-viewer §4a)"
+            f"viewer: AWBW Replay Player.exe not found - set {REPLAY_PLAYER_EXE_ENV} "
+            f"or build under {REPLAY_PLAYER_THIRD_PARTY_DIR} (see README / desync-triage-viewer §4a)"
         )
         _open_replay_output_folder(replay_zip)
         return
     try:
-        popen_kw: dict[str, Any] = dict(
-            cwd=str(exe.parent),
-            close_fds=sys.platform != "win32",
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        popen_kw.update(_win32_hidden_subprocess_kwargs())
-        subprocess.Popen([str(exe), str(zp)], **popen_kw)
-        _log(f"viewer: AWBW Replay Player - {exe.name} loaded {zp}")
+        if sys.platform == "win32":
+            popen_kw: dict[str, Any] = dict(
+                cwd=str(exe.parent),
+                close_fds=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            popen_kw.update(_win32_hidden_subprocess_kwargs())
+            subprocess.Popen(
+                ["cmd.exe", "/c", "start", "", str(exe), str(zp)],
+                **popen_kw,
+            )
+        else:
+            subprocess.Popen(
+                [str(exe), str(zp)],
+                cwd=str(exe.parent),
+                close_fds=sys.platform != "win32",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        _log(f"viewer: AWBW Replay Player - {exe.name} loaded {zp} (new process)")
     except OSError as exc:
         _log(f"viewer: could not start {exe}: {exc}")
         _open_replay_output_folder(replay_zip)
@@ -564,8 +579,86 @@ def _sample_co(rng: random.Random, map_id: int, tier: str, player: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Live snapshot (exported games) — discover pkls for batch runs
+# ---------------------------------------------------------------------------
+
+
+def _list_snapshot_pkls_in_dir(root: Path) -> list[tuple[int, Path]]:
+    """(games_id, pkl) for ``<root>/<id>/engine_snapshot.pkl`` and ``<root>/<id>.pkl``."""
+    out: list[tuple[int, Path]] = []
+    root = Path(root)
+    if not root.is_dir():
+        return out
+    seen: set[int] = set()
+    for sub in sorted(root.iterdir(), key=lambda p: p.name):
+        if not sub.is_dir():
+            continue
+        try:
+            gid = int(sub.name)
+        except ValueError:
+            continue
+        nested = sub / "engine_snapshot.pkl"
+        if nested.is_file():
+            out.append((gid, nested))
+            seen.add(gid)
+    for p in sorted(root.iterdir(), key=lambda x: x.name):
+        if p.is_file() and p.suffix == ".pkl" and p.stem.isdigit():
+            gid = int(p.stem)
+            if gid not in seen and p.is_file():
+                out.append((gid, p))
+    return sorted(out, key=lambda t: t[0])
+
+
+def _find_latest_engine_snapshot_pkl(root: Path) -> Path | None:
+    """Newest mtime among ``<root>/**/engine_snapshot.pkl`` and ``<root>/*.pkl`` (numeric stem)."""
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    best: tuple[float, Path] | None = None
+    for p in root.rglob("engine_snapshot.pkl"):
+        if p.is_file():
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if best is None or m > best[0]:
+                best = (m, p)
+    for p in root.glob("*.pkl"):
+        if p.is_file() and p.stem.isdigit():
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if best is None or m > best[0]:
+                best = (m, p)
+    return best[1] if best else None
+
+
+# ---------------------------------------------------------------------------
 # Core game loop
 # ---------------------------------------------------------------------------
+
+def _apply_max_turn_tiebreak(state: GameState) -> None:
+    """Mirror :meth:`GameState._end_turn` property tiebreak when the calendar cap is hit.
+
+    Called when ``state.turn > state.max_turns`` but the engine has not yet
+    marked ``done`` (belt-and-suspenders for ``ai_vs_ai`` day limits).
+    """
+    if state.done:
+        return
+    state.done = True
+    p0_props = state.count_properties(0)
+    p1_props = state.count_properties(1)
+    if p0_props > p1_props:
+        state.winner = 0
+        state.win_reason = "max_turns_tiebreak"
+    elif p1_props > p0_props:
+        state.winner = 1
+        state.win_reason = "max_turns_tiebreak"
+    else:
+        state.winner = -1
+        state.win_reason = "max_turns_draw"
+
 
 def run_game(
     map_id: Optional[int] = None,
@@ -582,10 +675,14 @@ def run_game(
     max_total_actions: int = _DEFAULT_MAX_TOTAL_ACTIONS,
     max_actions_per_active_turn: int = _DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN,
     capture_move_gate: bool = False,
+    live_snapshot_path: Optional[Path] = None,
 ) -> Path:
     """
     Run one AI vs AI game and export an AWBW Replay Player–compatible zip.
     Returns the path to the created .zip file.
+
+    With ``live_snapshot_path`` set, loads that pickle (``write_live_snapshot`` / export
+    layout) and sets ``state.max_turns = current day + 10`` (see ``LIVE_SNAPSHOT_CALENDAR_CAP_DAYS``).
 
     Legal actions honor ``AWBW_CAPTURE_MOVE_GATE`` (see ``engine.action``): set the
     environment variable before running, or pass ``capture_move_gate=True`` (same
@@ -605,32 +702,73 @@ def run_game(
     """
     rng = random.Random(seed)
 
+    if live_snapshot_path is None and max_turns < 1:
+        raise ValueError(
+            "max_turns must be >= 1 (``make_initial_state`` / engine contract). "
+            "For a very short run use e.g. --max-turns 2."
+        )
+
     if capture_move_gate:
         os.environ[_CAPTURE_GATE_ENV] = "1"
     _log_capture_move_gate_status()
 
-    _log(
-        f"session: start  seed={seed!r}  max_turns={max_turns}  "
-        f"force_random={force_random}  map_id={map_id!r}"
-    )
+    state: GameState
+    map_data: MapData
+    snapshot_games_id: int | None = None
 
-    # ---- Map ----
-    if map_id is None:
-        map_id = _sample_map_id(rng)
-        _log(f"map: sampled map_id={map_id}")
-    _log(f"map: loading id={map_id}")
-    map_data = load_map(map_id, _MAP_POOL_PATH, _MAPS_DIR)
-    _log(
-        f"map: {map_data.name}  id={map_id}  size={map_data.height}x{map_data.width}  "
-        f"tiles={map_data.height * map_data.width}"
-    )
+    if live_snapshot_path is not None:
+        from rl.live_snapshot import load_live_snapshot_dict
 
-    # ---- COs ----
-    if co0 is None:
-        co0 = _sample_co(rng, map_id, tier, 0)
-    if co1 is None:
-        co1 = _sample_co(rng, map_id, tier, 1)
-    _log(f"COs: P0={co0}  P1={co1}  tier={tier}")
+        p = Path(live_snapshot_path)
+        if not p.is_file():
+            raise FileNotFoundError(f"live snapshot not found: {p.resolve()}")
+        raw = load_live_snapshot_dict(p)
+        sg = raw.get("games_id")
+        if sg is not None:
+            try:
+                snapshot_games_id = int(sg)
+            except (TypeError, ValueError):
+                snapshot_games_id = None
+        state = copy.deepcopy(raw["state"])
+        map_data = state.map_data
+        map_id = int(map_data.map_id)
+        co0 = int(state.co_states[0].co_id)
+        co1 = int(state.co_states[1].co_id)
+        tier = str(state.tier_name)
+        day0 = int(state.turn)
+        state.max_turns = day0 + int(LIVE_SNAPSHOT_CALENDAR_CAP_DAYS)
+        _log(
+            f"session: from live snapshot  path={p}  games_id={raw.get('games_id')!r}  "
+            f"seed={seed!r}  day={day0}  cap -> {state.max_turns} "
+            f"(+{LIVE_SNAPSHOT_CALENDAR_CAP_DAYS} in-game days)"
+        )
+        _log(
+            f"map: {map_data.name}  id={map_id}  (from snapshot)  "
+            f"COs: P0={co0}  P1={co1}  tier={tier}"
+        )
+    else:
+        _log(
+            f"session: start  seed={seed!r}  max_turns={max_turns}  "
+            f"force_random={force_random}  map_id={map_id!r}"
+        )
+
+        # ---- Map ----
+        if map_id is None:
+            map_id = _sample_map_id(rng)
+            _log(f"map: sampled map_id={map_id}")
+        _log(f"map: loading id={map_id}")
+        map_data = load_map(map_id, _MAP_POOL_PATH, _MAPS_DIR)
+        _log(
+            f"map: {map_data.name}  id={map_id}  size={map_data.height}x{map_data.width}  "
+            f"tiles={map_data.height * map_data.width}"
+        )
+
+        # ---- COs ----
+        if co0 is None:
+            co0 = _sample_co(rng, map_id, tier, 0)
+        if co1 is None:
+            co1 = _sample_co(rng, map_id, tier, 1)
+        _log(f"COs: P0={co0}  P1={co1}  tier={tier}")
 
     # ---- Checkpoint ----
     model = None
@@ -646,18 +784,23 @@ def run_game(
     else:
         _log("policy: MaskablePPO (same checkpoint for both players, CPU)")
 
-    # ---- Initial state ----
-    _log("engine: building initial GameState")
-    state = make_initial_state(
-        map_data, co0, co1, starting_funds=0, tier_name=tier, luck_seed=seed
-    )
+    if live_snapshot_path is None:
+        # ---- Initial state (fresh) ----
+        _log("engine: building initial GameState")
+        _mka: dict = {"starting_funds": 0, "tier_name": tier, "luck_seed": seed}
+        rfm = getattr(map_data, "replay_first_mover", None)
+        if rfm is not None:
+            _mka["replay_first_mover"] = int(rfm)
+        state = make_initial_state(map_data, co0, co1, max_turns=max_turns, **_mka)
+        # Single source of truth for the play loop (must match CLI ``max_turns``).
+        state.max_turns = int(max_turns)
     _log(
         f"engine: ready  active_player=P{state.active_player}  day={state.turn}  "
-        f"done={state.done}"
+        f"max_turns={state.max_turns}  done={state.done}"
     )
 
     # ---- Output paths (resolved up front so error handler can also use them) ----
-    gid = game_id or (int(time.time()) % 999000 + 1000)
+    gid = game_id or snapshot_games_id or (int(time.time()) % 999000 + 1000)
     out_dir = output_dir or _REPLAY_OUT
     out_path = Path(out_dir) / f"{gid}.zip"
     start_date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -684,7 +827,7 @@ def run_game(
     prev_day = state.turn
 
     _log(
-        f"play: loop start  max_turns={max_turns}  "
+        f"play: loop start  day_cap={state.max_turns}  "
         f"max_total_actions={max_total_actions}  "
         f"max_actions_per_active_turn={max_actions_per_active_turn}  "
         f"progress every {_ACTION_PROGRESS_INTERVAL} actions + on day change"
@@ -692,8 +835,14 @@ def run_game(
 
     try:
         while not state.done:
-            if state.turn > max_turns:
-                _log(f"play: hit max_turns={max_turns} (day={state.turn}) - stopping")
+            # Calendar cap: same rule as ``GameState._end_turn`` (``turn`` increments
+            # when P1 ends — see engine). Always compare to ``state.max_turns``.
+            if state.turn > state.max_turns:
+                _log(
+                    f"play: day limit — turn {state.turn} > cap {state.max_turns} "
+                    "(property tiebreak / stop)"
+                )
+                _apply_max_turn_tiebreak(state)
                 break
 
             # Fuse checks are issued *before* we pick the next action so the
@@ -708,6 +857,13 @@ def run_game(
             state, _reward, _done = state.step(action)
             action_count += 1
             turn_action_count += 1
+
+            if state.turn > state.max_turns and not state.done:
+                _log(
+                    f"play: day limit after step — turn {state.turn} > {state.max_turns}"
+                )
+                _apply_max_turn_tiebreak(state)
+                break
 
             if action_count % _ACTION_PROGRESS_INTERVAL == 0:
                 lap  = time.monotonic() - t_start
@@ -777,7 +933,11 @@ def run_game(
         if open_viewer:
             pz = Path(out_dir) / f"{gid}.partial.zip"
             if pz.is_file():
+                _log(f"viewer: opening partial replay -> {pz.name}")
                 _open_replay_in_desktop_viewer(pz)
+            else:
+                _log("viewer: partial zip missing; opening output folder")
+                _open_replay_output_folder(pz)
         raise
 
     elapsed = time.monotonic() - t_start
@@ -803,7 +963,10 @@ def run_game(
     # ---- Export replay (heavy: PHP snapshots + gzip + full_trace replay for p: stream) ----
     # gid / out_dir / out_path / start_date_str were resolved before the play loop
     # so the error handler can reuse them.
-    game_name = f"AI-vs-AI  {map_data.name}  [{winner_str}]"
+    if live_snapshot_path is not None:
+        game_name = f"AI-vs-AI (live +{LIVE_SNAPSHOT_CALENDAR_CAP_DAYS}d)  {map_data.name}  [{winner_str}]"
+    else:
+        game_name = f"AI-vs-AI  {map_data.name}  [{winner_str}]"
 
     # Copy trace data before the worker runs so the main thread can return a clear
     # play-time line immediately; the worker does not read mutating `state`.
@@ -864,17 +1027,38 @@ def run_game(
     )
     worker.start()
     worker.join()
-    if export_error[0] is not None:
-        raise export_error[0]
+    export_exc = export_error[0]
+    if export_exc is not None:
+        _log(f"export: thread returned error - {export_exc!r}")
 
     _log(f"session: replay + trace ready  path={out_path}")
 
-    # ---- Open viewer (desktop AWBW Replay Player loads the zip) ----
+    # ---- Open viewer (always when requested, even if export failed) ----
+    zip_for_viewer: Path | None = None
+    if export_exc is None and out_path.is_file():
+        zip_for_viewer = out_path
+    else:
+        partial_try = Path(out_dir) / f"{gid}.partial.zip"
+        if partial_try.is_file():
+            zip_for_viewer = partial_try
+
     if open_viewer:
-        _log(f"viewer: opening replay (game_id={gid})")
-        _open_replay_in_desktop_viewer(out_path)
+        if zip_for_viewer is not None:
+            _log(f"viewer: opening replay (game_id={gid}) -> {zip_for_viewer.name}")
+            _open_replay_in_desktop_viewer(zip_for_viewer)
+        else:
+            _log(
+                "viewer: no .zip to open after export — opening output folder "
+                f"(game_id={gid})"
+            )
+            # ``_open_replay_output_folder`` uses ``.parent`` — ``out_path`` may
+            # not exist on disk yet, but its parent is still the export directory.
+            _open_replay_output_folder(out_path)
     else:
         _log("viewer: skipped (--no-open)")
+
+    if export_exc is not None:
+        raise export_exc
 
     _log(f"session: exit ok  {out_path}")
     return out_path
@@ -1155,7 +1339,17 @@ def main() -> None:
         help="Tier name (when following train: overrides trainer --tier)",
     )
     parser.add_argument("--seed",     type=int,  default=None, help="RNG seed")
-    parser.add_argument("--max-turns",type=int,  default=100,  help="Turn limit (default: 100)")
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=100,
+        help=(
+            "Calendar day cap: matches engine ``GameState.turn`` / tie-break limit "
+            "(the counter advances when P1 ends their segment; default: 100). "
+            "When it would exceed this value, the game stops with the same property "
+            "tiebreak as the engine. Must be >= 1. Short smoke: --max-turns 2."
+        ),
+    )
     parser.add_argument("--random",   action="store_true",
                         help="Force random-vs-random (ignore checkpoint)")
     parser.add_argument("--no-open",  action="store_true",
@@ -1189,11 +1383,132 @@ def main() -> None:
             f"(default: {_DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN})."
         ),
     )
+    parser.add_argument(
+        "--from-live-snapshot",
+        type=Path,
+        default=None,
+        metavar="PKL",
+        help=(
+            "Load ``engine_snapshot.pkl`` (or ``write_live_snapshot`` output); "
+            f"day cap = snapshot day + {LIVE_SNAPSHOT_CALENDAR_CAP_DAYS}. "
+            "Implies not following train for map/CO sampling."
+        ),
+    )
+    parser.add_argument(
+        "--from-live-games-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Run once per ``<games_id>/engine_snapshot.pkl`` (or ``<games_id>.pkl``) "
+            f"under DIR; same {LIVE_SNAPSHOT_CALENDAR_CAP_DAYS}-day cap. "
+            "Opens each exported zip in the desktop viewer unless --no-open."
+        ),
+    )
+    _default_export_dir = _REPO / "replays" / "amarinner_my_games"
+    parser.add_argument(
+        "--from-latest-export",
+        type=Path,
+        nargs="?",
+        const=_default_export_dir,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Load the most recently written ``engine_snapshot.pkl`` (or top-level "
+            f"``<id>.pkl``) under DIR. With no path, use {_default_export_dir} "
+            "(re-export from site to refresh). Implies not following train."
+        ),
+    )
     args = parser.parse_args(user)
+    if args.max_turns < 1:
+        parser.error("--max-turns must be >= 1 (try 2 for a very short run)")
     # If CPython/launcher preflags made ``user`` empty or incomplete, the flag
     # can still appear in raw ``sys.argv``; honor it so ``--no-follow-train`` is reliable.
     if not args.no_follow_train and any(x == "--no-follow-train" for x in sys.argv[1:]):
         args.no_follow_train = True
+
+    n_live = sum(
+        1
+        for v in (args.from_live_snapshot, args.from_live_games_dir, args.from_latest_export)
+        if v is not None
+    )
+    if n_live > 1:
+        parser.error(
+            "use at most one of --from-live-snapshot, --from-live-games-dir, and --from-latest-export"
+        )
+
+    def _run_live_pkl(
+        pkl: Path, *, out_gid: int | None, open_viewer: bool
+    ) -> Path:
+        ck = getattr(args, "ckpt", None)
+        return run_game(
+            ckpt_path=Path(ck) if ck is not None else None,
+            map_id=0,  # unused when loading snapshot
+            co0=0,  # unused
+            co1=0,  # unused
+            tier="T2",  # unused
+            seed=args.seed,
+            max_turns=args.max_turns,  # ignored for live; kept for API
+            force_random=args.random,
+            open_viewer=open_viewer,
+            output_dir=args.out_dir,
+            game_id=out_gid,
+            max_total_actions=args.max_total_actions,
+            max_actions_per_active_turn=args.max_actions_per_active_turn,
+            capture_move_gate=args.capture_move_gate,
+            live_snapshot_path=pkl,
+        )
+
+    if args.from_latest_export is not None:
+        d = args.from_latest_export
+        pkl = _find_latest_engine_snapshot_pkl(d)
+        if pkl is None:
+            _log(
+                f"from-latest-export: no engine_snapshot.pkl (or <id>.pkl) under {d.resolve()!s}"
+            )
+            raise SystemExit(1)
+        try:
+            age_s = time.time() - pkl.stat().st_mtime
+        except OSError:
+            age_s = -1.0
+        _log(
+            f"from-latest-export: using {pkl} "
+            f"(mtime age ~{age_s/3600.0:.2f} h — re-run export to refresh from AWBW)"
+        )
+        _run_live_pkl(
+            pkl,
+            out_gid=args.game_id,
+            open_viewer=not args.no_open,
+        )
+        return
+
+    if args.from_live_games_dir is not None:
+        pairs = _list_snapshot_pkls_in_dir(args.from_live_games_dir)
+        if not pairs:
+            _log(
+                f"from-live-games-dir: no engine_snapshot.pkl (or <id>.pkl) under {args.from_live_games_dir}"
+            )
+            raise SystemExit(1)
+        n = len(pairs)
+        for i, (gid, pth) in enumerate(pairs):
+            _run_live_pkl(
+                pth,
+                out_gid=gid,
+                open_viewer=not args.no_open,
+            )
+        _log(
+            f"from-live-games-dir: wrote {n} replay(s) under "
+            f"{(args.out_dir or _REPLAY_OUT).resolve()!s}"
+        )
+        return
+
+    if args.from_live_snapshot is not None:
+        _run_live_pkl(
+            args.from_live_snapshot,
+            out_gid=args.game_id,
+            open_viewer=not args.no_open,
+        )
+        return
 
     want_follow = not args.no_follow_train
     if want_follow:

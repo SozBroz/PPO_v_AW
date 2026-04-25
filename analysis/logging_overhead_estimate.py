@@ -31,7 +31,7 @@ def main() -> None:
         description="Estimate logging vs training time (order-of-magnitude)."
     )
     p.add_argument(
-        "--n-envs", type=int, default=6, help="Parallel envs (default: 6, train.py)"
+        "--n-envs", type=int, default=14, help="Parallel envs (default: 14, train.py)"
     )
     p.add_argument(
         "--n-steps", type=int, default=512, help="PPO n_steps per env (default: 512)"
