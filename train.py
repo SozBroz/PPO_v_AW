@@ -443,6 +443,24 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--opening-book", type=Path, default=None,
+        help="JSONL from tools/build_opening_book.py; wraps checkpoint opponent (P1 book by default).",
+    )
+    parser.add_argument("--opening-book-seat", type=int, default=1, help="Engine seat the book encodes (1=P1).")
+    parser.add_argument(
+        "--opening-book-prob", type=float, default=1.0,
+        help="Per microstep: probability of using the book when entries exist (0-1).",
+    )
+    parser.add_argument(
+        "--opening-book-strict-co", action=argparse.BooleanOptionalAction, default=False,
+        help="Only use books whose co_id matches the live seat CO (if co_id set in book).",
+    )
+    parser.add_argument(
+        "--opening-book-days", type=int, default=5,
+        help="Max engine calendar day for book lines (0 = no day cap in controller).",
+    )
+    parser.add_argument("--opening-book-seed", type=int, default=0, help="RNG seed for book pick / prob.")
+    parser.add_argument(
         "--opponent-refresh-rollouts",
         type=int,
         default=4,
@@ -863,6 +881,16 @@ def main() -> None:
         async_queue_max=args.async_queue_max,
         async_gpu_opponent_permits_subtract=args.async_gpu_opponent_permits_subtract,
         async_learner_forward_chunk=args.async_learner_forward_chunk,
+        opening_book_path=args.opening_book,
+        opening_book_seat=getattr(args, "opening_book_seat", 1),
+        opening_book_prob=getattr(args, "opening_book_prob", 1.0),
+        opening_book_strict_co=getattr(args, "opening_book_strict_co", False),
+        opening_book_max_day=(
+            None
+            if int(getattr(args, "opening_book_days", 0) or 0) <= 0
+            else int(args.opening_book_days)
+        ),
+        opening_book_seed=int(getattr(args, "opening_book_seed", 0) or 0),
     )
     _install_sigint_first_only()
     trainer.train()

@@ -6,6 +6,12 @@ Skips MOVE-stage rows by default (flat index does not encode destination).
 Uses MaskablePPO.policy.evaluate_actions with stored masks — aggressive LR can
 destroy generalisation; checkpoint before running.
 
+**Actual CLI (repo):** ``--demos`` / ``--load`` / ``--save`` (not --input/--output),
+``--lr``, ``--epochs``, ``--head-only``, ``--include-move``. Optional
+``--opening-only`` keeps rows with ``opening_segment=true`` in each JSON line.
+See also ``--eval-demos`` in ``scripts/eval_imitation.py`` for top-k on the
+same file.
+
 Example:
   python scripts/train_bc.py --demos logs/human_demos.jsonl \\
     --load checkpoints/latest.zip --save checkpoints/post_bc.zip --epochs 2
@@ -36,6 +42,11 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--head-only", action="store_true", help="Train policy head MLP only")
     ap.add_argument("--include-move", action="store_true", help="Keep MOVE rows (degenerate index)")
+    ap.add_argument(
+        "--opening-only",
+        action="store_true",
+        help="Keep only demo rows with opening_segment==true (from opening ingest)",
+    )
     args = ap.parse_args()
 
     from sb3_contrib import MaskablePPO  # type: ignore[import]
@@ -51,6 +62,8 @@ def main() -> None:
                 continue
             row = json.loads(line)
             if not args.include_move and row.get("action_stage") == "MOVE":
+                continue
+            if args.opening_only and not row.get("opening_segment"):
                 continue
             rows.append(row)
     if not rows:

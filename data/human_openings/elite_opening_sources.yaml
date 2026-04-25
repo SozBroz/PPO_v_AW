@@ -1,0 +1,34 @@
+# Elite opening sources (see tools/fetch_awbw_opening_sources.py)
+manual_games:
+  - game_id: 162071
+    days: 5
+  - game_id: 1631918
+    days: 6
+  - game_id: 1622029
+    days: 6
+  - game_id: 1620029
+    days: 5
+  - game_id: 1628154
+    days: 5
+  - game_id: 1640542
+    days: latest
+  - game_id: 1628154
+    days: 6
+  - game_id: 1631089
+    days: 6
+  - game_id: 1615826
+    days: 4
+  - game_id: 1636394
+    days: 5
+  - game_id: 1630558
+    days: 6
+  - game_id: 1631019
+    days: 5
+
+completed_game_queries:
+  - username: Po1and
+    league: true
+    type: std
+    limit: 50
+    days: 5
+    ranked_standard_pool_only: true

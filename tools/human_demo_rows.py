@@ -28,11 +28,12 @@ def build_demo_row_dict(
     action: Action,
     map_id: Optional[int],
     tier: Optional[str],
+    **extra: Any,
 ) -> dict[str, Any]:
     """Same fields as ``server.play_human._append_human_demo`` (pre-step state)."""
     spatial, scalars = encode_state(state)
     mask = _get_action_mask(state)
-    return {
+    row: dict[str, Any] = {
         "encoder_version": [int(N_SPATIAL_CHANNELS), int(N_SCALARS)],
         "spatial": spatial.tolist(),
         "scalars": scalars.tolist(),
@@ -45,6 +46,9 @@ def build_demo_row_dict(
         "tier": tier,
         "session_id": session_id,
     }
+    if extra:
+        row.update(extra)
+    return row
 
 
 def iter_demo_rows_from_trace_record(
@@ -54,10 +58,19 @@ def iter_demo_rows_from_trace_record(
     maps_dir: Path | None = None,
     session_prefix: str = "trace",
     include_move_stage: bool = False,
+    seats: tuple[int, ...] = (0,),
+    max_turn: int | None = None,
+    opening_only: bool = False,
+    source_game_id: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """
-    Replay ``full_trace`` and yield one demo row per engine step when
-    ``active_player == 0`` (same contract as training / play UI).
+    Replay ``full_trace`` and yield demo rows for each engine step where
+    ``active_player`` is in ``seats`` (default ``(0,)`` = learner / P0 only).
+
+    ``max_turn`` — if set, stop before applying any trace entry with
+    ``entry[\"turn\"] > max_turn`` (AWBW calendar day in exported traces).
+
+    ``opening_only`` — set ``opening_segment`` on every emitted row.
     """
     pool = map_pool or _DEFAULT_POOL
     mdir = maps_dir or _DEFAULT_MAPS
@@ -71,17 +84,62 @@ def iter_demo_rows_from_trace_record(
     )
     sid = f"{session_prefix}:{record.get('map_id', '')}"
     for i, entry in enumerate(record["full_trace"]):
+        t = int(entry.get("turn", 0) or 0)
+        if max_turn is not None and t > max_turn:
+            break
         act = _trace_to_action(entry)
-        if st.active_player == 0:
+        ap = int(st.active_player)
+        if ap in seats:
             if include_move_stage or st.action_stage != ActionStage.MOVE:
+                ex: dict[str, Any] = {
+                    "awbw_turn": t,
+                    "trace_index": i,
+                    "demo_seat": ap,
+                }
+                if source_game_id is not None:
+                    ex["source_game_id"] = int(source_game_id)
+                if opening_only:
+                    ex["opening_segment"] = True
                 yield build_demo_row_dict(
                     f"{sid}:{i}",
                     st,
                     act,
                     int(record["map_id"]),
                     str(record.get("tier", "")),
+                    **ex,
                 )
         st.step(act)
+
+
+def infer_training_meta_from_awbw_zip(
+    zip_path: Path,
+    *,
+    map_pool: Path | None = None,
+) -> dict[str, Any]:
+    """Read first PHP snapshot from a site/oracle zip; return map_id, co0, co1, tier."""
+    from tools.diff_replay_zips import load_replay
+
+    pool_path = map_pool or _DEFAULT_POOL
+    with open(pool_path, encoding="utf-8") as f:
+        pool: list[dict] = __import__("json").load(f)
+    snaps = load_replay(zip_path)
+    g = snaps[0]
+    mid = int(g.get("maps_id") or 0)
+    pl = g.get("players") or {}
+    p0 = pl.get(0) if isinstance(pl, dict) else None
+    p1 = pl.get(1) if isinstance(pl, dict) else None
+    if p0 is None or p1 is None:
+        raise ValueError(f"zip {zip_path}: missing players[0/1] in first snapshot")
+    co0 = int(p0.get("co_id") or 1)
+    co1 = int(p1.get("co_id") or 1)
+    tier = "T3"
+    for m in pool:
+        if int(m.get("map_id", 0) or 0) == mid:
+            t = m.get("tier")
+            if t:
+                tier = str(t)
+            break
+    return {"map_id": mid, "co0": co0, "co1": co1, "tier": tier}
 
 
 def collect_demo_rows_from_oracle_zip(
@@ -95,10 +153,14 @@ def collect_demo_rows_from_oracle_zip(
     tier_name: str,
     session_prefix: str = "oracle_zip",
     include_move_stage: bool = False,
+    seats: tuple[int, ...] = (0,),
+    max_calendar_turn: int | None = None,
+    opening_only: bool = False,
+    source_game_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Full oracle ``p:`` replay with a hook so rows match per-engine-step logging
-    for player 0 (same semantics as trace ingest).
+    for the requested ``seats`` (default P0 only).
     """
     pool = map_pool or _DEFAULT_POOL
     mdir = maps_dir or _DEFAULT_MAPS
@@ -107,10 +169,21 @@ def collect_demo_rows_from_oracle_zip(
 
     def before(st: GameState, act: Action) -> None:
         nonlocal n
-        if int(st.active_player) != 0:
+        if int(st.active_player) not in seats:
             return
         if not include_move_stage and st.action_stage == ActionStage.MOVE:
             return
+        cal = int(getattr(st, "turn", 0) or 0)
+        if max_calendar_turn is not None and cal > int(max_calendar_turn):
+            return
+        ex: dict[str, Any] = {
+            "calendar_turn": cal,
+            "demo_seat": int(st.active_player),
+        }
+        if source_game_id is not None:
+            ex["source_game_id"] = int(source_game_id)
+        if opening_only:
+            ex["opening_segment"] = True
         out.append(
             build_demo_row_dict(
                 f"{session_prefix}:{zip_path.stem}:{n}",
@@ -118,6 +191,7 @@ def collect_demo_rows_from_oracle_zip(
                 act,
                 map_id,
                 tier_name,
+                **ex,
             )
         )
         n += 1
@@ -137,10 +211,13 @@ def collect_demo_rows_from_oracle_zip(
     return out
 
 
-def write_demo_rows_jsonl(rows: Iterator[dict[str, Any]], out_path: Path) -> int:
+def write_demo_rows_jsonl(
+    rows: Iterator[dict[str, Any]], out_path: Path, *, append: bool = False
+) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
-    with open(out_path, "w", encoding="utf-8") as f:
+    mode = "a" if append else "w"
+    with open(out_path, mode, encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
             n += 1

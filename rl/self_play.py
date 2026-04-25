@@ -1009,6 +1009,12 @@ class _PicklableEnvFactory:
         "worker_index",
         "gpu_infer_semaphore",
         "opponent_force_cpu",
+        "opening_book_path",
+        "opening_book_seat",
+        "opening_book_prob",
+        "opening_book_strict_co",
+        "opening_book_max_day",
+        "opening_book_seed",
     )
 
     def __init__(
@@ -1033,6 +1039,12 @@ class _PicklableEnvFactory:
         worker_index: int = 0,
         gpu_infer_semaphore: Any = None,
         opponent_force_cpu: bool = False,
+        opening_book_path: str | None = None,
+        opening_book_seat: int = 1,
+        opening_book_prob: float = 1.0,
+        opening_book_strict_co: bool = False,
+        opening_book_max_day: int | None = 5,
+        opening_book_seed: int = 0,
     ) -> None:
         self.map_pool = map_pool
         self.checkpoint_dir = checkpoint_dir
@@ -1054,6 +1066,12 @@ class _PicklableEnvFactory:
         self.worker_index = worker_index
         self.gpu_infer_semaphore = gpu_infer_semaphore
         self.opponent_force_cpu = bool(opponent_force_cpu)
+        self.opening_book_path = opening_book_path
+        self.opening_book_seat = int(opening_book_seat)
+        self.opening_book_prob = float(opening_book_prob)
+        self.opening_book_strict_co = bool(opening_book_strict_co)
+        self.opening_book_max_day = opening_book_max_day
+        self.opening_book_seed = int(opening_book_seed)
 
     def __call__(self) -> Any:
         _install_subproc_worker_excepthook()
@@ -1081,6 +1099,18 @@ class _PicklableEnvFactory:
             inference_device=opp_dev,
             gpu_infer_semaphore=self.gpu_infer_semaphore,
         )
+        if self.opening_book_path:
+            from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
+
+            opponent = OpeningBookCheckpointOpponent(
+                opponent,
+                self.opening_book_path,
+                book_seat=self.opening_book_seat,
+                book_prob=self.opening_book_prob,
+                strict_co=self.opening_book_strict_co,
+                max_day=self.opening_book_max_day,
+                seed=self.opening_book_seed + int(self.worker_index),
+            )
         env = AWBWEnv(
             map_pool=self.map_pool,
             opponent_policy=opponent,
@@ -1121,6 +1151,12 @@ def _make_env_factory(
     worker_index: int = 0,
     gpu_infer_semaphore: Any = None,
     opponent_force_cpu: bool = False,
+    opening_book_path: str | None = None,
+    opening_book_seat: int = 1,
+    opening_book_prob: float = 1.0,
+    opening_book_strict_co: bool = False,
+    opening_book_max_day: int | None = 5,
+    opening_book_seed: int = 0,
 ) -> Callable[[], Any]:
     """Return a picklable zero-arg env factory (SubprocVecEnv, async IMPALA actors)."""
     return _PicklableEnvFactory(
@@ -1144,6 +1180,12 @@ def _make_env_factory(
         worker_index=worker_index,
         gpu_infer_semaphore=gpu_infer_semaphore,
         opponent_force_cpu=opponent_force_cpu,
+        opening_book_path=opening_book_path,
+        opening_book_seat=opening_book_seat,
+        opening_book_prob=opening_book_prob,
+        opening_book_strict_co=opening_book_strict_co,
+        opening_book_max_day=opening_book_max_day,
+        opening_book_seed=opening_book_seed,
     )
 
 
@@ -1509,6 +1551,12 @@ class SelfPlayTrainer:
         async_max_grad_norm: float = 0.5,
         async_weight_save_every: int = 1,
         async_log_rho_floor: float = -20.0,
+        opening_book_path: Path | str | None = None,
+        opening_book_seat: int = 1,
+        opening_book_prob: float = 1.0,
+        opening_book_strict_co: bool = False,
+        opening_book_max_day: int | None = 5,
+        opening_book_seed: int = 0,
     ) -> None:
         tb = str(training_backend or "sync").strip().lower()
         if tb not in ("sync", "async"):
@@ -1558,6 +1606,26 @@ class SelfPlayTrainer:
                 f"cold_opponent must be one of {_VALID_COLD_OPPONENTS}; got {cold_opponent!r}"
             )
         self.cold_opponent = cold
+        _obp = opening_book_path
+        self.opening_book_path: str | None = (
+            str(Path(_obp).resolve()) if _obp is not None and str(_obp).strip() else None
+        )
+        if self.opening_book_path and not Path(self.opening_book_path).is_file():
+            import sys
+
+            print(
+                f"[self_play] opening_book: file not found ({self.opening_book_path!r}) — "
+                f"disabling (build with tools/build_opening_book.py or omit --opening-book).",
+                file=sys.stderr,
+            )
+            self.opening_book_path = None
+        self.opening_book_seat = int(opening_book_seat)
+        self.opening_book_prob = float(max(0.0, min(1.0, float(opening_book_prob))))
+        self.opening_book_strict_co = bool(opening_book_strict_co)
+        self.opening_book_max_day = (
+            int(opening_book_max_day) if opening_book_max_day is not None else None
+        )
+        self.opening_book_seed = int(opening_book_seed)
         self.fleet_cfg = fleet_cfg
         self.opponent_refresh_rollouts = max(0, int(opponent_refresh_rollouts))
         self.hot_reload_enabled = bool(hot_reload_enabled)
@@ -1778,6 +1846,12 @@ class SelfPlayTrainer:
             fleet_opponent_root=self.fleet_opponent_root,
             max_env_steps=self.max_env_steps,
             max_p1_microsteps=self.max_p1_microsteps,
+            opening_book_path=self.opening_book_path,
+            opening_book_seat=self.opening_book_seat,
+            opening_book_prob=self.opening_book_prob,
+            opening_book_strict_co=self.opening_book_strict_co,
+            opening_book_max_day=self.opening_book_max_day,
+            opening_book_seed=self.opening_book_seed,
         )
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
@@ -1883,6 +1957,18 @@ class SelfPlayTrainer:
                 fleet_opponent_root=self.fleet_opponent_root,
                 inference_device=opp_dev,
             )
+            if self.opening_book_path:
+                from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
+
+                opponent = OpeningBookCheckpointOpponent(
+                    opponent,
+                    self.opening_book_path,
+                    book_seat=self.opening_book_seat,
+                    book_prob=self.opening_book_prob,
+                    strict_co=self.opening_book_strict_co,
+                    max_day=self.opening_book_max_day,
+                    seed=self.opening_book_seed,
+                )
             env = AWBWEnv(
                 map_pool=self.map_pool,
                 opponent_policy=opponent,

@@ -1,0 +1,1 @@
+{"book_id": "repo_placeholder_g123858_s1", "source_game_id": 0, "map_id": 123858, "seat": 1, "co_id": null, "co_name": null, "horizon_days": 5, "opening_player": 0, "settings_hash": "placeholder", "session_id": "repo_minimal", "action_indices": [2, 3, 4], "validation": {"legal_replay": true, "source": "repo_minimal_seat_1_rebuild_with_build_opening_book"}}

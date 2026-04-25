@@ -698,6 +698,8 @@ class AWBWEnv(gym.Env):
         # Filled each ``reset()``; used for ego-centric obs + learner-frame rewards.
         self._learner_seat: int = 0
         self._enemy_seat: int = 1
+        # Incremented every ``reset()`` so opponent policies can detect new episodes.
+        self._episode_id: int = 0
 
         # Tier 1: read the teacher-mix probability ONCE at construction so
         # SubprocVecEnv workers (each a separate process) inherit the value
@@ -922,6 +924,8 @@ class AWBWEnv(gym.Env):
         options: dict | None = None,
     ) -> tuple[dict, dict]:
         super().reset(seed=seed)
+        self._episode_id = int(getattr(self, "_episode_id", 0)) + 1
+        self._opening_book_log: dict[str, Any] = {}
 
         # Zero reused buffers before any encode / mask use (unused map cells must not
         # carry stale floats from a prior episode or env instance path).
@@ -1955,6 +1959,7 @@ class AWBWEnv(gym.Env):
             ),
             "log_schema_version": "1.11",
         }
+        log_record.update(getattr(self, "_opening_book_log", {}))
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag
 

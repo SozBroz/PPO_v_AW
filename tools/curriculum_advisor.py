@@ -45,6 +45,17 @@ FLAG_PRESENT = "_FLAG_PRESENT"
 
 PROBE_OWNED_KEYS = frozenset({"--n-envs", "--n-steps", "--batch-size"})
 
+# Default human opening book (train.py --opening-book*). Present on every curriculum stage so
+# sync and async trainers see the same argv; if the JSONL is missing, SelfPlayTrainer disables
+# the book with a warning. Override per stage, e.g. ``"--opening-book-prob": 0.0``, when a
+# later stage should stop using scripted openings.
+DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {
+    "--opening-book": "data/opening_books/ranked_std_human_openings.jsonl",
+    "--opening-book-prob": 1.0,
+    "--opening-book-days": 5,
+    "--opening-book-seat": 1,
+}
+
 # Human / hand-edited curriculum_state.json often uses "stage_d"; schedule uses long names.
 _CURRICULUM_STAGE_SHORTHAND: dict[str, str] = {
     "stage_a": "stage_a_capture_bootstrap",
@@ -287,6 +298,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_a_capture_bootstrap",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--learner-greedy-mix": 0.3,
             "--cold-opponent": "greedy_capture",
             "--co-p0": 14,
@@ -305,6 +317,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_b_capture_competent",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--learner-greedy-mix": 0.15,
             "--cold-opponent": "greedy_mix",
             "--co-p0": 14,
@@ -323,6 +336,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_c_terrain_competent",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--learner-greedy-mix": 0.05,
             "--cold-opponent": "greedy_mix",
             "--co-p0": 14,
@@ -340,6 +354,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_d_gl_std_map_pool_t4",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--map-id": None,
             "--tier": "T4",
             "--co-p0": 14,
@@ -369,6 +384,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_e_gl_mixed_ladder",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--map-id": None,
             "--tier": None,
             "--co-p0": None,
@@ -393,6 +409,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_f_self_play_pure",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--map-id": None,
             "--tier": None,
             "--co-p0": None,
@@ -417,6 +434,7 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
     CurriculumStage(
         name="stage_g_mcts_eval_ready",
         args_overrides={
+            **DEFAULT_OPENING_BOOK_TRAIN_ARGS,
             "--map-id": None,
             "--tier": None,
             "--co-p0": None,

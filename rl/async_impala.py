@@ -542,6 +542,12 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         fleet_opponent_root=trainer.fleet_opponent_root,
         max_env_steps=trainer.max_env_steps,
         max_p1_microsteps=trainer.max_p1_microsteps,
+        opening_book_path=getattr(trainer, "opening_book_path", None),
+        opening_book_seat=int(getattr(trainer, "opening_book_seat", 1) or 1),
+        opening_book_prob=float(getattr(trainer, "opening_book_prob", 1.0) or 0.0),
+        opening_book_strict_co=bool(getattr(trainer, "opening_book_strict_co", False)),
+        opening_book_max_day=getattr(trainer, "opening_book_max_day", None),
+        opening_book_seed=int(getattr(trainer, "opening_book_seed", 0) or 0),
     )
 
     if resume_path.exists():
