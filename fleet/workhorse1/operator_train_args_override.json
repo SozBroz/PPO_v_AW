@@ -1,0 +1,14 @@
+{
+  "args": {
+    "--stage1-narrow": true,
+    "--map-id": 123858,
+    "--tier": "T3",
+    "--co-p0": 1,
+    "--co-p1": 1,
+    "--curriculum-tag": "stage1-misery-andy",
+    "--live-games-id": null,
+    "--live-snapshot-dir": null,
+    "--live-learner-seats": null
+  },
+  "reasoning": "Pin Phase 1a Misery (123858) T3 Andy mirror; strip live-game injects (paths/games are pc-b-specific)."
+}

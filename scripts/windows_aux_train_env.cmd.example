@@ -1,0 +1,18 @@
+@echo off
+REM 192.168.0.122 (and any Windows aux): map Main's repo share, set fleet env, activate venv.
+REM Run "map Z" once per interactive logon if needed (net use from ssh session often fails with 1312).
+REM Adjust credentials: same sshuser and password as Main SMB if required.
+
+if not exist "Z:\train.py" (
+  echo Z:\ not mapped or share empty — run: net use Z: \\192.168.0.160\AWBW
+  if defined AWBW_CIFS_USER net use Z: \\192.168.0.160\AWBW /user:%AWBW_CIFS_USER% /persistent:yes
+)
+
+set "AWBW_MACHINE_ROLE=auxiliary"
+if not defined AWBW_MACHINE_ID set "AWBW_MACHINE_ID=pc-122"
+if not defined AWBW_SHARED_ROOT set "AWBW_SHARED_ROOT=Z:\"
+
+if exist "C:\Users\%USERNAME%\AWBW\.venv\Scripts\activate.bat" call "C:\Users\%USERNAME%\AWBW\.venv\Scripts\activate.bat"
+
+echo AWBW shared: %AWBW_SHARED_ROOT%  role=%AWBW_MACHINE_ROLE% id=%AWBW_MACHINE_ID%
+echo Example: python C:\Users\%USERNAME%\AWBW\train.py --device cpu --n-envs 2

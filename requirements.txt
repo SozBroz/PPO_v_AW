@@ -1,0 +1,25 @@
+# Core Python deps for train.py, rl/*, and server/*.
+#
+# Install order (GPU):
+#   1) pip install -r requirements.txt
+#   2) pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# Step 2 replaces the CPU torch wheel that stable-baselines3 pulls in step 1.
+# CPU-only: skip step 2 and use `pip install torch` if needed.
+#
+# Windows: PyTorch needs the MSVC++ runtime (winget: Microsoft.VCRedist.2015+.x64).
+#
+# Optional — Windows + CUDA only: Triton for `torch.compile` (rl/self_play.py, ~faster
+# policy forward). Pin to a line compatible with your torch build: torch 2.5.x is typically
+# paired with triton-windows 3.3.x–3.5.x (avoid 3.6+ until you upgrade PyTorch). Inductor
+# also needs the VS C++ build tools the first time Triton jits its CUDA driver. Training
+# skips torch.compile on Windows unless you set AWBW_TORCH_COMPILE=1 (see rl/self_play.py).
+triton-windows>=3.3.1,<3.6; sys_platform == "win32"
+
+flask>=3.0
+gymnasium>=0.29
+numpy>=1.24
+stable-baselines3>=2.3.0
+sb3-contrib>=2.3.0
+tensorboard>=2.14
+psutil>=5.9
+cython>=3.0

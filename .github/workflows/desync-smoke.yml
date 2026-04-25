@@ -1,0 +1,61 @@
+# Full desync_audit + cluster is hundreds of games — not on every push. Run manually or weekly when replays exist.
+name: Desync pipeline (smoke)
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_games:
+        description: Max catalog games to audit (cap)
+        default: 25
+        type: number
+      update_bug_tracker:
+        description: Regenerate docs/desync_bug_tracker.md
+        default: false
+        type: boolean
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Count replay zips (gitignored in normal clones)
+        id: zips
+        shell: bash
+        run: |
+          if [[ -d replays/amarriner_gl ]]; then
+            n=$(find replays/amarriner_gl -name '*.zip' 2>/dev/null | wc -l | tr -d ' ')
+          else
+            n=0
+          fi
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          echo "Replay zips found: $n"
+
+      - name: Run run_desync_cluster (audit + cluster)
+        if: steps.zips.outputs.count != '0'
+        env:
+          ORACLE_STRICT_BUILD: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAX=25
+          TRACKER=""
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            MAX="${{ inputs.max_games }}"
+            if [[ "${{ inputs.update_bug_tracker }}" == "true" ]]; then
+              TRACKER="--update-bug-tracker"
+            fi
+          fi
+          python tools/run_desync_cluster.py --max-games "$MAX" --tag ci_gha $TRACKER
+
+      - name: Skip notice
+        if: steps.zips.outputs.count == '0'
+        run: |
+          echo "No files in replays/amarriner_gl/*.zip — desync_audit would match zero games."
+          echo "Populate replays (see docs/desync_audit.md) or use workflow_dispatch on a runner with artifacts."

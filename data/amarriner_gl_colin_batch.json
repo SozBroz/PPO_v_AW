@@ -1,0 +1,190 @@
+{
+  "meta": {
+    "source": "gamescompleted.php global crawl + game.php metadata",
+    "scraped_at": "2026-04-21T07:36:02.621425+00:00",
+    "n_games": 15,
+    "note": "Colin (co_id 15) games from global completed listing; T0/FOG/Live mixes."
+  },
+  "games": {
+    "1636107": {
+      "games_id": 1636107,
+      "tier": "T0",
+      "matchup": "Z - Twisted Fate [T0] - 04.16.26",
+      "map_id": 63376,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 17,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1558571": {
+      "games_id": 1558571,
+      "tier": null,
+      "matchup": "New Immigration Test! (Active Only)",
+      "map_id": 180682,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 29,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1637153": {
+      "games_id": 1637153,
+      "tier": null,
+      "matchup": "Jya",
+      "map_id": 154716,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 3,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1638360": {
+      "games_id": 1638360,
+      "tier": null,
+      "matchup": "hehehe",
+      "map_id": 33941,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 19,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1637096": {
+      "games_id": 1637096,
+      "tier": null,
+      "matchup": "breads fun game",
+      "map_id": 170000,
+      "map_name": null,
+      "co_p0_id": 2,
+      "co_p1_id": 15,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1638136": {
+      "games_id": 1638136,
+      "tier": null,
+      "matchup": "TO",
+      "map_id": 20788,
+      "map_name": null,
+      "co_p0_id": 5,
+      "co_p1_id": 15,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1636411": {
+      "games_id": 1636411,
+      "tier": null,
+      "matchup": "Stress Testing With Schaden",
+      "map_id": 183902,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 26,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1620117": {
+      "games_id": 1620117,
+      "tier": null,
+      "matchup": "Beached Offshore",
+      "map_id": 158582,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 15,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1628024": {
+      "games_id": 1628024,
+      "tier": null,
+      "matchup": "48hr battle",
+      "map_id": 94076,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 24,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1629555": {
+      "games_id": 1629555,
+      "tier": null,
+      "matchup": "ni133a",
+      "map_id": 2778,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 9,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1637705": {
+      "games_id": 1637705,
+      "tier": null,
+      "matchup": "League",
+      "map_id": 65213,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 1,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1358720": {
+      "games_id": 1358720,
+      "tier": null,
+      "matchup": "No Income From Properties",
+      "map_id": 166214,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 15,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1636108": {
+      "games_id": 1636108,
+      "tier": "T0",
+      "matchup": "Z - Freelands [T0] - 04.16.26",
+      "map_id": 177843,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 17,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1619141": {
+      "games_id": 1619141,
+      "tier": null,
+      "matchup": "Dragon lets have some fun",
+      "map_id": 107495,
+      "map_name": null,
+      "co_p0_id": 3,
+      "co_p1_id": 15,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    },
+    "1637200": {
+      "games_id": 1637200,
+      "tier": null,
+      "matchup": "Baseplate war",
+      "map_id": 180208,
+      "map_name": null,
+      "co_p0_id": 15,
+      "co_p1_id": 29,
+      "list_index": null,
+      "source_start": null,
+      "scraped_at": "2026-04-21T07:36:02.621425+00:00"
+    }
+  }
+}

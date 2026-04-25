@@ -1,0 +1,34 @@
+# Routine regression: engine + oracle unit tests. Does not run desync_audit (needs local replay zips).
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # engine.action and rl.encoder hard-import Cython modules; build before tests.
+      - name: Install native build toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3-dev
+
+      - name: Build and install package (Cython extensions)
+        run: |
+          pip install "numpy>=1.20" cython "setuptools>=61" wheel
+          pip install -e .
+
+      - name: Install test dependencies
+        run: pip install pytest gymnasium
+
+      - name: Run pytest
+        run: python -m pytest -q --tb=line
