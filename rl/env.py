@@ -124,6 +124,12 @@ PREALLOCATED_BUFFERS_ENV = "AWBW_PREALLOCATED_BUFFERS"
 # Reward shaping mode (plan rl_capture-combat_recalibration).
 #   "phi" (default)   — potential-based: per-step reward gets
 #                       Φ(s_after) − Φ(s_before) in the learner frame.
+#                       On engine day-cap resolution (``win_reason``): replace the
+#                       usual sparse ±1/0 with scaled outcomes — max_turns_tie or
+#                       (legacy) max_turns_draw → −0.1; max_turns_tiebreak win → +0.5;
+#                       tiebreak loss with
+#                       ≥2 property deficit → −0.5 (else −1). See
+#                       _apply_phi_sparse_terminal_replacement.
 #   "level"           — legacy property + unit-value differential (me − enemy).
 # When mode is "phi", AWBW_PHI_PROFILE picks defaults for α,β,κ if the
 # per-coefficient env vars are unset. Explicit AWBW_PHI_ALPHA / _BETA / _KAPPA
@@ -147,6 +153,26 @@ PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float]] = {
 _log_lock = Lock()
 # When SESSION_GAME_COUNTER_DB_ENV is unset, count completed games in this process only (tests, ad-hoc env use).
 _local_session_game_count = 0
+
+
+def _synthetic_env_cap_property_tiebreak(p0_props: int, p1_props: int) -> tuple[int, str]:
+    """
+    P0 vs P1 ``count_properties`` margin — same rule as engine calendar max-turns
+    (``engine.game.GameState`` end of ``_end_turn`` when ``turn > max_turns``):
+    |Δ| ≤ 1 → draw; else the leader wins. Used for ``game_log`` only when the
+    episode is env-truncated (``max_env_steps`` / ``max_p1_microsteps``) and the
+    engine never set ``winner`` / ``win_reason``.
+
+    Return value is (engine_seat_winner, win_reason) with -1 for draw. Reasons
+    ``env_step_cap_*`` are only for env truncation (``max_env_steps`` / ``max_p1_microsteps``),
+    distinct from calendar ``max_turns_tie`` / ``max_turns_tiebreak``.
+    """
+    d = int(p0_props) - int(p1_props)
+    if abs(d) <= 1:
+        return -1, "env_step_cap_tie"
+    if d >= 2:
+        return 0, "env_step_cap_tiebreak"
+    return 1, "env_step_cap_tiebreak"
 
 
 def _append_game_log_line(record: dict) -> None:
@@ -1025,6 +1051,8 @@ class AWBWEnv(gym.Env):
         # Episode-end log metadata (set in step() immediately before _log_finished_game).
         self._log_episode_truncated: bool = False
         self._log_episode_truncation_reason: str | None = None
+        # Step-cap tie-break: learner property lead (me − enemy); logged when >=2.
+        self._log_tie_breaker_property_count: int | None = None
         # Phase 0a.2 (FPS campaign): per-episode wall-time split between the
         # P0 step path and the P1 microstep loop. Bounded by perf_counter()
         # at episode boundary; never read during the hot path. Surfaced as
@@ -1132,6 +1160,8 @@ class AWBWEnv(gym.Env):
         acting = int(self.state.active_player)
         self.state, reward, done = self._engine_step_with_belief(action)
         reward = self._signed_engine_reward(reward, acting)
+        if self.state is not None and self.state.done:
+            reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
         self._capture_frame(action=action)
 
         if (
@@ -1204,6 +1234,24 @@ class AWBWEnv(gym.Env):
                     reward -= float(raw_tp)
                 except ValueError:
                     pass
+
+        # Partial win at the P0 step cap: engine never emits ±1 without a terminal, so
+        # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a solid
+        # property lead in the learner frame.
+        if (
+            truncated
+            and not terminated
+            and truncation_reason == "max_env_steps"
+            and self.state is not None
+        ):
+            me = int(self._learner_seat)
+            en = int(self._enemy_seat)
+            prop_lead = self.state.count_properties(me) - self.state.count_properties(
+                en
+            )
+            if prop_lead >= 2:
+                self._log_tie_breaker_property_count = int(prop_lead)
+                reward += 0.5
 
         obs = self._get_obs(observer=self._learner_seat)
         info = {
@@ -1281,6 +1329,63 @@ class AWBWEnv(gym.Env):
         if int(acting_seat) == int(self._learner_seat):
             return float(r_engine)
         return float(-r_engine)
+
+    def _learner_frame_terminal_outcome(self, acting_seat: int) -> float:
+        """Sparse win/lose/draw from a terminal step, learner frame; excludes capture shaping.
+
+        Matches ``_check_win_conditions`` in acting-player coordinates, then
+        :meth:`_signed_engine_reward` so it can be split from
+        ``reward = signed(sparse + capture) = signed(sparse) + signed(capture)``.
+        """
+        st = self.state
+        if st is None or not st.done or st.winner is None:
+            return 0.0
+        wi = int(st.winner)
+        if wi == -1:
+            s = 0.0
+        else:
+            s = 1.0 if wi == int(acting_seat) else -1.0
+        return self._signed_engine_reward(s, acting_seat)
+
+    def _apply_phi_sparse_terminal_replacement(
+        self, reward: float, acting_seat: int
+    ) -> float:
+        """Φ mode: replace engine sparse terminal ±1.0/0, not stack on it.
+
+        * ``max_turns_tie`` or (legacy) ``max_turns_draw`` → −0.1 (replaces 0.0)
+        * ``max_turns_tiebreak`` win → +0.5 (replaces +1.0)
+        * ``max_turns_tiebreak`` loss with **≥2** property deficit in learner
+          frame (enemy has ≥2 more properties) → −0.5 (replaces −1.0);
+          smaller deficit → keep −1.0
+
+        Captured as ``rest = reward - ls`` and recombined (preserves per-step
+        capture shaping in ``rest``). Non-day-cap terminations and ``level``
+        mode pass through.
+        """
+        if self._reward_shaping_mode != "phi" or self.state is None or not self.state.done:
+            return float(reward)
+        wr = self.state.win_reason
+        if wr not in ("max_turns_draw", "max_turns_tie", "max_turns_tiebreak"):
+            return float(reward)
+        ls = self._learner_frame_terminal_outcome(acting_seat)
+        rest = float(reward) - ls
+        if wr in ("max_turns_draw", "max_turns_tie"):
+            return -0.1 + rest
+        w = self.state.winner
+        if w is None or int(w) == -1:
+            return float(reward)
+        me = int(self._learner_seat)
+        en = int(self._enemy_seat)
+        if int(w) == me:
+            l_new = 0.5
+        else:
+            p_en = int(self.state.count_properties(en))
+            p_me = int(self.state.count_properties(me))
+            if p_en - p_me >= 2:
+                l_new = -0.5
+            else:
+                l_new = -1.0
+        return l_new + rest
 
     def _compute_phi(self, state: GameState) -> float:
         """Potential Φ(s) in the **learner** frame (me = ``_learner_seat``)."""
@@ -1665,6 +1770,21 @@ class AWBWEnv(gym.Env):
             total_count += 1
         terrain_usage_p0 = defended_count / max(total_count, 1)
 
+        # Outcome for the row: engine terminal, or synthetic property tiebreak when
+        # env caps ended the episode before ``state.done`` (no engine winner).
+        log_winner = self.state.winner
+        log_win_reason = self.state.win_reason
+        if (
+            getattr(self, "_log_episode_truncated", False)
+            and self.state.winner is None
+            and getattr(self, "_log_episode_truncation_reason", None)
+            in ("max_env_steps", "max_p1_microsteps")
+        ):
+            log_winner, log_win_reason = _synthetic_env_cap_property_tiebreak(
+                self.state.count_properties(0),
+                self.state.count_properties(1),
+            )
+
         # Build comprehensive log record per LOGGING_PLAN.md Phase A (game_id added in _append_game_log_line)
         log_record = {
             # High-signal outcome fields first
@@ -1702,11 +1822,11 @@ class AWBWEnv(gym.Env):
                 and str(e.get("unit", "")).upper() == "INFANTRY"
             ),
             "turns": self.state.turn,
-            "win_condition": self.state.win_reason,
+            "win_condition": log_win_reason,
             "losses_hp": self.state.losses_hp.copy(),
 
             # Outcome & matchup (CO names human-readable; IDs kept for analysis tools)
-            "winner": self.state.winner,
+            "winner": log_winner,
             "p0_co": self.state.co_states[0].name,
             "p1_co": self.state.co_states[1].name,
             "p0_co_id": self._episode_info.get("p0_co"),
@@ -1785,10 +1905,16 @@ class AWBWEnv(gym.Env):
             # 1.8: terminated / truncated / truncation_reason (forced episode caps).
             # 1.9: restart bundle — learner_seat, reward_mode, arch_version, opponent_sampler;
             #      agent_plays now mirrors learner_seat (was always 0).
+            # 1.10: tie_breaker_property_count — learner property lead when step-cap partial win.
+            # 1.11: winner / win_condition filled from property tiebreak when truncated
+            #       and engine left winner unset (env_step_cap_* reasons).
             "terminated": bool(self.state.done),
             "truncated": bool(getattr(self, "_log_episode_truncated", False)),
             "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
-            "log_schema_version": "1.9",
+            "tie_breaker_property_count": getattr(
+                self, "_log_tie_breaker_property_count", None
+            ),
+            "log_schema_version": "1.11",
         }
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag
@@ -1831,8 +1957,8 @@ class AWBWEnv(gym.Env):
                 "approx_engine_actions_per_p0_step": approx_engine_actions_per_p0_step,
                 "opponent_checkpoint_reload_count": opponent_checkpoint_reload_count,
                 "episode_wall_s": episode_wall_s,
-                "winner": self.state.winner,
-                "win_condition": self.state.win_reason,
+                "winner": log_winner,
+                "win_condition": log_win_reason,
                 "opponent_type": log_record["opponent_type"],
                 "reasons": [
                     *(["slow_wall"] if is_slow_wall else []),

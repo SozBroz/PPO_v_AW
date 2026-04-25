@@ -490,7 +490,7 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-env-steps",
         type=int,
-        default=8000,
+        default=10000,
         help=(
             "Hard cap on P0 env.step calls per episode; episode ends with "
             "truncated=True when reached without a natural terminal. "

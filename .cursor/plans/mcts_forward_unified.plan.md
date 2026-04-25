@@ -3,10 +3,12 @@ name: MCTS forward unified
 overview: >-
   Single execution plan for all MCTS work we proceed with: turn-level PUCT scale-up
   (correctness, geometry, compute, escalator, anytime search), Phase 11f sim ladder
-  + ROI logging, and the audit addendum (turn traces, luck resamples, edge stats,
-  production risk control). Non-goals: train_advisor / in-rollout MCTS, fog ISMCTS.
-  North-star thresholds remain MASTERPLAN §4 (Phase 1 Full, EV>0.6 on search mix,
-  rollout perf).
+  + ROI logging. Part B audit items (turn traces, luck resamples, edge stats,
+  production risk control) are implemented in engine + rl/mcts + symmetric eval
+  (2026-04); remaining work is validation, profiling, adaptive K, batched NN,
+  escalator, and time-budget search. Non-goals: train_advisor / in-rollout MCTS,
+  fog ISMCTS. North-star thresholds remain MASTERPLAN §4 (Phase 1 Full, EV>0.6 on
+  search mix, rollout perf). Staged rollout ladder: MASTERPLAN §14 (MCTS-0…4).
 todos:
   - id: mcts-fwd-01-gates-baseline
     content: >-
@@ -31,24 +33,24 @@ todos:
       Implement apply_full_turn step trace per docs/mcts_review_composer_o.md Part
       B.3: attack_damage_rolls, killed_unit, survived_at_hp, capture_interrupted,
       critical_threshold_event (extend on_step or return trace list; engine tests).
-    status: pending
+    status: completed
   - id: mcts-fwd-05-luck-resamples
     content: >-
       For plans with critical_threshold_event, run extra local resamples (replay
       same Action list, independent luck seeds); tunable mcts_luck_resamples; cap
       wall time.
-    status: pending
+    status: completed
   - id: mcts-fwd-06-edge-stats
     content: >-
       Extend TurnNode (or parallel struct) with value_variance (Welford),
       worst_p10_value reservoir, kill_probability from traces/resamples; extend
       _backup or resample path to feed stats.
-    status: pending
+    status: completed
   - id: mcts-fwd-07-production-risk-selection
     content: >-
       Root-only risk layer for production: constraints and/or tail-penalty score
       (e.g. blend mean + p10); log per-child stats; training/eval keep EV+PUCT default.
-    status: pending
+    status: completed
   - id: mcts-fwd-08-adaptive-k
     content: >-
       Adaptive root_plans / progressive widening; tune max_plan_actions from
@@ -86,7 +88,7 @@ todos:
       On milestone landings: update MASTERPLAN §4 pointer text if time-budget or
       risk-selection ships; keep docs/mcts_review_composer_o.md Part B in sync with
       code truth.
-    status: pending
+    status: completed
 ---
 
 # MCTS forward — unified execution plan
@@ -114,12 +116,13 @@ This file **consolidates forward MCTS work** from:
 - **11c** `--mcts-mode eval_only` in [`train.py`](c:\Users\phili\AWBW\train.py), [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py)
 - **11d** [`tools/mcts_health.py`](c:\Users\phili\AWBW\tools\mcts_health.py) + orchestrator merge path
 - **11e** `terrain_usage_p0` + schema for gate inputs
+- **11f / Part B (stochastic root risk, 2026-04)** — `apply_full_turn(..., return_trace=True)` (optional 5-tuple); [`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py) `EdgeStats`, `luck_resamples`, `risk_mode`, root JSONL log; [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py) CLI + telemetry (`mcts_root_entropy`, `mcts_chosen_risk`); tests in [`tests/test_mcts.py`](c:\Users\phili\AWBW\tests\test_mcts.py). See [`docs/mcts_review_composer_o.md`](c:\Users\phili\AWBW\docs\mcts_review_composer_o.md) Part B, [`MASTERPLAN.md`](c:\Users\phili\AWBW\MASTERPLAN.md) §14.
 
 ## Recommended work order (high level)
 
 1. **mcts-fwd-01** — gates + baseline matrix (nothing else is interpretable without this).
 2. **mcts-fwd-02** + **mcts-fwd-03** — profile + RNG proof (correctness before scale).
-3. **mcts-fwd-04** → **mcts-fwd-07** — trace → resamples → edge stats → production risk (stochastic combat story).
+3. ~~**mcts-fwd-04** → **mcts-fwd-07**~~ — **done (2026-04)** — trace → resamples → edge stats → production risk (stochastic combat story). Remaining: prove value-head frame + A/B `risk_mode` on target mix.
 4. **mcts-fwd-08** → **mcts-fwd-10** — geometry + sweeps + batched NN (quality and wall-clock).
 5. **mcts-fwd-11** — escalator / Phase 11f + ROI logs (prove each sim doubling pays).
 6. **mcts-fwd-12** → **mcts-fwd-13** — anytime search + search-control heuristics (production-shaped).
@@ -150,7 +153,7 @@ Parallelism: **04–07** can overlap **08–09** after **03** is underway, but d
 3. Adaptive branching ablation wins vs fixed K at same wall time.
 4. Batched NN landed **or** documented proof that rollouts are the bottleneck + next engine task.
 5. Escalator / JSONL shows **marginal ROI** for sim doubling.
-6. Part B: traces + resamples + edge stats + production risk **implemented and tested** per audit doc.
+6. Part B: traces + resamples + edge stats + production risk **implemented and tested** per audit doc — **met** (see § Already shipped 11f/Part B).
 
 ---
 

@@ -929,28 +929,51 @@ Profiles must differ in:
 Goal:
 Introduce MCTS without destroying training throughput.
 
-Stages:
+**Plan pointer:** Stages below are the program’s rollout ladder. **Code:** preset IDs `mcts_0` … `mcts_4`, merge helpers, and per-stage defaults live in [`rl/mcts_rollout_stages.py`](rl/mcts_rollout_stages.py) (wired in [`scripts/symmetric_checkpoint_eval.py`](scripts/symmetric_checkpoint_eval.py) via `--mcts-rollout-stage` and `mcts_work_payload_from_argparse`). Operational detail, remaining todos, and ordering live in [`.cursor/plans/mcts_forward_unified.plan.md`](.cursor/plans/mcts_forward_unified.plan.md) (execution) and [`.cursor/plans/mcts_optimization_campaign.plan.md`](.cursor/plans/mcts_optimization_campaign.plan.md) (scale-up / perf).
+
+Stages (sim counts are indicative; training/eval often uses fixed `num_sims` until anytime mode is validated):
 
 MCTS-0 (plumbing):
 - 8–32 sims
 - debug only
+- **Code:** `rl/mcts.py` `run_mcts`, `engine/game.py` `apply_full_turn` — exercised in tests; not a strength milestone.
 
 MCTS-1 (evaluation):
 - 64–256 sims
 - fixed seeds
+- **Code:** `scripts/symmetric_checkpoint_eval.py` with `mcts_mode=eval_only`; pair with `tools/mcts_health.py` / fleet gates.
 
 MCTS-2 (selective training assist):
 - 128–512 sims
 - used on subset of states
+- **Not** full MCTS inside PPO `learn` — orchestrated / eval-only paths only (see Rules).
 
 MCTS-3 (distillation):
 - offline MCTS → supervised targets
+- **Future:** not wired as a default training mode in-repo.
 
 MCTS-4 (production):
 - time-based anytime search
 - deterministic output
+- **Future:** wall-clock budget per P0 root (see unified plan todo `mcts-fwd-12`); current eval uses sim caps + optional root risk stats.
 
 Rules:
 - Do not use full MCTS in PPO loop
 - Use MCTS as teacher, not replacement
 - Require EV > 0.6 before relying on it
+
+### MCTS stochastic risk layer (root-only) — **implemented**
+
+**Shipped (2026-04):** root-only stochastic risk layer for advisor / production-style selection without changing the default PUCT training path.
+
+| Piece | Role |
+| ----- | ---- |
+| `GameState.apply_full_turn(..., return_trace=True)` | Optional 5-tuple with per-step advisory trace (`critical_threshold_event`, combat deltas, capture flags). Default call still returns the original 4-tuple. `engine/game.py` |
+| `rl/mcts.MCTSConfig` | `luck_resamples`, `luck_resample_critical_only`, `risk_mode` (`visit` \| `mean` \| `mean_minus_p10` \| `constrained`), `risk_lambda`, `catastrophe_value`, `max_catastrophe_prob`, `root_decision_log_path` |
+| `rl/mcts` | `EdgeStats`, fixed-plan luck resampling after search, `_state_value_for_actor` (value head assumed **active-player frame**; flipped to root frame for risk scoring) |
+| `scripts/symmetric_checkpoint_eval.py` | CLI / JSON payload for the above; telemetry includes `mcts_root_entropy`, `mcts_chosen_risk` |
+| Tests | `tests/test_mcts.py` (luck resample schema, `return_trace` schema), `tests/test_apply_full_turn.py` (unchanged default API) |
+
+**Operational default:** keep `risk_mode=visit` (legacy visit-count selection) for training / symmetric A/B unless you are explicitly ablating the risk policy. For ranked-advisor-style runs, see recommended flags in `docs/mcts_review_composer_o.md` Part B.
+
+**Caveat:** If the PPO value head is not trained in **active-player** value frame, `_state_value_for_actor` will mis-score resampled children — validate value framing before trusting risk-ranked play.

@@ -49,7 +49,7 @@ def test_argv_round_trip_matches_orchestrator_builder() -> None:
     d = m._argv_to_args_dict(x)
     y = fo.build_train_argv_from_proposed_args({"args": d}, repo_root=REPO)
     assert _argv_body_tokens(x) == _argv_body_tokens(y)
-    assert d.get("--max-env-steps") == 8000
+    assert d.get("--max-env-steps") == 10000
     assert d.get("--max-p1-microsteps") == 4000
 
 

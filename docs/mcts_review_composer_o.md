@@ -99,3 +99,27 @@ Today `TurnNode` stores `visit_count` and `total_value` (scalar sum). The design
 ---
 
 *Revision: Part B added 2026-04-25 — integrates stochastic trace metadata, local luck resamples, edge statistics, and production risk control without abandoning turn-level MCTS.*
+
+## Part B implementation note — stochastic root risk layer
+
+Implemented in this patch:
+
+- `GameState.apply_full_turn(..., return_trace=True)` can now return per-substep trace metadata without changing the default 4-tuple return shape.  The trace records combat damage deltas, killed/survived HP, capture interruption resets, and a conservative `critical_threshold_event` flag.
+- `rl.mcts.MCTSConfig` now exposes `luck_resamples`, `luck_resample_critical_only`, `risk_mode`, `risk_lambda`, `catastrophe_value`, `max_catastrophe_prob`, and `root_decision_log_path`.
+- Root children now carry `EdgeStats`: backup mean/variance plus fixed-plan luck-resample distributions (`p10_value`, worst value, catastrophe probability, kill probability, capture-interruption probability, attacker-death probability).
+- Production root selection can remain legacy visit-count based (`risk_mode=visit`) or switch to `mean`, `mean_minus_p10`, or `constrained` after luck resampling.
+- `scripts/symmetric_checkpoint_eval.py` wires the new controls through CLI/payload and can emit per-root JSONL child stats via `--mcts-root-decision-log`.
+
+Recommended ranked-advisor evaluation defaults after smoke tests:
+
+```bash
+--mcts-dirichlet-epsilon 0 \
+--mcts-temperature 0 \
+--mcts-luck-resamples 8 \
+--mcts-luck-resample-critical-only \
+--mcts-risk-mode mean_minus_p10 \
+--mcts-risk-lambda 0.35 \
+--mcts-root-decision-log logs/mcts_root_decisions.jsonl
+```
+
+Keep training/search-mix evaluations on `risk_mode=visit` until the risk layer has its own symmetric ablation.  The risk layer is intended for production/advisor selection, not for silently changing training targets.

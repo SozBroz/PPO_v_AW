@@ -129,7 +129,7 @@ class GameState:
     selected_move_pos: Optional[tuple[int, int]]
     done:              bool
     winner:            Optional[int]           # 0, 1, or -1 (draw)
-    win_reason:        Optional[str]           # why the game ended (set when done becomes True)
+    win_reason:        Optional[str]           # e.g. hq_capture; max_turns_tie (|Δprops|≤1); max_turns_tiebreak
     game_log:          list[dict]              # append-only action history (resolved actions only)
     tier_name:         str
     max_turns:         int = field(default=MAX_TURNS)  # calendar tiebreak after this day count (see _end_turn)
@@ -565,15 +565,17 @@ class GameState:
                 self.done = True
                 p0_props = self.count_properties(0)
                 p1_props = self.count_properties(1)
-                if p0_props > p1_props:
+                # Within 1 property → no winner; Φ uses −0.1 (see env). Diff ≥ 2
+                # is required for a calendar tiebreak winner (legacy: equal only).
+                if abs(int(p0_props) - int(p1_props)) <= 1:
+                    self.winner = -1
+                    self.win_reason = "max_turns_tie"
+                elif p0_props > p1_props:
                     self.winner = 0
                     self.win_reason = "max_turns_tiebreak"
-                elif p1_props > p0_props:
+                else:
                     self.winner = 1
                     self.win_reason = "max_turns_tiebreak"
-                else:
-                    self.winner = -1
-                    self.win_reason = "max_turns_draw"
                 return
 
         # Start of opponent's turn: reset moved flags, consume idle fuel, crash units.
@@ -2661,6 +2663,138 @@ class GameState:
         )
         return "\n".join(lines)
 
+    def _mcts_trace_pre_action(self, action: Optional[Action]) -> dict:
+        """Capture cheap pre-step metadata for MCTS stochastic-risk tracing.
+
+        This is intentionally advisory telemetry: it must not affect game rules.
+        ``apply_full_turn(return_trace=True)`` uses it to classify combat/capture
+        threshold events without forcing every normal engine step to deep-copy.
+        """
+        pre: dict = {
+            "action_type": action.action_type.name if action is not None else None,
+            "active_player": int(self.active_player),
+            "turn": int(self.turn),
+            "stage": self.action_stage.name,
+        }
+        if action is None:
+            return pre
+        if action.action_type == ActionType.ATTACK:
+            attacker = None
+            if self.selected_unit is not None and self.selected_unit.is_alive:
+                attacker = self.selected_unit
+            elif action.unit_pos is not None:
+                attacker = self.get_unit_at(*action.unit_pos)
+            defender = self.get_unit_at(*action.target_pos) if action.target_pos is not None else None
+            pre.update({
+                "attacker_id": int(attacker.unit_id) if attacker is not None else None,
+                "attacker_player": int(attacker.player) if attacker is not None else None,
+                "attacker_type": attacker.unit_type.name if attacker is not None else None,
+                "attacker_pre_hp": int(attacker.hp) if attacker is not None else None,
+                "attacker_pre_display_hp": int(attacker.display_hp) if attacker is not None else None,
+                "defender_id": int(defender.unit_id) if defender is not None else None,
+                "defender_player": int(defender.player) if defender is not None else None,
+                "defender_type": defender.unit_type.name if defender is not None else None,
+                "defender_pre_hp": int(defender.hp) if defender is not None else None,
+                "defender_pre_display_hp": int(defender.display_hp) if defender is not None else None,
+                "target_pos": list(action.target_pos) if action.target_pos is not None else None,
+                "move_pos": list(action.move_pos) if action.move_pos is not None else None,
+            })
+            if defender is not None:
+                prop = self.get_property_at(*defender.pos)
+                pre["defender_property_capture_points"] = int(prop.capture_points) if prop is not None else None
+            if attacker is not None:
+                prop = self.get_property_at(*attacker.pos)
+                pre["attacker_property_capture_points"] = int(prop.capture_points) if prop is not None else None
+        elif action.action_type == ActionType.CAPTURE:
+            unit = self.selected_unit
+            if unit is None and action.move_pos is not None:
+                unit = self.get_unit_at(*action.move_pos)
+            prop = self.get_property_at(*(action.move_pos or unit.pos)) if unit is not None else None
+            pre.update({
+                "capturer_id": int(unit.unit_id) if unit is not None else None,
+                "capturer_pre_hp": int(unit.hp) if unit is not None else None,
+                "capturer_pre_display_hp": int(unit.display_hp) if unit is not None else None,
+                "capture_points_pre": int(prop.capture_points) if prop is not None else None,
+                "property_owner_pre": int(prop.owner) if prop is not None and prop.owner is not None else None,
+            })
+        return pre
+
+    def _mcts_trace_post_action(
+        self,
+        action: Action,
+        pre: dict,
+        reward: float,
+        done: bool,
+    ) -> dict:
+        item = dict(pre)
+        item.update({"reward": float(reward), "done": bool(done)})
+        critical = False
+        if action.action_type == ActionType.ATTACK:
+            attacker_id = pre.get("attacker_id")
+            defender_id = pre.get("defender_id")
+            attacker = None
+            defender = None
+            for player_units in self.units.values():
+                for u in player_units:
+                    if attacker_id is not None and int(u.unit_id) == int(attacker_id):
+                        attacker = u
+                    if defender_id is not None and int(u.unit_id) == int(defender_id):
+                        defender = u
+            attacker_post_hp = int(attacker.hp) if attacker is not None else 0 if attacker_id is not None else None
+            defender_post_hp = int(defender.hp) if defender is not None else 0 if defender_id is not None else None
+            defender_killed = bool(defender_id is not None and defender_post_hp == 0)
+            attacker_killed = bool(attacker_id is not None and attacker_post_hp == 0)
+            dmg = None
+            counter = None
+            if pre.get("defender_pre_hp") is not None and defender_post_hp is not None:
+                dmg = max(0, int(pre["defender_pre_hp"]) - int(defender_post_hp))
+            if pre.get("attacker_pre_hp") is not None and attacker_post_hp is not None:
+                counter = max(0, int(pre["attacker_pre_hp"]) - int(attacker_post_hp))
+            capture_interrupted = False
+            if defender_killed and action.target_pos is not None:
+                prop = self.get_property_at(*action.target_pos)
+                capture_interrupted = bool(prop is not None and pre.get("defender_property_capture_points") is not None and int(pre["defender_property_capture_points"]) < 20 and prop.capture_points == 20)
+            if attacker_killed and pre.get("move_pos") is not None:
+                prop = self.get_property_at(*tuple(pre["move_pos"]))
+                capture_interrupted = capture_interrupted or bool(prop is not None and pre.get("attacker_property_capture_points") is not None and int(pre["attacker_property_capture_points"]) < 20 and prop.capture_points == 20)
+            survived_low = (
+                (defender_id is not None and defender_post_hp is not None and 0 < defender_post_hp <= 10)
+                or (attacker_id is not None and attacker_post_hp is not None and 0 < attacker_post_hp <= 10)
+            )
+            killed_from_low_margin = defender_killed or attacker_killed
+            critical = bool(survived_low or killed_from_low_margin or capture_interrupted)
+            item.update({
+                "attack_damage_roll": dmg,
+                "counter_damage_roll": counter,
+                "defender_post_hp": defender_post_hp,
+                "attacker_post_hp": attacker_post_hp,
+                "defender_killed": defender_killed,
+                "attacker_killed": attacker_killed,
+                "capture_interrupted": capture_interrupted,
+                "critical_threshold_event": critical,
+            })
+        elif action.action_type == ActionType.CAPTURE:
+            unit_id = pre.get("capturer_id")
+            unit = None
+            for player_units in self.units.values():
+                for u in player_units:
+                    if unit_id is not None and int(u.unit_id) == int(unit_id):
+                        unit = u
+                        break
+            prop = self.get_property_at(*(action.move_pos or unit.pos)) if unit is not None else None
+            item.update({
+                "capture_points_post": int(prop.capture_points) if prop is not None else None,
+                "property_owner_post": int(prop.owner) if prop is not None and prop.owner is not None else None,
+                "capture_interrupted": False,
+                "critical_threshold_event": False,
+            })
+        else:
+            item.update({
+                "capture_interrupted": False,
+                "critical_threshold_event": False,
+            })
+        return item
+
     def apply_full_turn(
         self,
         plan_or_policy: Union[list[Action], Callable[["GameState"], Action]],
@@ -2669,7 +2803,8 @@ class GameState:
         max_actions: int = 10_000,
         rng_seed: Optional[int] = None,
         on_step: Optional[Callable[[GameState, Action, float, bool], None]] = None,
-    ) -> tuple[GameState, list[Action], float, bool]:
+        return_trace: bool = False,
+    ) -> tuple[GameState, list[Action], float, bool] | tuple[GameState, list[Action], float, bool, list[dict]]:
         """
         Apply one full turn for ``self.active_player`` and return the resulting
         state at the start of the next turn (or terminal).
@@ -2743,6 +2878,7 @@ class GameState:
         actions_taken: list[Action] = []
         total_reward = 0.0
         done = False
+        turn_trace: list[dict] = []
 
         if isinstance(plan_or_policy, list):
             plan_iter = iter(plan_or_policy)
@@ -2762,6 +2898,9 @@ class GameState:
                 if state.active_player != starting_player:
                     break
                 action = get_action(state)
+                trace_pre: dict | None = None
+                if return_trace:
+                    trace_pre = state._mcts_trace_pre_action(action)
                 if action is None:
                     raise RuntimeError(
                         "plan exhausted before turn ended; "
@@ -2772,6 +2911,8 @@ class GameState:
                 _, reward, done = state.step(action)
                 actions_taken.append(action)
                 total_reward += float(reward)
+                if return_trace and trace_pre is not None:
+                    turn_trace.append(state._mcts_trace_post_action(action, trace_pre, float(reward), done))
                 if on_step is not None:
                     on_step(state, action, float(reward), done)
                 if done or state.active_player != starting_player:
@@ -2785,6 +2926,8 @@ class GameState:
             if saved_rng_state is not None:
                 _random_mod.setstate(saved_rng_state)
 
+        if return_trace:
+            return state, actions_taken, total_reward, done, turn_trace
         return state, actions_taken, total_reward, done
 
 

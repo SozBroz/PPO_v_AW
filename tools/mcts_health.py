@@ -67,6 +67,8 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from rl.game_log_win import game_log_row_learner_win
 from typing import Any, Iterator
 
 # ---------------------------------------------------------------------------
@@ -274,12 +276,7 @@ def compute_health(machine_id: str, logs_dir: Path, window: int = 200) -> MctsHe
                 pos = 0.0
         army_pos.append(pos)
 
-        w = r.get("winner")
-        try:
-            wi = int(w) if w is not None else -99
-        except (TypeError, ValueError):
-            wi = -99
-        wins.append(1.0 if wi == 0 else 0.0)
+        wins.append(1.0 if game_log_row_learner_win(r) else 0.0)
 
         t = r.get("turns")
         try:

@@ -39,7 +39,7 @@ def test_build_train_argv_uses_proposed_args() -> None:
     i = argv.index("--batch-size")
     assert argv[i + 1] == "128"
     assert "--ent-coef" in argv
-    assert "--max-env-steps" in argv and argv[argv.index("--max-env-steps") + 1] == "8000"
+    assert "--max-env-steps" in argv and argv[argv.index("--max-env-steps") + 1] == "10000"
     assert "--max-p1-microsteps" in argv and argv[argv.index("--max-p1-microsteps") + 1] == "4000"
     i_mid = argv.index("--machine-id")
     assert argv[i_mid + 1] == "pc-b"

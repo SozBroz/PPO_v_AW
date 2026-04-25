@@ -17,9 +17,16 @@ Example (Misery Andy mirror, ~7 games)::
     --games-first-seat 4 --games-second-seat 3 --seed 0 \\
     --max-env-steps 0 --max-turns 150
 
-Use ``--max-env-steps 0`` for unlimited P0 steps per game (otherwise the default
-cap can truncate before a natural winner). Use ``--max-turns`` to raise the
-engine calendar tiebreak above ``engine.game.MAX_TURNS`` (default 100).
+Default ``--max-env-steps`` is **10000** P0 steps per game (aligned with fleet training caps); use
+``0`` for unlimited. Use ``--max-turns`` to raise the engine calendar tiebreak above
+``engine.game.MAX_TURNS`` (default 100).
+
+By default all games run **concurrently** (both seating blocks in one pool).
+At most **7** worker processes run at once; use ``--no-parallel`` for sequential.
+
+With ``--turn-heartbeat`` (default on), each worker prints a line whenever the
+engine calendar day advances: funds, income-property counts, total owned
+properties, and unit counts — so long parallel games show progress.
 """
 from __future__ import annotations
 
@@ -41,6 +48,9 @@ if str(ROOT) not in sys.path:
 
 _LOG = logging.getLogger(__name__)
 
+# Each process loads a full MaskablePPO (~multi-GB). Never exceed this concurrency.
+_SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS = 7
+
 
 def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
     """Argparse for symmetric eval (used by main and tests)."""
@@ -57,10 +67,19 @@ def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deterministic", action="store_true")
     ap.add_argument("--json-out", type=Path, default=None, help="Write summary JSON for findings")
     ap.add_argument(
+        "--turn-heartbeat",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Per worker: print a line when the engine calendar day advances (funds, income props, "
+            "owned props, units). Use --no-turn-heartbeat for quiet output."
+        ),
+    )
+    ap.add_argument(
         "--max-env-steps",
         type=int,
-        default=100,
-        help="Max P0 env.step calls per game (0 = unlimited). Prevents runaway episodes.",
+        default=10000,
+        help="Max P0 env.step calls per game (0 = unlimited). Default 10000; prevents runaway episodes.",
     )
     ap.add_argument(
         "--max-p1-microsteps",
@@ -78,10 +97,12 @@ def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--parallel",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
-            "Run each seating block in parallel processes (default: false). Each worker loads a full policy "
-            "(multi-GB); use only if you have RAM for --parallel-workers concurrent loads (default cap: 2)."
+            "Run all eval games in parallel worker processes (default: true). Both seating blocks share "
+            "one pool with at most "
+            f"{_SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS} concurrent workers. Each worker loads a full policy "
+            "(multi-GB). Use --no-parallel to run sequentially."
         ),
     )
     ap.add_argument(
@@ -90,8 +111,8 @@ def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help=(
-            "Max worker processes per seating block. Default caps at min(CPU, 2) because each worker "
-            "loads a full policy (multi-GB); raise only if you have RAM headroom."
+            "Target max worker processes (default: CPU count). Hard-capped at "
+            f"{_SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS} so more than that never run at once."
         ),
     )
     ap.add_argument(
@@ -110,35 +131,82 @@ def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
             "P1 keeps the existing opponent policy. Default off."
         ),
     )
-    ap.add_argument("--mcts-sims", type=int, default=16, help="MCTS simulations per root.")
-    ap.add_argument("--mcts-c-puct", type=float, default=1.5, help="PUCT c_puct.")
-    ap.add_argument("--mcts-dirichlet-alpha", type=float, default=0.3, help="Root Dirichlet alpha.")
-    ap.add_argument("--mcts-dirichlet-epsilon", type=float, default=0.25, help="Root Dirichlet mix.")
-    ap.add_argument("--mcts-temperature", type=float, default=1.0, help="Root plan selection temperature.")
-    ap.add_argument("--mcts-min-depth", type=int, default=4, help="Min depth before PUCT.")
-    ap.add_argument("--mcts-root-plans", type=int, default=8, help="Root expansion plan samples.")
+    ap.add_argument(
+        "--mcts-rollout-stage",
+        type=str,
+        default=None,
+        choices=("mcts_0", "mcts_1", "mcts_2", "mcts_3", "mcts_4"),
+        help=(
+            "MASTERPLAN §14 preset: mcts_0=plumbing, mcts_1=eval, mcts_2=selective P0, "
+            "mcts_3=distillation-flavored defaults, mcts_4=anytime (sim cap+wall time). "
+            "Omitted MCTS args use the preset; pass individual --mcts-* to override. "
+            "See rl/mcts_rollout_stages.py."
+        ),
+    )
+    ap.add_argument(
+        "--mcts-sims",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="MCTS simulations per root (default: 16, or the rollout stage).",
+    )
+    ap.add_argument(
+        "--mcts-c-puct", type=float, default=argparse.SUPPRESS, help="PUCT c_puct (default: 1.5 or stage)."
+    )
+    ap.add_argument(
+        "--mcts-dirichlet-alpha", type=float, default=argparse.SUPPRESS, help="Root Dirichlet alpha (default: 0.3 or stage)."
+    )
+    ap.add_argument(
+        "--mcts-dirichlet-epsilon",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Root Dirichlet mix (default: 0.25 without stage, or stage).",
+    )
+    ap.add_argument(
+        "--mcts-temperature", type=float, default=argparse.SUPPRESS, help="Root plan selection (default: 1.0 or stage)."
+    )
+    ap.add_argument("--mcts-min-depth", type=int, default=argparse.SUPPRESS, help="Min depth before PUCT (default: 4 or stage).")
+    ap.add_argument("--mcts-root-plans", type=int, default=argparse.SUPPRESS, help="Root expansion plan samples (default: 8 or stage).")
     ap.add_argument(
         "--mcts-max-plan-actions",
         type=int,
-        default=256,
-        help="Max actions per simulated turn in MCTS expansion.",
+        default=argparse.SUPPRESS,
+        help="Max actions per simulated turn in MCTS expansion (default: 256).",
+    )
+    ap.add_argument(
+        "--mcts-luck-resamples", type=int, default=argparse.SUPPRESS, help="Root luck resamples (default: 0 or stage)."
+    )
+    ap.add_argument(
+        "--mcts-luck-resample-critical-only",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help="If set, only resample on critical-trace children.",
+    )
+    ap.add_argument(
+        "--mcts-risk-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=("visit", "mean", "mean_minus_p10", "constrained"),
+        help="Root risk selection mode (default: visit or stage).",
+    )
+    ap.add_argument("--mcts-risk-lambda", type=float, default=argparse.SUPPRESS, help="Tail penalty (default: 0.35).")
+    ap.add_argument("--mcts-catastrophe-value", type=float, default=argparse.SUPPRESS, help="Catastrophe value threshold (default: -0.35).")
+    ap.add_argument(
+        "--mcts-max-catastrophe-prob", type=float, default=argparse.SUPPRESS, help="Constrained mode max catastrophe prob (default: 1.0)."
+    )
+    ap.add_argument("--mcts-root-decision-log", type=str, default=argparse.SUPPRESS, help="JSONL for per-root stats.")
+    ap.add_argument(
+        "--mcts-max-wall-time-s",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Max wall seconds for the main MCTS sim loop (MCTS-4 / overrides). None = off.",
+    )
+    ap.add_argument(
+        "--mcts-p0-mcts-invocation-fraction",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fraction of P0 SELECTs that run MCTS; rest use direct policy (MCTS-2 / overrides). 1.0=always.",
     )
     return ap
-
-
-def _mcts_fields_from_args(ns: argparse.Namespace) -> dict:
-    """Subset passed to workers (JSON-serializable)."""
-    return {
-        "mcts_mode": str(ns.mcts_mode),
-        "mcts_sims": int(ns.mcts_sims),
-        "mcts_c_puct": float(ns.mcts_c_puct),
-        "mcts_dirichlet_alpha": float(ns.mcts_dirichlet_alpha),
-        "mcts_dirichlet_epsilon": float(ns.mcts_dirichlet_epsilon),
-        "mcts_temperature": float(ns.mcts_temperature),
-        "mcts_min_depth": int(ns.mcts_min_depth),
-        "mcts_root_plans": int(ns.mcts_root_plans),
-        "mcts_max_plan_actions": int(ns.mcts_max_plan_actions),
-    }
 
 
 def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
@@ -150,7 +218,14 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
 
     from rl.ckpt_compat import load_maskable_ppo_compat
     from rl.env import AWBWEnv, _action_to_flat, _flat_to_action
-    from rl.mcts import MCTSConfig, make_callables_from_sb3_policy, run_mcts
+    from dataclasses import replace
+
+    from rl.mcts import (
+        decision_log_context_from_env,
+        make_callables_from_sb3_policy,
+        run_mcts,
+    )
+    from rl.mcts_rollout_stages import mcts_config_from_eval_payload
 
     game_i = int(payload["game_i"])
     seed = int(payload["seed"])
@@ -165,6 +240,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
     max_p1_microsteps = payload.get("max_p1_microsteps")
     max_turns = payload.get("max_turns")
 
+    turn_heartbeat = bool(payload.get("turn_heartbeat", True))
     mcts_mode = str(payload.get("mcts_mode") or "off").strip().lower()
     mcts_telemetry: dict = {
         "mcts_decision_wall_s": [],
@@ -172,19 +248,21 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
         "mcts_total_wall_s": 0.0,
         "mcts_failures": 0,
         "mcts_total_decisions": 0,
+        "mcts_root_entropy": [],
+        "mcts_chosen_risk": [],
+        "mcts_decision_log_context": [],
+        "mcts_rollout_resolved": {},
     }
-    mcts_cfg = MCTSConfig(
-        num_sims=int(payload.get("mcts_sims", 16)),
-        c_puct=float(payload.get("mcts_c_puct", 1.5)),
-        dirichlet_alpha=float(payload.get("mcts_dirichlet_alpha", 0.3)),
-        dirichlet_epsilon=float(payload.get("mcts_dirichlet_epsilon", 0.25)),
-        temperature=float(payload.get("mcts_temperature", 1.0)),
-        min_depth=int(payload.get("mcts_min_depth", 4)),
-        root_plans=int(payload.get("mcts_root_plans", 8)),
-        max_plan_actions=int(payload.get("mcts_max_plan_actions", 256)),
-    )
+    mcts_cfg = mcts_config_from_eval_payload({**payload, "mcts_mode": mcts_mode})
+    mcts_telemetry["mcts_rollout_resolved"] = {
+        "mcts_rollout_stage": mcts_cfg.rollout_stage,
+        "num_sims": mcts_cfg.num_sims,
+        "max_wall_time_s": mcts_cfg.max_wall_time_s,
+        "p0_mcts_invocation_fraction": mcts_cfg.p0_mcts_invocation_fraction,
+    }
     use_mcts = mcts_mode == "eval_only" and mcts_cfg.num_sims > 0
     zero_warned = False
+    p0_select_n = 0
 
     def _pred_int(act: object) -> int:
         if isinstance(act, int | np.integer):
@@ -226,6 +304,7 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
     last_trunc = False
 
     uenv = env.unwrapped
+    last_hb_day = uenv.state.turn
     cached_plan: deque = deque()
     mid_turn_plan_exhausted = False
     mcts_decision_ix = 0
@@ -255,34 +334,44 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
         elif mid_turn_plan_exhausted:
             act_idx = _p0_flat_direct()
         elif st.action_stage == ActionStage.SELECT:
+            p0_select_n += 1
             try:
-                root = copy.deepcopy(st)
-                pol_c, val_c, prior_c = make_callables_from_sb3_policy(p0, uenv)
-                mcts_cfg_run = MCTSConfig(
-                    num_sims=mcts_cfg.num_sims,
-                    c_puct=mcts_cfg.c_puct,
-                    dirichlet_alpha=mcts_cfg.dirichlet_alpha,
-                    dirichlet_epsilon=mcts_cfg.dirichlet_epsilon,
-                    temperature=mcts_cfg.temperature,
-                    min_depth=mcts_cfg.min_depth,
-                    root_plans=mcts_cfg.root_plans,
-                    max_plan_actions=mcts_cfg.max_plan_actions,
-                    rng_seed=int(seed) ^ (mcts_decision_ix * 0x9E3779B9),
-                )
-                mcts_decision_ix += 1
-                plan, stats = run_mcts(
-                    root,
-                    policy_callable=pol_c,
-                    value_callable=val_c,
-                    prior_callable=prior_c,
-                    config=mcts_cfg_run,
-                )
-                mcts_telemetry["mcts_decision_wall_s"].append(float(stats["wall_time_s"]))
-                mcts_telemetry["mcts_pv_depths"].append(int(stats["principal_variation_depth"]))
-                mcts_telemetry["mcts_total_wall_s"] += float(stats["wall_time_s"])
-                mcts_telemetry["mcts_total_decisions"] += 1
-                if plan:
-                    cached_plan.extend(plan)
+                if (
+                    use_mcts
+                    and float(mcts_cfg.p0_mcts_invocation_fraction) < 1.0
+                    and np.random.default_rng(
+                        (int(seed) * 0x9E3779B9) ^ (p0_select_n * 0xC2B2AE3D)
+                    ).random()
+                    >= float(mcts_cfg.p0_mcts_invocation_fraction)
+                ):
+                    act_idx = _p0_flat_direct()
+                else:
+                    root = copy.deepcopy(st)
+                    pol_c, val_c, prior_c = make_callables_from_sb3_policy(p0, uenv)
+                    mcts_cfg_run = replace(
+                        mcts_cfg,
+                        rng_seed=int(seed) ^ (mcts_decision_ix * 0x9E3779B9),
+                    )
+                    mcts_decision_ix += 1
+                    plan, stats = run_mcts(
+                        root,
+                        policy_callable=pol_c,
+                        value_callable=val_c,
+                        prior_callable=prior_c,
+                        config=mcts_cfg_run,
+                        decision_log_context=decision_log_context_from_env(uenv),
+                    )
+                    mcts_telemetry["mcts_decision_wall_s"].append(float(stats["wall_time_s"]))
+                    mcts_telemetry["mcts_pv_depths"].append(int(stats["principal_variation_depth"]))
+                    mcts_telemetry["mcts_total_wall_s"] += float(stats["wall_time_s"])
+                    mcts_telemetry["mcts_total_decisions"] += 1
+                    mcts_telemetry["mcts_root_entropy"].append(float(stats.get("root_visit_entropy", 0.0)))
+                    mcts_telemetry["mcts_chosen_risk"].append(stats.get("chosen_risk", {}))
+                    mcts_telemetry["mcts_decision_log_context"].append(
+                        stats.get("decision_log_context", {})
+                    )
+                    if plan:
+                        cached_plan.extend(plan)
             except Exception:
                 mcts_telemetry["mcts_failures"] += 1
                 _LOG.error("[sym] MCTS failed; falling back to direct policy for this step\n%s", traceback.format_exc())
@@ -306,6 +395,21 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
 
         dec = _flat_to_action(int(act_idx), st_pre, legal=uenv._get_legal())
         st_after = uenv.state
+        if turn_heartbeat and st_after.turn > last_hb_day:
+            s = st_after
+            p0i = s.count_income_properties(0)
+            p1i = s.count_income_properties(1)
+            p0a = s.count_properties(0)
+            p1a = s.count_properties(1)
+            u0 = len(s.units[0])
+            u1 = len(s.units[1])
+            print(
+                f"[sym] hb g={game_i} day={s.turn} ap={s.active_player} "
+                f"funds=({s.funds[0]},{s.funds[1]}) inc_props=({p0i},{p1i}) "
+                f"props=({p0a},{p1a}) units=({u0},{u1})",
+                flush=True,
+            )
+            last_hb_day = s.turn
         if len(cached_plan) > 0:
             mid_turn_plan_exhausted = False
         elif dec is not None and dec.action_type == ActionType.END_TURN:
@@ -322,6 +426,17 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
     w_raw = env.unwrapped.state.winner
     w = -1 if w_raw is None else int(w_raw)
     return game_i, w, last_trunc, mcts_telemetry
+
+
+def mcts_work_payload_from_argparse(ns: argparse.Namespace) -> dict:
+    """Lazily import rl (engine) so this module stays safe for tests that set env first."""
+    from rl.mcts_rollout_stages import mcts_work_payload_from_argparse as _impl
+
+    return _impl(ns)
+
+
+# Backward compat for tests: old name
+_mcts_fields_from_args = mcts_work_payload_from_argparse
 
 
 def main() -> int:
@@ -370,7 +485,7 @@ def main() -> int:
             raise SystemExit("no maps for --map-id")
         pool_json = json.dumps(map_pool)
         rng = np.random.default_rng(args.seed)
-        mcts_payload = _mcts_fields_from_args(args)
+        mcts_payload = mcts_work_payload_from_argparse(args)
 
         results: list[dict] = []
         cand_wins = 0
@@ -409,6 +524,7 @@ def main() -> int:
                 "max_env_steps": max_env_steps,
                 "max_p1_microsteps": args.max_p1_microsteps,
                 "max_turns": args.max_turns,
+                "turn_heartbeat": bool(args.turn_heartbeat),
                 **mcts_payload,
             }
 
@@ -448,97 +564,82 @@ def main() -> int:
                 }
             )
 
-        def run_block(
-            *,
-            challenger: Path,
-            defender: Path,
-            n_games: int,
-            label: str,
-        ) -> None:
-            nonlocal game_no, cand_wins, base_wins
-            if n_games <= 0:
-                return
-            tasks: list[tuple[int, int]] = []
-            for _ in range(n_games):
-                game_no += 1
-                seed = int(rng.integers(0, 2**31 - 1))
-                tasks.append((game_no, seed))
-
+        def _effective_parallel_workers(n_tasks: int) -> int:
             cpu = os.cpu_count() or 4
             if args.parallel_workers is not None:
-                cap = int(args.parallel_workers)
+                raw = max(1, int(args.parallel_workers))
             else:
-                # Uncapped parallel (e.g. one worker per game) can OOM: each process loads MaskablePPO + buffers.
-                cap = min(cpu, 2)
-            workers = max(1, min(n_games, cap))
-            use_parallel = bool(args.parallel) and n_games > 1 and workers > 1
-            if use_parallel:
-                payloads = [
-                    _mk_worker_payload(gn, sd, challenger, defender) for gn, sd in tasks
-                ]
-                print(f"[sym] parallel block={label} workers={workers} games={n_games}")
-                with ProcessPoolExecutor(max_workers=workers) as ex:
-                    futs = {ex.submit(_worker_game, p): p for p in payloads}
-                    by_i: dict[int, tuple[int, bool, dict]] = {}
-                    for fut in as_completed(futs):
-                        p = futs[fut]
-                        gi, w, was_trunc, tel = fut.result()
-                        by_i[int(gi)] = (w, was_trunc, tel)
-                for gn, sd in tasks:
-                    w, was_trunc, tel = by_i[gn]
-                    _accumulate_mcts_tel(tel)
-                    if challenger == cand_snap:
-                        cw = w == 0
-                        bw = w == 1
-                    else:
-                        cw = w == 1
-                        bw = w == 0
-                    if cw:
-                        cand_wins += 1
-                    elif bw:
-                        base_wins += 1
-                    print(
-                        f"[sym] game={gn} block={label} seed={sd} winner_p0={w} "
-                        f"candidate_win={cw} truncated={was_trunc}"
-                    )
-                    results.append(
-                        {
-                            "game": gn,
-                            "block": label,
-                            "seed": sd,
-                            "winner": w,
-                            "candidate_win": cw,
-                            "truncated": was_trunc,
-                        }
-                    )
-            else:
-                for gn, sd in tasks:
-                    _one_game_outcome(
-                        challenger=challenger,
-                        defender=defender,
-                        game_no=gn,
-                        seed=sd,
-                        label=label,
-                    )
+                raw = max(1, int(cpu))
+            return max(1, min(n_tasks, raw, _SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS))
+
+        all_jobs: list[tuple[int, int, Path, Path, str]] = []
+        for _ in range(args.games_first_seat):
+            game_no += 1
+            seed = int(rng.integers(0, 2**31 - 1))
+            all_jobs.append((game_no, seed, cand_snap, base_snap, "candidate_P0"))
+        for _ in range(args.games_second_seat):
+            game_no += 1
+            seed = int(rng.integers(0, 2**31 - 1))
+            all_jobs.append((game_no, seed, base_snap, cand_snap, "candidate_P1"))
+
+        n_tasks = len(all_jobs)
+        workers = _effective_parallel_workers(n_tasks) if n_tasks else 1
+        use_parallel = bool(args.parallel) and n_tasks > 1 and workers > 1
 
         print(
             f"[sym] candidate_as_P0 x{args.games_first_seat} "
             f"then candidate_as_P1 x{args.games_second_seat} "
             f"(max_env_steps={max_env_steps}, max_turns={args.max_turns}, "
-            f"parallel={args.parallel}, mcts_mode={args.mcts_mode})"
+            f"parallel={args.parallel}, parallel_workers={workers}, "
+            f"parallel_workers_max={_SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS}, mcts_mode={args.mcts_mode})"
         )
-        run_block(
-            challenger=cand_snap,
-            defender=base_snap,
-            n_games=args.games_first_seat,
-            label="candidate_P0",
-        )
-        run_block(
-            challenger=base_snap,
-            defender=cand_snap,
-            n_games=args.games_second_seat,
-            label="candidate_P1",
-        )
+
+        if use_parallel:
+            payloads = [_mk_worker_payload(gn, sd, ch, df) for gn, sd, ch, df, _lb in all_jobs]
+            print(f"[sym] parallel all_blocks workers={workers} games={n_tasks}")
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(_worker_game, p): p for p in payloads}
+                by_i: dict[int, tuple[int, bool, dict]] = {}
+                for fut in as_completed(futs):
+                    p = futs[fut]
+                    gi, w, was_trunc, tel = fut.result()
+                    by_i[int(gi)] = (w, was_trunc, tel)
+            for gn, sd, ch, df, label in all_jobs:
+                w, was_trunc, tel = by_i[gn]
+                _accumulate_mcts_tel(tel)
+                if ch == cand_snap:
+                    cw = w == 0
+                    bw = w == 1
+                else:
+                    cw = w == 1
+                    bw = w == 0
+                if cw:
+                    cand_wins += 1
+                elif bw:
+                    base_wins += 1
+                print(
+                    f"[sym] game={gn} block={label} seed={sd} winner_p0={w} "
+                    f"candidate_win={cw} truncated={was_trunc}"
+                )
+                results.append(
+                    {
+                        "game": gn,
+                        "block": label,
+                        "seed": sd,
+                        "winner": w,
+                        "candidate_win": cw,
+                        "truncated": was_trunc,
+                    }
+                )
+        else:
+            for gn, sd, ch, df, label in all_jobs:
+                _one_game_outcome(
+                    challenger=ch,
+                    defender=df,
+                    game_no=gn,
+                    seed=sd,
+                    label=label,
+                )
 
         results.sort(key=lambda r: int(r["game"]))
 
@@ -571,7 +672,8 @@ def main() -> int:
                 "baseline_snapshot": str(base_snap),
                 "eval_snapshot_run_id": run_id,
                 "parallel": bool(args.parallel),
-                "parallel_workers": args.parallel_workers,
+                "parallel_workers": int(workers),
+                "parallel_workers_max": _SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS,
                 "map_id": args.map_id,
                 "tier": args.tier,
                 "max_env_steps": max_env_steps,
@@ -580,6 +682,7 @@ def main() -> int:
                 "co_p0": args.co_p0,
                 "co_p1": args.co_p1,
                 "phi_profile": str(args.phi_profile),
+                "turn_heartbeat": bool(args.turn_heartbeat),
                 "candidate_wins": cand_wins,
                 "baseline_wins": base_wins,
                 "per_seat": {"candidate_as_p0": [w_p0, n_p0], "candidate_as_p1": [w_p1, n_p1]},

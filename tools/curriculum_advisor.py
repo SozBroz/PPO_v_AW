@@ -39,6 +39,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from rl.game_log_win import game_log_row_learner_win
+
 FLAG_PRESENT = "_FLAG_PRESENT"
 
 PROBE_OWNED_KEYS = frozenset({"--n-envs", "--n-steps", "--batch-size"})
@@ -217,12 +219,7 @@ def compute_metrics(
                 pos = 0.0
         army_pos.append(pos)
 
-        w = r.get("winner")
-        try:
-            wi = int(w) if w is not None else -99
-        except (TypeError, ValueError):
-            wi = -99
-        wins.append(1.0 if wi == 0 else 0.0)
+        wins.append(1.0 if game_log_row_learner_win(r) else 0.0)
 
         t = r.get("turns")
         try:

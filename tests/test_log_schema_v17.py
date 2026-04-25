@@ -1,4 +1,4 @@
-"""Schema 1.9 contract: 1.8 fields plus restart-bundle training context keys.
+"""Schema 1.11 contract: 1.10 fields plus env-step-cap synthetic ``winner`` / ``win_reason``.
 
 Plan: ``.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`` — Phase 10/11
 logging prerequisites. Without ``machine_id`` on every row the orchestrator's
@@ -7,7 +7,10 @@ per-machine rolling-window logic in 10g/10h/11d is impossible; without
 
 Schema 1.8 added explicit episode-end flags. Schema 1.9 adds ``learner_seat``,
 ``reward_mode``, ``arch_version``, ``opponent_sampler``; ``agent_plays`` mirrors
-``learner_seat``.
+``learner_seat``. Schema 1.10 adds optional ``tie_breaker_property_count`` (int)
+for step-cap property-lead partial wins. Schema 1.11 logs P0 vs P1 property
+tiebreak for env truncation when the engine never set a winner
+(``env_step_cap_tie`` / ``env_step_cap_tiebreak``).
 
 The writer (``_append_game_log_line``) stamps ``machine_id`` from the env
 var ``AWBW_MACHINE_ID`` at write time so a solo dev box without the var
@@ -77,7 +80,8 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     monkeypatch.delenv("AWBW_MACHINE_ID", raising=False)
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
-    assert row["log_schema_version"] == "1.9"
+    assert row["log_schema_version"] == "1.11"
+    assert row.get("tie_breaker_property_count") is None
 
     assert row.get("learner_seat") in (0, 1)
     assert row.get("agent_plays") == row.get("learner_seat")
@@ -109,5 +113,5 @@ def test_log_schema_v17_machine_id_from_env(
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
     assert row["machine_id"] == "test-pc"
-    assert row["log_schema_version"] == "1.9"
+    assert row["log_schema_version"] == "1.11"
     assert isinstance(row["terrain_usage_p0"], float)

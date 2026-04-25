@@ -86,12 +86,14 @@ Make **turn-level PUCT** in this repo ([`rl/mcts.py`](c:\Users\phili\AWBW\rl\mct
 
 | Piece | Role |
 |--------|------|
-| [`engine/game.py`](c:\Users\phili\AWBW\engine\game.py) `apply_full_turn` | Rollout primitive: one **full player turn** from SELECT. |
-| [`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py) | PUCT at **turn nodes**; children = up to **`root_plans`** sampled full-turn outcomes; root Dirichlet optional; `min_depth` prior phase; `make_callables_from_sb3_policy`. |
-| [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py) | Where **`eval_only`** MCTS runs; caches plan, steps action-by-action; telemetry JSON. |
+| [`engine/game.py`](c:\Users\phili\AWBW\engine\game.py) `apply_full_turn` | Rollout primitive: one **full player turn** from SELECT. Optional **`return_trace=True`** → 5-tuple with per-step MCTS trace; default 4-tuple unchanged. |
+| [`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py) | PUCT at **turn nodes**; **`root_plans`** children; Dirichlet / `min_depth`; `make_callables_from_sb3_policy`. **Root risk layer:** `luck_resamples`, `risk_mode`, `EdgeStats`, optional JSONL decision log; default selection remains visit-based. |
+| [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py) | **`eval_only`** MCTS; telemetry JSON; CLI for luck/risk; **`mcts_root_entropy`**, **`mcts_chosen_risk`**. |
 | [`tools/mcts_health.py`](c:\Users\phili\AWBW\tools\mcts_health.py) | Competence gate for turning MCTS on per machine. |
 | [`tools/mcts_escalator.py`](c:\Users\phili\AWBW\tools\mcts_escalator.py) | Sim budget escalator; pair with eval summaries. |
-| [`MASTERPLAN.md`](c:\Users\phili\AWBW\MASTERPLAN.md) §4 | Phase 2 narrative: policy “prunes” branching, V(s) at leaves, **EV / distribution** warnings. |
+| [`MASTERPLAN.md`](c:\Users\phili\AWBW\MASTERPLAN.md) §4, **§14** | Phase 2 narrative; **staged MCTS-0…4** rollout ladder + risk-layer implementation table. |
+
+**Rollout stages** are in **MASTERPLAN §14** (MCTS-0 … MCTS-4). This campaign file is **scale-up / perf / tuning**, not a separate stage ladder.
 
 **Horizon intuition (your “2 days = 4 turns”):** four **player-turns** from root ≈ **4 turn-nodes** along a line (P0→P1→P0→P1). Deeper “what-if” lines to ~4 **game days** ≈ **8 turn-nodes**. Search should **allocate** visits via PUCT; do not assume every sim reaches max depth — value head handles early leaves.
 

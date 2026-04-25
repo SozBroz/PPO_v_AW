@@ -1483,7 +1483,7 @@ class SelfPlayTrainer:
         mcts_min_depth: int = 4,
         mcts_root_plans: int = 8,
         mcts_max_plan_actions: int = 256,
-        max_env_steps: int | None = 8000,
+        max_env_steps: int | None = 10000,
         max_p1_microsteps: int | None = 4000,
         live_games_id: list[int] | None = None,
         live_learner_seats: list[int] | None = None,

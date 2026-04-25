@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 
+from rl.game_log_win import game_log_row_learner_win
+
 # ---------------------------------------------------------------------------
 # Public structures
 # ---------------------------------------------------------------------------
@@ -164,15 +166,7 @@ def _median(xs: list[float]) -> float:
 def _win_rate(rows: list[dict[str, Any]]) -> float:
     if not rows:
         return 0.0
-    wins = 0
-    for r in rows:
-        w = r.get("winner")
-        try:
-            wi = int(w) if w is not None else -99
-        except (TypeError, ValueError):
-            wi = -99
-        if wi == 0:
-            wins += 1
+    wins = sum(1 for r in rows if game_log_row_learner_win(r))
     return wins / len(rows)
 
 

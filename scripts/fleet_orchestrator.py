@@ -241,7 +241,7 @@ DEFAULT_TRAIN_PERF_ENV: dict[str, str] = {
     # Keep env-level Phi and engine-side capture shaping gate aligned before
     # ``engine.game`` imports in train workers.
     "AWBW_REWARD_SHAPING": "phi",
-    # Small pressure against endless shaped-reward slogs; at 8000 P0 steps this
+    # Small pressure against endless shaped-reward slogs; at 10k P0 steps this
     # is -0.4 plus the fixed truncation penalty below.
     "AWBW_TIME_COST": "0.00005",
     "AWBW_TRUNCATION_PENALTY": "0.25",
@@ -336,7 +336,7 @@ def build_train_argv_from_proposed_args(
     head.extend(
         [
             "--max-env-steps",
-            str(int(g("--max-env-steps", 8000))),
+            str(int(g("--max-env-steps", 10000))),
             "--max-p1-microsteps",
             str(int(g("--max-p1-microsteps", 4000))),
         ]

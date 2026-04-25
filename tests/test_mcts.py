@@ -18,7 +18,12 @@ from engine.action import Action, ActionType, get_legal_actions  # noqa: E402
 from engine.game import GameState, make_initial_state  # noqa: E402
 from engine.map_loader import load_map  # noqa: E402
 from rl.env import AWBWEnv  # noqa: E402
-from rl.mcts import MCTSConfig, make_callables_from_sb3_policy, run_mcts  # noqa: E402
+from rl.mcts import (  # noqa: E402
+    MCTSConfig,
+    decision_log_context_from_env,
+    make_callables_from_sb3_policy,
+    run_mcts,
+)
 
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
@@ -256,3 +261,130 @@ def test_make_callables_sb3_smoke() -> None:
     )
     assert len(plan) >= 1
     assert stats["total_sims_run"] == 2
+
+
+def test_decision_log_context_from_env_matches_game_log_keys() -> None:
+    env = AWBWEnv(
+        map_pool=_map_pool_single(),
+        opponent_policy=None,
+        co_p0=10,
+        co_p1=23,
+        tier_name="T2",
+        curriculum_tag="stage1-misery-andy",
+    )
+    env.reset(seed=0)
+    ctx = decision_log_context_from_env(env)
+    assert set(ctx.keys()) >= {
+        "curriculum_tag",
+        "map_id",
+        "tier",
+        "p0_co_id",
+        "p1_co_id",
+        "p0_env_steps",
+        "turn",
+        "truncated",
+        "truncation_reason",
+    }
+    assert ctx["curriculum_tag"] == "stage1-misery-andy"
+    assert ctx["truncated"] is False
+    assert ctx["truncation_reason"] is None
+
+
+def test_mcts_root_decision_log_merges_decision_log_context(tmp_path: Path) -> None:
+    s = _fresh_state()
+
+    def policy_callable(st: GameState) -> Action:
+        leg = get_legal_actions(st)
+        assert leg
+        return leg[0]
+
+    log_path = tmp_path / "root_mcts.jsonl"
+    ctx = {
+        "curriculum_tag": "stage2",
+        "map_id": 123858,
+        "tier": "T2",
+        "p0_co_id": 1,
+        "p1_co_id": 2,
+        "p0_env_steps": 5,
+        "turn": 3,
+        "truncated": False,
+        "truncation_reason": None,
+    }
+    cfg = MCTSConfig(
+        num_sims=2,
+        root_plans=1,
+        min_depth=0,
+        dirichlet_epsilon=0.0,
+        temperature=0.0,
+        rng_seed=42,
+        root_decision_log_path=str(log_path),
+    )
+    _plan, stats = run_mcts(
+        s,
+        policy_callable=policy_callable,
+        value_callable=lambda _st: 0.0,
+        prior_callable=lambda _st, plans: [1.0 / len(plans)] * len(plans),
+        config=cfg,
+        decision_log_context=ctx,
+    )
+    assert stats["decision_log_context"] == ctx
+    line = log_path.read_text(encoding="utf-8").strip().splitlines()[-1]
+    rec = json.loads(line)
+    for k, v in ctx.items():
+        assert rec.get(k) == v
+
+
+def test_mcts_luck_resample_stats_schema() -> None:
+    s = _fresh_state()
+
+    def policy_callable(st: GameState) -> Action:
+        leg = get_legal_actions(st)
+        assert leg
+        return leg[0]
+
+    cfg = MCTSConfig(
+        num_sims=2,
+        root_plans=1,
+        min_depth=0,
+        dirichlet_epsilon=0.0,
+        temperature=0.0,
+        rng_seed=1234,
+        luck_resamples=2,
+        luck_resample_critical_only=False,
+        risk_mode="mean_minus_p10",
+    )
+    plan, stats = run_mcts(
+        s,
+        policy_callable=policy_callable,
+        value_callable=lambda _st: 0.0,
+        prior_callable=lambda _st, plans: [1.0 / len(plans)] * len(plans),
+        config=cfg,
+    )
+    assert plan
+    assert stats["risk_mode"] == "mean_minus_p10"
+    assert stats["luck_resamples"] == 2
+    assert isinstance(stats["chosen_risk"], dict)
+    assert stats["chosen_risk"]["resample_count"] == 2
+    assert isinstance(stats["root_child_stats"], list)
+    assert stats["root_child_stats"]
+
+
+def test_apply_full_turn_return_trace_schema() -> None:
+    s = _fresh_state()
+    legal = get_legal_actions(s)
+    assert legal
+    result = s.apply_full_turn(
+        [Action(ActionType.END_TURN)],
+        copy=True,
+        max_actions=8,
+        rng_seed=5,
+        return_trace=True,
+    )
+    assert len(result) == 5
+    _st, actions, _reward, done, trace = result
+    assert actions
+    assert done is False
+    assert isinstance(trace, list)
+    assert trace
+    assert "action_type" in trace[0]
+    assert "critical_threshold_event" in trace[0]
