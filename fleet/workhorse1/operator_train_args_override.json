@@ -2,15 +2,20 @@
   "args": {
     "--training-backend": "async",
     "--n-envs": 8,
-    "--stage1-narrow": true,
-    "--map-id": 123858,
+    "--n-steps": 1024,
+    "--batch-size": 1024,
+    "--map-id": null,
     "--tier": "T3",
     "--co-p0": 1,
     "--co-p1": 1,
-    "--curriculum-tag": "stage1-misery-andy",
+    "--learner-greedy-mix": 0.05,
+    "--cold-opponent": "greedy_mix",
+    "--curriculum-broad-prob": 0.0,
+    "--curriculum-tag": "gl_std_pool_t3_andy_mirror",
+    "--capture-move-gate": false,
     "--live-games-id": null,
     "--live-snapshot-dir": null,
     "--live-learner-seats": null
   },
-  "reasoning": "IMPALA async for throughput; Phase 1a Misery T3 Andy mirror; no live-game injects (pc-b paths)."
+  "reasoning": "stage_d_gl_std_map_pool_t3: GL Std map pool (omit --map-id), T3 Andy mirror, greedy_mix; replaced Phase 1a stage1-narrow 123858 override."
 }

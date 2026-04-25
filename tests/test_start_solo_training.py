@@ -100,6 +100,58 @@ def test_initial_curriculum_merge_omits_stage_d_map_id(
     assert "--curriculum-tag" in argv
 
 
+def test_operator_train_args_override_merges_after_curriculum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _load_sst()
+    import logging
+
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    mid = "wo-test"
+    fleet = tmp_path / "fleet" / mid
+    fleet.mkdir(parents=True)
+    state = {
+        "current_stage_name": "stage_d_gl_std_map_pool_t3",
+        "entered_stage_at_ts": 1.0,
+        "games_observed_in_stage": 0,
+        "last_proposal_ts": 1.0,
+        "last_seen_finished_games": 0,
+    }
+    (fleet / "curriculum_state.json").write_text(json.dumps(state), encoding="utf-8")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "game_log.jsonl").write_text("", encoding="utf-8")
+    (fleet / "operator_train_args_override.json").write_text(
+        json.dumps(
+            {
+                "args": {
+                    "--n-envs": 99,
+                    "--map-id": None,
+                },
+                "reasoning": "op test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    proposed = {
+        "machine_id": mid,
+        "args": {"--n-envs": 4, "--n-steps": 1024, "--batch-size": 1024},
+    }
+    merged = m._merge_curriculum_for_initial_launch(
+        proposed,
+        machine_id=mid,
+        state_path=fleet / "curriculum_state.json",
+        log=logging.getLogger("t"),
+        write_state=False,
+    )
+    merged2 = m._merge_operator_train_args_override_into_proposed(
+        merged, fleet_dir=fleet, log=logging.getLogger("t")
+    )
+    assert merged2["args"]["--n-envs"] == 99
+    assert merged2["args"]["--map-id"] is None
+    # Curriculum still set tier etc.
+    assert merged2["args"]["--tier"] == "T3"
+
+
 def test_launch_env_sets_machine_and_flags() -> None:
     m = _load_sst()
     e = m._launch_env(machine_id="pc-b")

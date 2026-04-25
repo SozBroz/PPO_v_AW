@@ -21,7 +21,9 @@ Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps 
   map/CO defaults). ``--cold-opponent`` / ``--learner-greedy-mix`` match bare ``train.py``
   (``random`` / ``0.0``) unless ``proposed_args`` or curriculum sets them. Stage A/B
   capture/bootstrap knobs come from the orchestrator curriculum merge into ``proposed_args.json``,
-  not from static ``propose_train_args`` output. Operator can override via ``--train-extra-args``.
+  not from static ``propose_train_args`` output. After curriculum, the **first** launch applies
+  ``fleet/<id>/operator_train_args_override.json`` per-flag (same order as
+  :mod:`scripts.fleet_orchestrator` on a tick). Remaining gaps: ``--train-extra-args``.
   ``n_envs<=4`` on pc-b is operator-validated
   (FPS plan 2026-04-22); propose_train_args enforces the cap from probe.
 
@@ -638,6 +640,50 @@ def _merge_curriculum_for_initial_launch(
         sorted(prop.args_overrides),
     )
     return merged
+
+
+_OPERATOR_TRAIN_ARGS_OVERRIDE_BASENAME = "operator_train_args_override.json"
+
+
+def _merge_operator_train_args_override_into_proposed(
+    proposed: dict[str, Any],
+    *,
+    fleet_dir: Path,
+    log: logging.Logger,
+) -> dict[str, Any]:
+    """Apply ``fleet/<id>/operator_train_args_override.json`` ``args`` on top of *proposed*.
+
+    Matches :mod:`scripts.fleet_orchestrator` tick path (curriculum merge, then per-flag override)
+    so the **first** ``train.py`` matches what the next orchestrator refresh would have applied.
+    """
+    path = fleet_dir / _OPERATOR_TRAIN_ARGS_OVERRIDE_BASENAME
+    if not path.is_file():
+        return proposed
+    try:
+        raw = _read_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("operator override unreadable %s: %s", path, exc)
+        return proposed
+    override_args = raw.get("args") if isinstance(raw, dict) else None
+    if not isinstance(override_args, dict) or not override_args:
+        return proposed
+    out = {**proposed}
+    am = dict(out.get("args") or {})
+    applied: list[str] = []
+    for k, ov in override_args.items():
+        if not isinstance(k, str) or not k.startswith("--"):
+            log.warning("ignoring non-flag key in %s: %r", path, k)
+            continue
+        am[k] = ov
+        applied.append(k)
+    out["args"] = am
+    if applied:
+        log.info(
+            "operator_train_args_override applied (%s): %s",
+            path,
+            ", ".join(sorted(applied)),
+        )
+    return out
 
 
 def _tail_text_file(
@@ -1598,6 +1644,9 @@ def main() -> int:
                 log=log,
                 write_state=False,
             )
+            proposed_fake = _merge_operator_train_args_override_into_proposed(
+                proposed_fake, fleet_dir=fleet_dir, log=log
+            )
         probe_tune: dict[str, Any] = {}
         pp = fleet_dir / "probe.json"
         if pp.is_file():
@@ -1758,6 +1807,9 @@ def main() -> int:
         state_path=fleet_dir / "curriculum_state.json",
         log=log,
         write_state=True,
+    )
+    proposed = _merge_operator_train_args_override_into_proposed(
+        proposed, fleet_dir=fleet_dir, log=log
     )
     extra = shlex.split(args.train_extra_args, posix=os.name != "nt")
     probe_tune: dict[str, Any] = {}
