@@ -339,6 +339,12 @@ def _mask_fn(env: "AWBWEnv") -> np.ndarray:  # type: ignore[name-defined]
     return env.action_masks()
 
 
+def _ensure_win32_processor_env_for_sb3_save() -> None:
+    """SB3's ``save`` embeds ``get_system_info``; without this, some Win+Py3.12 hosts hit WMI KeyError."""
+    if sys.platform == "win32" and not (os.environ.get("PROCESSOR_IDENTIFIER") or "").strip():
+        os.environ["PROCESSOR_IDENTIFIER"] = "Unknown"
+
+
 def _atomic_model_save(model, dest_no_ext: str | os.PathLike) -> None:
     """
     Save an SB3 model to ``<dest_no_ext>.zip`` atomically.
@@ -356,6 +362,7 @@ def _atomic_model_save(model, dest_no_ext: str | os.PathLike) -> None:
     opponent process can still race a partial read; this keeps a single
     final rename.
     """
+    _ensure_win32_processor_env_for_sb3_save()
     dest = Path(dest_no_ext)
     final_zip = dest.parent / f"{dest.name}.zip"
     tmp_base = dest.parent / f"{dest.name}_saving"  # Path.suffix must be ""
@@ -2172,6 +2179,7 @@ class SelfPlayTrainer:
         os.close(_fd)
         tmp_path = Path(_tp)
         try:
+            _ensure_win32_processor_env_for_sb3_save()
             model.save(str(tmp_path))
         except Exception as exc:  # noqa: BLE001
             new_vec.close()
