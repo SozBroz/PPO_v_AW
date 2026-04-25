@@ -56,7 +56,11 @@ def _write_log(p: Path, rows: list[dict]) -> None:
 def test_normalize_stage_d_shorthand() -> None:
     assert (
         normalize_curriculum_stage_name("stage_d")
-        == "stage_d_gl_std_map_pool_t3"
+        == "stage_d_gl_std_map_pool_t4"
+    )
+    assert (
+        normalize_curriculum_stage_name("stage_d_gl_std_map_pool_t3")
+        == "stage_d_gl_std_map_pool_t4"
     )
     assert normalize_curriculum_stage_name("stage_d_self_play_pure") == (
         "stage_f_self_play_pure"
@@ -82,7 +86,7 @@ def test_read_state_accepts_stage_d_shorthand(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     st = read_state(p)
-    assert st.current_stage_name == "stage_d_gl_std_map_pool_t3"
+    assert st.current_stage_name == "stage_d_gl_std_map_pool_t4"
 
 
 def test_classify_respects_stage_d_shorthand() -> None:
@@ -102,8 +106,8 @@ def test_classify_respects_stage_d_shorthand() -> None:
         episode_quality=0.0,
     )
     name, reason = classify_stage(m, st, DEFAULT_SCHEDULE)
-    assert name == "stage_d_gl_std_map_pool_t3"
-    assert "stage_d_gl_std_map_pool_t3" in reason or "holding" in reason
+    assert name == "stage_d_gl_std_map_pool_t4"
+    assert "stage_d_gl_std_map_pool_t4" in reason or "holding" in reason
 
 
 def test_cold_start_stage_a(tmp_path: Path) -> None:

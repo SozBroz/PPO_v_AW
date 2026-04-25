@@ -5,17 +5,17 @@
     "--n-steps": 1024,
     "--batch-size": 1024,
     "--map-id": null,
-    "--tier": "T3",
-    "--co-p0": 1,
-    "--co-p1": 1,
+    "--tier": "T4",
+    "--co-p0": 14,
+    "--co-p1": 14,
     "--learner-greedy-mix": 0.05,
     "--cold-opponent": "greedy_mix",
     "--curriculum-broad-prob": 0.0,
-    "--curriculum-tag": "gl_std_pool_t3_andy_mirror",
+    "--curriculum-tag": "gl_std_pool_t4_jess_mirror",
     "--capture-move-gate": false,
     "--live-games-id": null,
     "--live-snapshot-dir": null,
     "--live-learner-seats": null
   },
-  "reasoning": "stage_d_gl_std_map_pool_t3: GL Std map pool (omit --map-id), T3 Andy mirror, greedy_mix; replaced Phase 1a stage1-narrow 123858 override."
+  "reasoning": "T4 Green Earth Jess (co_id 14) mirror, GL Std pool; avoid Andy Hyper Repair free-heal shaping. Align stage_d t4 jess; legacy Andy/T3 override retired."
 }

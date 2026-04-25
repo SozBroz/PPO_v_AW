@@ -123,7 +123,9 @@ PREALLOCATED_BUFFERS_ENV = "AWBW_PREALLOCATED_BUFFERS"
 
 # Reward shaping mode (plan rl_capture-combat_recalibration).
 #   "phi" (default)   — potential-based: per-step reward gets
-#                       Φ(s_after) − Φ(s_before) in the learner frame.
+#                       Φ(s_after) − Φ(s_before) in the learner frame, plus
+#                       a one-time kill bonus (see PHI_ENEMY_KILL_BONUS_FRAC,
+#                       _phi_enemy_kill_one_time_bonus).
 #                       On engine day-cap resolution (``win_reason``): replace the
 #                       usual sparse ±1/0 with scaled outcomes — max_turns_tie or
 #                       (legacy) max_turns_draw → −0.1; max_turns_tiebreak win → +0.5;
@@ -148,6 +150,10 @@ PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float]] = {
     "balanced": (2e-5, 0.05, 0.05),
     "capture": (2e-5, 0.02, 0.25),
 }
+# Φ: one-time bonus for removing an enemy unit on the learner’s engine step,
+# in the same value units as the army line (``α × cost × hp/100``), scaled
+# with ``_phi_alpha`` so it tracks profile/env overrides.
+PHI_ENEMY_KILL_BONUS_FRAC = 0.1
 
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
@@ -1154,14 +1160,23 @@ class AWBWEnv(gym.Env):
         # capturer → cp resets sequence is captured as a single ΔΦ on this step.
         if self._reward_shaping_mode == "phi":
             phi_before = self._compute_phi(self.state)
+            en_s = int(self._enemy_seat)
+            pre_enemy_alive: dict[int, tuple[UnitType, int]] = {
+                u.unit_id: (u.unit_type, u.hp)
+                for u in self.state.units[en_s]
+                if u.is_alive
+            }
         else:
             phi_before = 0.0
+            pre_enemy_alive = None
 
         acting = int(self.state.active_player)
         self.state, reward, done = self._engine_step_with_belief(action)
         reward = self._signed_engine_reward(reward, acting)
         if self.state is not None and self.state.done:
             reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
+        if pre_enemy_alive is not None and self.state is not None:
+            reward += self._phi_enemy_kill_one_time_bonus(pre_enemy_alive)
         self._capture_frame(action=action)
 
         if (
@@ -1424,6 +1439,30 @@ class AWBWEnv(gym.Env):
             + self._phi_beta * (p_me - p_en)
             + self._phi_kappa * (cap_me - cap_en)
         )
+
+    def _phi_enemy_kill_one_time_bonus(
+        self, pre_enemy_alive: dict[int, tuple[UnitType, int]]
+    ) -> float:
+        """Extra reward in Φ mode when enemy units are removed on the learner’s step.
+
+        Per removed enemy (by ``unit_id`` from a pre-step snapshot), pays
+        ``PHI_ENEMY_KILL_BONUS_FRAC × _phi_alpha × (cost × hp/100)`` using
+        the unit’s pre-step ``hp`` — same per-unit *value* scale as
+        :meth:`_compute_phi` army terms. Independent of the Φ potential
+        difference (so it explicitly nudges toward lethal play).
+        """
+        if not pre_enemy_alive or self.state is None:
+            return 0.0
+        en = int(self._enemy_seat)
+        post_ids = {u.unit_id for u in self.state.units[en] if u.is_alive}
+        total = 0.0
+        frac = float(PHI_ENEMY_KILL_BONUS_FRAC) * float(self._phi_alpha)
+        for uid, (ut, hi) in pre_enemy_alive.items():
+            if uid in post_ids:
+                continue
+            v = float(UNIT_STATS[ut].cost) * (float(hi) / 100.0)
+            total += frac * v
+        return float(total)
 
     def _get_obs(self, observer: int | None = None) -> dict:
         """Render observation from ``observer``'s perspective, honouring the

@@ -50,7 +50,7 @@ _CURRICULUM_STAGE_SHORTHAND: dict[str, str] = {
     "stage_a": "stage_a_capture_bootstrap",
     "stage_b": "stage_b_capture_competent",
     "stage_c": "stage_c_terrain_competent",
-    "stage_d": "stage_d_gl_std_map_pool_t3",
+    "stage_d": "stage_d_gl_std_map_pool_t4",
     "stage_e": "stage_e_gl_mixed_ladder",
     "stage_f": "stage_f_self_play_pure",
     "stage_g": "stage_g_mcts_eval_ready",
@@ -62,6 +62,9 @@ def normalize_curriculum_stage_name(name: str) -> str:
     s = str(name).strip()
     if s == "stage_d_self_play_pure":
         return "stage_f_self_play_pure"
+    # Legacy: stage D used to be T3 Andy mirror; now T4 Jess (same ratchet slot).
+    if s == "stage_d_gl_std_map_pool_t3":
+        return "stage_d_gl_std_map_pool_t4"
     return _CURRICULUM_STAGE_SHORTHAND.get(s, s)
 
 
@@ -286,8 +289,8 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
         args_overrides={
             "--learner-greedy-mix": 0.3,
             "--cold-opponent": "greedy_capture",
-            "--co-p0": 1,
-            "--co-p1": 1,
+            "--co-p0": 14,
+            "--co-p1": 14,
             "--capture-move-gate": FLAG_PRESENT,
         },
         # §10g capture decay gate shape: fast first capture + sustained capture volume.
@@ -297,15 +300,15 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
             and m.median_first_p0_capture_step <= 15.0
         ),
         min_games_in_stage=200,
-        description="Cold start: greedy_capture opponent, capture-move gate, single Andy mirror",
+        description="Cold start: greedy_capture opponent, capture-move gate, Jess mirror (no Andy free repair)",
     ),
     CurriculumStage(
         name="stage_b_capture_competent",
         args_overrides={
             "--learner-greedy-mix": 0.15,
             "--cold-opponent": "greedy_mix",
-            "--co-p0": 1,
-            "--co-p1": 1,
+            "--co-p0": 14,
+            "--co-p1": 14,
             "--capture-move-gate": FLAG_PRESENT,
         },
         advance_when=lambda m: (
@@ -322,8 +325,8 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
         args_overrides={
             "--learner-greedy-mix": 0.05,
             "--cold-opponent": "greedy_mix",
-            "--co-p0": 1,
-            "--co-p1": 1,
+            "--co-p0": 14,
+            "--co-p1": 14,
             "--capture-move-gate": False,
         },
         advance_when=lambda m: (
@@ -335,17 +338,17 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
         description="Terrain competent; drop capture-move gate; minimal greedy mix",
     ),
     CurriculumStage(
-        name="stage_d_gl_std_map_pool_t3",
+        name="stage_d_gl_std_map_pool_t4",
         args_overrides={
             "--map-id": None,
-            "--tier": "T3",
-            "--co-p0": 1,
-            "--co-p1": 1,
+            "--tier": "T4",
+            "--co-p0": 14,
+            "--co-p1": 14,
             "--learner-greedy-mix": 0.05,
             "--cold-opponent": "greedy_mix",
             "--curriculum-broad-prob": 0.0,
             # Log label only; does not filter maps (sampling is uniform over GL Std in env).
-            "--curriculum-tag": "gl_std_pool_t3_andy_mirror",
+            "--curriculum-tag": "gl_std_pool_t4_jess_mirror",
             # Explicit False: merge is ``merged_args.update(overrides)``; omitting the key
             # would leave ``--capture-move-gate`` stuck from stage_a/b in proposed_args.
             "--capture-move-gate": False,
@@ -358,8 +361,8 @@ DEFAULT_SCHEDULE: list[CurriculumStage] = [
         ),
         min_games_in_stage=300,
         description=(
-            "All GL Std maps (omit --map-id); fixed T3 Andy vs Andy per episode; "
-            "not misery-only — old tag name *misery* was misleading. "
+            "All GL Std maps (omit --map-id); fixed T4 Jess vs Jess per episode "
+            "(avoid Andy free-repair teaching damage is free). "
             "Use stage E+ for broad COs / 100% broad."
         ),
     ),

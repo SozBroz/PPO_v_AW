@@ -69,7 +69,7 @@ def test_initial_curriculum_merge_omits_stage_d_map_id(
     fleet = tmp_path / "fleet" / mid
     fleet.mkdir(parents=True)
     state = {
-        "current_stage_name": "stage_d_gl_std_map_pool_t3",
+        "current_stage_name": "stage_d_gl_std_map_pool_t4",
         "entered_stage_at_ts": 1.0,
         "games_observed_in_stage": 10,
         "last_proposal_ts": 1.0,
@@ -92,9 +92,9 @@ def test_initial_curriculum_merge_omits_stage_d_map_id(
     )
 
     assert merged["args"]["--map-id"] is None
-    assert merged["args"]["--tier"] == "T3"
-    assert merged["args"]["--co-p0"] == 1
-    assert merged["args"]["--co-p1"] == 1
+    assert merged["args"]["--tier"] == "T4"
+    assert merged["args"]["--co-p0"] == 14
+    assert merged["args"]["--co-p1"] == 14
     argv = m._build_train_argv(proposed=merged, machine_id=mid, train_extra=[])
     assert "--map-id" not in argv
     assert "--curriculum-tag" in argv
@@ -111,7 +111,7 @@ def test_operator_train_args_override_merges_after_curriculum(
     fleet = tmp_path / "fleet" / mid
     fleet.mkdir(parents=True)
     state = {
-        "current_stage_name": "stage_d_gl_std_map_pool_t3",
+        "current_stage_name": "stage_d_gl_std_map_pool_t4",
         "entered_stage_at_ts": 1.0,
         "games_observed_in_stage": 0,
         "last_proposal_ts": 1.0,
@@ -149,7 +149,7 @@ def test_operator_train_args_override_merges_after_curriculum(
     assert merged2["args"]["--n-envs"] == 99
     assert merged2["args"]["--map-id"] is None
     # Curriculum still set tier etc.
-    assert merged2["args"]["--tier"] == "T3"
+    assert merged2["args"]["--tier"] == "T4"
 
 
 def test_launch_env_sets_machine_and_flags() -> None:
