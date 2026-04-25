@@ -1,5 +1,7 @@
 {
   "args": {
+    "--training-backend": "async",
+    "--n-envs": 8,
     "--stage1-narrow": true,
     "--map-id": 123858,
     "--tier": "T3",
@@ -10,5 +12,5 @@
     "--live-snapshot-dir": null,
     "--live-learner-seats": null
   },
-  "reasoning": "Pin Phase 1a Misery (123858) T3 Andy mirror; strip live-game injects (paths/games are pc-b-specific)."
+  "reasoning": "IMPALA async for throughput; Phase 1a Misery T3 Andy mirror; no live-game injects (pc-b paths)."
 }
