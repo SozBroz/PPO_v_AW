@@ -886,3 +886,71 @@ Until Tier 1 is exhausted: focus on NN-level optimizations, not engine-native co
 
 *"He who fails to plan is planning to fail."*
 *— Winston Churchill, British Prime Minister during World War II.*
+
+
+---
+
+## 13. League System — Profiles, Sampling, and Training Integration (ACTIVE)
+
+Goal:
+Introduce a league-style training ecosystem that improves robustness and prevents overfitting on Standard maps.
+
+Key principles:
+- Single shared PPO
+- Profiles are config-driven distributions
+- No hardcoding CO lists into core logic
+- Profiles differ via sampling, not architecture
+
+Implementation stages:
+- Phase 1: logging + tagging only
+- Phase 2: sampling influence
+- Phase 3: Elo-based matchmaking
+- Phase 4: optional conditioning/adapters
+
+Profiles (draft, configurable):
+- Meta Optimizer
+- Aggro / Tempo
+- Control / Positional
+- Density Punisher
+- Econ / Scaling
+- Explorer (low budget)
+- Favorites (optional)
+
+Profiles must differ in:
+- CO sampling
+- opponent sampling
+- map weighting
+- evaluation metrics
+
+---
+
+## 14. MCTS Rollout Strategy — Staged Integration (ACTIVE)
+
+Goal:
+Introduce MCTS without destroying training throughput.
+
+Stages:
+
+MCTS-0 (plumbing):
+- 8–32 sims
+- debug only
+
+MCTS-1 (evaluation):
+- 64–256 sims
+- fixed seeds
+
+MCTS-2 (selective training assist):
+- 128–512 sims
+- used on subset of states
+
+MCTS-3 (distillation):
+- offline MCTS → supervised targets
+
+MCTS-4 (production):
+- time-based anytime search
+- deterministic output
+
+Rules:
+- Do not use full MCTS in PPO loop
+- Use MCTS as teacher, not replacement
+- Require EV > 0.6 before relying on it

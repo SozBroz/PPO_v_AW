@@ -12,6 +12,8 @@ this script just reads. SSH-driven probes are deferred to Phase 10f.
 Audit trail: every tick appends one or more rows to
 logs/fleet_orchestrator.jsonl (one row per decision class —
 heartbeat-check, mcts health, proposed_args, curate, eval, promote, reload).
+Curriculum stage transitions also append to logs/fleet_curriculum_changes.jsonl
+(competence snapshot, JSON-safe floats).
 
 If a tick raises before completing, a traceback is written to
 ``logs/fleet_orchestrator_last_crash.txt`` (same directory as the audit log)
@@ -24,6 +26,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -37,6 +40,20 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 _LOG = logging.getLogger(__name__)
+
+
+def _json_safe_for_audit(obj: Any) -> Any:
+    """Strip NaN/inf floats so :func:`json.dumps` can use ``allow_nan=False``."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _json_safe_for_audit(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe_for_audit(v) for v in obj]
+    return obj
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -660,7 +677,7 @@ class FleetOrchestrator:
         train_pid_file_template: str = "fleet/{machine_id}/train.pid",
         train_launch_cmd_file_template: str = "fleet/{machine_id}/train_launch_cmd.json",
         curriculum_enabled: bool = True,
-        curriculum_window_games: int = 100,
+        curriculum_window_games: int = 200,
         curriculum_state_file_template: str = "fleet/{machine_id}/curriculum_state.json",
         reconfig_ack_timeout_s: float = 120.0,
         train_zombie_heal_cooldown_s: float = 120.0,
@@ -1010,6 +1027,7 @@ class FleetOrchestrator:
             )
             merged_mcts = False
 
+            prev: Optional[_curriculum_advisor.CurriculumState] = None
             if self.curriculum_enabled:
                 gpath = self._game_log_path_for_machine(mid)
                 prev = _curriculum_advisor.read_state(st_path)
@@ -1198,6 +1216,33 @@ class FleetOrchestrator:
 
             if self.curriculum_enabled and st_new is not None and not self.dry_run:
                 _curriculum_advisor.write_state(st_path, st_new)
+                if prev is not None:
+                    prev_norm = _curriculum_advisor.normalize_curriculum_stage_name(
+                        prev.current_stage_name
+                    )
+                    new_norm = _curriculum_advisor.normalize_curriculum_stage_name(
+                        st_new.current_stage_name
+                    )
+                    if prev_norm != new_norm:
+                        ch_path = (
+                            self.repo_root / "logs" / "fleet_curriculum_changes.jsonl"
+                        )
+                        ch_path.parent.mkdir(parents=True, exist_ok=True)
+                        row = {
+                            "ts": datetime.now(timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "machine_id": mid,
+                            "from_stage": prev_norm,
+                            "to_stage": new_norm,
+                            "reason": curriculum_reason,
+                            "metrics": _json_safe_for_audit(metrics_snap),
+                        }
+                        with ch_path.open("a", encoding="utf-8") as ch_f:
+                            ch_f.write(
+                                json.dumps(row, sort_keys=True, allow_nan=False)
+                                + "\n"
+                            )
 
             if args_changed and not self.dry_run:
                 new_doc["proposed_at"] = datetime.now(timezone.utc).strftime(
@@ -2669,8 +2714,8 @@ def main() -> int:
     ap.add_argument(
         "--curriculum-window-games",
         type=int,
-        default=100,
-        help="Rolling game window for curriculum metrics",
+        default=200,
+        help="Rolling game window for curriculum metrics (default 200, §10g narrative)",
     )
     ap.add_argument(
         "--curriculum-state-file",
