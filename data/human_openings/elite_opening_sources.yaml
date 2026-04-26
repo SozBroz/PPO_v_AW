@@ -3,7 +3,7 @@ manual_games:
   - game_id: 162071
     days: 5
   - game_id: 1631918
-    days: 6
+    days: 5
   - game_id: 1622029
     days: 6
   - game_id: 1620029
@@ -23,6 +23,14 @@ manual_games:
   - game_id: 1630558
     days: 6
   - game_id: 1631019
+    days: 5
+  - game_id: 1624450
+    days: 5
+  - game_id: 1606409
+    days: 7
+  - game_id: 1626661
+    days: 5
+  - game_id: 1623604
     days: 5
 
 completed_game_queries:
