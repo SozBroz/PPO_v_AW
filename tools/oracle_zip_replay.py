@@ -4438,7 +4438,11 @@ def _apply_move_paths_then_terminator(
     u: Optional[Unit] = None
     for pl in state.units.values():
         for x in pl:
-            if x.unit_id == uid and x.is_alive:
+            if (
+                x.unit_id == uid
+                and x.is_alive
+                and int(x.player) == eng
+            ):
                 # PHP ``units_id`` can collide with ``engine.Unit.unit_id`` across types
                 # after long replays — honour ``units_name`` when it disagrees (1624281).
                 if declared_mover_type is not None and x.unit_type != declared_mover_type:
@@ -6955,7 +6959,11 @@ def _apply_oracle_action_json_body(
         u: Optional[Unit] = None
         for pl in state.units.values():
             for x in pl:
-                if x.unit_id == uid and x.is_alive:
+                if (
+                    x.unit_id == uid
+                    and x.is_alive
+                    and int(x.player) == eng
+                ):
                     if declared_mover_type is not None and x.unit_type != declared_mover_type:
                         continue
                     u = x
