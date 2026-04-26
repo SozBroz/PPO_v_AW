@@ -837,16 +837,14 @@ def run_game(
         _pool = json.load(_pf)
     _mp_meta = next((m for m in _pool if m.get("map_id") == int(map_id)), {})
     _map_is_std = str(_mp_meta.get("type", "")).lower() == "std"
+    state.spirit_map_is_std = bool(_map_is_std)
     from rl.heuristic_termination import (  # noqa: I001
         DEFAULT_DISAGREEMENT_LOG,
-        SpiritStreaks,
         config_from_env,
         diag_enabled_from_env,
         run_calendar_day,
-        spirit_enabled_from_env,
     )
 
-    _spirit_s = SpiritStreaks()
     _diag_n = 0
 
     try:
@@ -877,7 +875,7 @@ def run_game(
 
             if (
                 not state.done
-                and (spirit_enabled_from_env() or diag_enabled_from_env())
+                and diag_enabled_from_env()
                 and int(state.turn) > turn_before
                 and int(state.active_player) == 0
             ):
@@ -889,11 +887,10 @@ def run_game(
                     sp, sc = encode_state(s, observer=o, belief=None)
                     return {"spatial": sp, "scalars": sc}
 
-                _k, _d = run_calendar_day(
+                _, _d = run_calendar_day(
                     state,
                     model,
                     _cfg,
-                    _spirit_s,
                     _enc,
                     is_std_map=bool(_map_is_std),
                     map_tier_ok=_tier_ok,
@@ -904,9 +901,6 @@ def run_game(
                     diag_line_budget=_diag_n,
                 )
                 _diag_n += int(_d)
-                if _k is not None:
-                    _log(f"play: spirit_broken end ({_k})  winner={state.winner!r}")
-                    break
 
             if state.turn > state.max_turns and not state.done:
                 _log(

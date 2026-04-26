@@ -10,9 +10,9 @@ import pytest
 from engine.game import GameState, make_initial_state
 from engine.map_loader import load_map
 from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS
+from engine.spirit_pressure import maybe_spirit_after_end_turn
 from rl.heuristic_termination import (
     SpiritConfig,
-    SpiritStreaks,
     army_value_for_player,
     income_props_and_counts,
     material_margins,
@@ -58,7 +58,6 @@ def test_snowball_and_resign_streaks_mock() -> None:
         p_trailer_resign_max=0.4,
         value_margin=0.10,
     )
-    streaks = SpiritStreaks()
     p0, p1 = 0.7, 0.3
     m = {
         "income_p0": 10,
@@ -116,7 +115,6 @@ def test_snowball_and_resign_streaks_mock() -> None:
         s,
         mdl,
         cfg,
-        streaks,
         _enc,
         is_std_map=True,
         map_tier_ok=True,
@@ -133,13 +131,11 @@ def test_snowball_and_resign_streaks_mock() -> None:
     s2 = _tiny_state()
     s2.winner = None
     s2.done = False
-    # will not meet 3-day streak; expect None
-    st = SpiritStreaks()
+    # Diag-only path never terminates from run_calendar_day
     k2, _ = run_calendar_day(
         s2,
         mdl2,
         cfg,
-        st,
         _enc,
         is_std_map=True,
         map_tier_ok=True,
@@ -184,29 +180,21 @@ def test_spirit_broken_material_only_ignores_neutral_value_head() -> None:
         }
 
     os.environ["AWBW_SPIRIT_BROKEN"] = "1"
+    os.environ["AWBW_SPIRIT_MIN_DAY"] = "1"
+    os.environ["AWBW_SPIRIT_EMA_THRESHOLD"] = "0"
     try:
-        st = SpiritStreaks()
-        cfg = SpiritConfig()
-        kind = None
+        s.spirit_map_is_std = True
+        s.turn = 10
         for _ in range(3):
-            kind, _ = run_calendar_day(
-                s,
-                mdl,
-                cfg,
-                st,
-                _enc,
-                is_std_map=True,
-                map_tier_ok=True,
-                episode_id=1,
-                map_id=133665,
-                learner_seat=0,
-            )
-        assert kind == "snowball"
+            maybe_spirit_after_end_turn(s, 0)
         assert s.done is True
         assert s.winner == 0
         assert s.win_reason == SPIRIT_BROKEN_REASON
+        assert s.spirit.spirit_broken_kind == "snowball"
     finally:
         del os.environ["AWBW_SPIRIT_BROKEN"]
+        del os.environ["AWBW_SPIRIT_MIN_DAY"]
+        del os.environ["AWBW_SPIRIT_EMA_THRESHOLD"]
 
 
 def test_spirit_broken_constant() -> None:

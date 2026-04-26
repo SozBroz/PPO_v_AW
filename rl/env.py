@@ -52,7 +52,6 @@ from rl.network import ACTION_SPACE_SIZE
 from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
 from rl.heuristic_termination import (
     SPIRIT_BROKEN_REASON,
-    SpiritStreaks,
     army_value_for_player,
     config_from_env,
     run_calendar_day,
@@ -743,7 +742,6 @@ class AWBWEnv(gym.Env):
 
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
-        self._spirit_streaks = SpiritStreaks()
         self._diag_lines_this_ep: int = 0
         self._episode_map_is_std: bool = True
         self._spirit_broken_kind: str | None = None
@@ -1118,13 +1116,14 @@ class AWBWEnv(gym.Env):
         if self.curriculum_tag:
             self._episode_info["curriculum_tag"] = self.curriculum_tag
 
-        self._spirit_streaks.reset()
         self._diag_lines_this_ep = 0
         self._spirit_broken_kind = None
         self._spirit_debug_events = 0
         _mid = int(self._episode_info.get("map_id") or 0)
         _meta = next((m for m in self.map_pool if m.get("map_id") == _mid), {})
         self._episode_map_is_std = str(_meta.get("type", "")).lower() == "std"
+        if self.state is not None:
+            self.state.spirit_map_is_std = bool(self._episode_map_is_std)
 
         # Per-episode diagnostic counters (see _log_finished_game).
         # These are O(1) per step and help flag degenerate episodes —
@@ -1365,8 +1364,9 @@ class AWBWEnv(gym.Env):
         }
         if (self.state.win_reason or "") == SPIRIT_BROKEN_REASON:
             info["spirit_broken"] = True
-            if self._spirit_broken_kind is not None:
-                info["spirit_broken_kind"] = self._spirit_broken_kind
+            _sk = getattr(self.state.spirit, "spirit_broken_kind", None)
+            if _sk is not None:
+                info["spirit_broken_kind"] = _sk
 
         if terminated:
             raw_inc = os.environ.get(INCOME_TERM_COEF_ENV, "0").strip()
@@ -1780,7 +1780,11 @@ class AWBWEnv(gym.Env):
         return self.state, reward, done
 
     def _maybe_spirit_calendar(self, turn_before: int) -> None:
-        """P1 just ended: ``turn`` advanced and P0 to move. Optional spirit + diag."""
+        """Once per new calendar day (P0 to move): optional value-head JSONL diag only.
+
+        Spirit **termination** runs in the engine on every ``END_TURN``; see
+        ``engine/spirit_pressure.maybe_spirit_after_end_turn``.
+        """
         from pathlib import Path as _P
 
         from rl import heuristic_termination as _ht
@@ -1820,33 +1824,17 @@ class AWBWEnv(gym.Env):
             return
         if st.turn <= turn_before or int(st.active_player) != 0:
             return
-        if not (_ht.spirit_enabled_from_env() or _ht.diag_enabled_from_env()):
-            if self._spirit_debug_events < 4:
-                self._spirit_debug_events += 1
-                # region agent log
-                _agent_debug_log(
-                    "H3",
-                    "rl/env.py:AWBWEnv._maybe_spirit_calendar",
-                    "spirit calendar skipped because env/diag disabled",
-                    {
-                        "episode_id": int(self._episode_id),
-                        "turn": int(st.turn),
-                        "map_id": self._episode_info.get("map_id"),
-                        "spirit_env": os.environ.get("AWBW_SPIRIT_BROKEN"),
-                        "diag_env": os.environ.get("AWBW_HEURISTIC_VALUE_DIAG"),
-                    },
-                )
-                # endregion
+        if not _ht.diag_enabled_from_env():
             return
         model = _resolve_opponent_critic_model(self.opponent_policy)
-        if model is None and not _ht.diag_enabled_from_env():
+        if model is None:
             if self._spirit_debug_events < 4:
                 self._spirit_debug_events += 1
                 # region agent log
                 _agent_debug_log(
                     "H4",
                     "rl/env.py:AWBWEnv._maybe_spirit_calendar",
-                    "spirit calendar skipped because opponent critic model is missing",
+                    "heuristic value diag skipped because opponent critic model is missing",
                     {
                         "episode_id": int(self._episode_id),
                         "turn": int(st.turn),
@@ -1894,8 +1882,8 @@ class AWBWEnv(gym.Env):
                         float(army_value_for_player(st, 1)),
                     ],
                     "streaks": {
-                        "snowball": list(self._spirit_streaks.snowball),
-                        "resign": list(self._spirit_streaks.resign),
+                        "pressure": list(st.spirit.pressure_streak),
+                        "resign": list(st.spirit.resign_streak),
                     },
                 },
             )
@@ -1910,7 +1898,6 @@ class AWBWEnv(gym.Env):
             st,
             model,
             cfg,
-            self._spirit_streaks,
             _enc,
             is_std_map=bool(self._episode_map_is_std),
             map_tier_ok=tier_ok,
@@ -1921,13 +1908,13 @@ class AWBWEnv(gym.Env):
             diag_line_budget=self._diag_lines_this_ep,
         )
         self._diag_lines_this_ep += int(nlines)
-        if self._spirit_debug_events < 6 or _kind is not None:
+        if self._spirit_debug_events < 6:
             self._spirit_debug_events += 1
             # region agent log
             _agent_debug_log(
                 "H5",
                 "rl/env.py:AWBWEnv._maybe_spirit_calendar",
-                "spirit calendar heuristic result",
+                "heuristic value diag result",
                 {
                     "episode_id": int(self._episode_id),
                     "turn": int(st.turn),
@@ -1937,14 +1924,12 @@ class AWBWEnv(gym.Env):
                     "win_reason": st.win_reason,
                     "diag_lines": int(nlines),
                     "streaks": {
-                        "snowball": list(self._spirit_streaks.snowball),
-                        "resign": list(self._spirit_streaks.resign),
+                        "pressure": list(st.spirit.pressure_streak),
+                        "resign": list(st.spirit.resign_streak),
                     },
                 },
             )
             # endregion
-        if _kind is not None:
-            self._spirit_broken_kind = str(_kind)
 
     def _run_random_opponent(self, accumulated_reward: float) -> float:
         """Run the non-learner seat using uniform-random legal actions."""
@@ -2241,7 +2226,9 @@ class AWBWEnv(gym.Env):
             ),
             "log_schema_version": "1.13",
         }
-        sk = getattr(self, "_spirit_broken_kind", None)
+        sk = getattr(self.state.spirit, "spirit_broken_kind", None)
+        if sk is None:
+            sk = getattr(self, "_spirit_broken_kind", None)
         if sk is not None:
             log_record["spirit_broken_kind"] = sk
         log_record.update(getattr(self, "_opening_book_log", {}))

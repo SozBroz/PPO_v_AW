@@ -1,8 +1,9 @@
 """
-Calendar-day heuristics: spirit_broken early termination and value/diagnostic logging.
+Spirit / heuristic helpers: material predicates, value-head diagnostic JSONL.
 
-See .cursor/plans/heuristic_day_termination_*.plan.md. Only active when
-``AWBW_SPIRIT_BROKEN=1`` (and map/tier gates); default off.
+Spirit **termination** is implemented in ``engine/spirit_pressure`` (own-end-turn).
+This module keeps ``SpiritConfig``, ``maybe_log_disagreements``, and legacy name
+``run_calendar_day`` for **diagnostics only** when ``AWBW_HEURISTIC_VALUE_DIAG=1``.
 """
 from __future__ import annotations
 
@@ -15,10 +16,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from engine.game import GameState
+from engine.spirit_pressure import SPIRIT_BROKEN_REASON
 from engine.unit import UNIT_STATS
-
-# Engine win reason / game log win_condition (canonical string)
-SPIRIT_BROKEN_REASON = "spirit_broken"
 EPS_VALUE = 1.0  # for ratio denominator when both armies are empty
 
 ROOT = Path(__file__).parent.parent
@@ -369,7 +368,6 @@ def run_calendar_day(
     state: GameState,
     model: Any,
     cfg: SpiritConfig,
-    streaks: SpiritStreaks,
     encode_fn: Any,
     *,
     is_std_map: bool,
@@ -381,13 +379,14 @@ def run_calendar_day(
     diag_line_budget: int = 0,
 ) -> tuple[Optional[str], int]:
     """
-    If this terminates the game, return (kind, diag_lines) with kind
-    ``snowball`` or ``resign``; mutates ``state`` (done, winner, win_reason)
-    and ``streaks`` when firing. Second return is how many diag lines were written.
+    Value-head diagnostic only (``AWBW_HEURISTIC_VALUE_DIAG``). Spirit **termination**
+    runs in ``engine/spirit_pressure.maybe_spirit_after_end_turn`` on each ``END_TURN``.
+    Returns ``(None, n_diag_lines)`` — the first value is always ``None`` (legacy API).
     """
-    enabled = spirit_enabled_from_env() or diag_enabled_from_env()
+    if not diag_enabled_from_env():
+        return None, 0
     if not gate_applies(
-        state, cfg, is_std_map=is_std_map, allowed_tier=map_tier_ok, enabled=enabled
+        state, cfg, is_std_map=is_std_map, allowed_tier=map_tier_ok, enabled=True
     ):
         return None, 0
     m = income_props_and_counts(state)
@@ -399,7 +398,6 @@ def run_calendar_day(
             p0, p1, r0, r1 = _predict_p_win_both(state, model, encode_fn, cfg=cfg)
         except Exception:
             p0, p1, r0, r1 = 0.0, 0.0, 0.0, 0.0
-    if model is not None and diag_enabled_from_env():
         n_written = maybe_log_disagreements(
             state,
             m,
@@ -415,70 +413,4 @@ def run_calendar_day(
             log_path=log_path,
             lines_used=diag_line_budget,
         )
-    if not spirit_enabled_from_env():
-        return None, n_written
-
-    d_prop, d_count, p0v, p1v = material_margins(m, cfg.value_margin)
-    material_crush = (
-        (abs(d_prop) >= 2 and abs(d_count) >= 2)
-        or (int(m["count_p0"]) == 0 or int(m["count_p1"]) == 0)
-        or (float(m["value_p0"]) == 0.0 or float(m["value_p1"]) == 0.0)
-    )
-    if material_crush:
-        # region agent log
-        _agent_debug_log(
-            "H5,H9",
-            "rl/heuristic_termination.py:run_calendar_day",
-            "spirit material/value gate state",
-            {
-                "episode_id": int(episode_id),
-                "turn": int(state.turn),
-                "map_id": map_id,
-                "tier_name": str(state.tier_name),
-                "learner_seat": int(learner_seat),
-                "material": m,
-                "d_prop": int(d_prop),
-                "d_count": int(d_count),
-                "p0_value_lead": bool(p0v),
-                "p1_value_lead": bool(p1v),
-                "p0_model_win": float(p0),
-                "p1_model_win": float(p1),
-                "v0_raw": float(r0),
-                "v1_raw": float(r1),
-                "thresholds": {
-                    "p_snowball": float(cfg.p_snowball),
-                    "p_trailer_resign_max": float(cfg.p_trailer_resign_max),
-                    "value_margin": float(cfg.value_margin),
-                },
-                "streaks_before": {
-                    "snowball": list(streaks.snowball),
-                    "resign": list(streaks.resign),
-                },
-            },
-        )
-        # endregion
-
-    for s in (0, 1):
-        if snowball_material_holds(m, s, cfg):
-            streaks.snowball[s] += 1
-        else:
-            streaks.snowball[s] = 0
-    for s in (0, 1):
-        if resign_crush_material_holds(m, s, cfg):
-            streaks.resign[s] += 1
-        else:
-            streaks.resign[s] = 0
-
-    for s in (0, 1):
-        if streaks.snowball[s] >= 3:
-            state.done = True
-            state.winner = s
-            state.win_reason = SPIRIT_BROKEN_REASON
-            return "snowball", n_written
-    for s in (0, 1):
-        if streaks.resign[s] >= 3:
-            state.done = True
-            state.winner = 1 - s
-            state.win_reason = SPIRIT_BROKEN_REASON
-            return "resign", n_written
     return None, n_written

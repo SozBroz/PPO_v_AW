@@ -27,6 +27,7 @@ from engine.action import (
 from engine.combat import (
     calculate_damage, calculate_counterattack, calculate_seam_damage,
 )
+from engine.spirit_pressure import SpiritState, maybe_spirit_after_end_turn
 
 # Pipe seam constants (AWBW canonical).
 SEAM_TERRAIN_IDS: tuple[int, int] = (113, 114)       # HPipe Seam / VPipe Seam
@@ -171,6 +172,11 @@ class GameState:
     # first attempt. Not persisted across episodes; reset implicitly via
     # `make_initial_state`.
     capture_attempted_unit_ids: set[int] = field(default_factory=set)
+
+    # Optional spirit-broken heuristic (``AWBW_SPIRIT_BROKEN``); see ``engine/spirit_pressure``.
+    spirit: SpiritState = field(default_factory=SpiritState)
+    # When ``require_std_map`` is on, must be ``True`` for spirit to run. ``AWBWEnv`` sets from pool.
+    spirit_map_is_std: Optional[bool] = None
 
     # Oracle replay channel: when set to ``(dmg, counter)`` immediately before
     # ``step(ActionType.ATTACK)``, ``_apply_attack`` consumes these instead of
@@ -650,6 +656,9 @@ class GameState:
 
         # Refresh tower counts now that ownership may have changed this turn
         self._refresh_comm_towers()
+
+        if not self.done:
+            maybe_spirit_after_end_turn(self, player)
 
     def _grant_income(self, player: int) -> None:
         """
@@ -2953,6 +2962,7 @@ def make_initial_state(
     replay_first_mover: Optional[int] = None,
     max_turns: Optional[int] = None,
     luck_seed: Optional[int] = None,
+    spirit_map_is_std: Optional[bool] = True,
 ) -> GameState:
     # Treasuries always start at 0g in AWBW; the opening player receives income
     # at the start of their first turn via _grant_income below. ``starting_funds``
@@ -2966,6 +2976,9 @@ def make_initial_state(
 
     ``luck_seed`` seeds :attr:`GameState.luck_rng` for combat luck when not ``None``;
     otherwise a fresh :class:`random.Random` is used (isolated from other games).
+
+    ``spirit_map_is_std`` gates spirit-broken when ``AWBW_SPIRIT_REQUIRE_STD`` is on;
+    :class:`AWBWEnv` overwrites from the map pool. Default ``True`` for standalone engine/tests.
     """
     mt = MAX_TURNS if max_turns is None else int(max_turns)
     if mt < 1:
@@ -3036,6 +3049,8 @@ def make_initial_state(
         default_weather=default_weather,
         co_weather_segments_remaining=0,
         luck_rng=luck0,
+        spirit=SpiritState(),
+        spirit_map_is_std=spirit_map_is_std,
     )
     state._refresh_comm_towers()
 
