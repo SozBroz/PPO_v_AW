@@ -41,6 +41,7 @@ from rl.train_reconfig_log import append_train_reconfig_line
 
 WATCH_LOG_PATH = LOGS_DIR / "watch_log.jsonl"
 FPS_DIAG_PATH = LOGS_DIR / "fps_diag.jsonl"
+NN_TRAIN_PATH = LOGS_DIR / "nn_train.jsonl"
 _OPPONENT_CUDA_CAP_WARNED = False
 
 # Max Subproc worker indices [0, N) that may use CUDA for checkpoint opponents (VRAM / contention).
@@ -238,6 +239,51 @@ def _append_fps_diag_line(record: dict) -> None:
         FPS_DIAG_PATH.rename(rotated)
     with open(FPS_DIAG_PATH, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
+
+
+def _append_nn_train_line(record: dict) -> None:
+    """Append one JSON object line to ``logs/nn_train.jsonl`` (size-capped rotation)."""
+    NN_TRAIN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if NN_TRAIN_PATH.is_file() and NN_TRAIN_PATH.stat().st_size > _FPS_DIAG_MAX_BYTES:
+        rotated = NN_TRAIN_PATH.with_name(NN_TRAIN_PATH.name + ".1")
+        if rotated.is_file():
+            rotated.unlink()
+        NN_TRAIN_PATH.rename(rotated)
+    with open(NN_TRAIN_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _nn_train_row_from_sb3_model(model: Any, *, rollout_iteration: int) -> dict | None:
+    """Build an ``nn_train`` JSON row from SB3 logger scalars (after at least one ``train()``)."""
+    logger = getattr(model, "logger", None)
+    ntv = getattr(logger, "name_to_value", None) if logger is not None else None
+    if not ntv or "train/loss" not in ntv:
+        return None
+
+    def num(key: str) -> float | None:
+        v = ntv.get(key)
+        if v is None:
+            return None
+        return float(v)
+
+    row: dict[str, Any] = {
+        "schema_version": "1.0",
+        "training_backend": "sync",
+        "rollout_iteration": int(rollout_iteration),
+        "total_timesteps": int(getattr(model, "num_timesteps", 0) or 0),
+        "total_loss": num("train/loss"),
+        "policy_loss": num("train/policy_gradient_loss"),
+        "value_loss": num("train/value_loss"),
+        "entropy_loss": num("train/entropy_loss"),
+        "explained_variance": num("train/explained_variance"),
+        "approx_kl": num("train/approx_kl"),
+        "clip_fraction": num("train/clip_fraction"),
+        "machine_id": os.environ.get("AWBW_MACHINE_ID"),
+    }
+    nu = ntv.get("train/n_updates")
+    if nu is not None:
+        row["n_updates"] = int(nu)
+    return {k: v for k, v in row.items() if v is not None}
 
 
 def _sum_python_children_rss_mb() -> float:
@@ -1393,6 +1439,31 @@ def _build_diagnostics_callback():
                 "n_envs": int(n_envs_tb),
                 "machine_id": os.environ.get("AWBW_MACHINE_ID"),
             }
+            nn_pack = _nn_train_row_from_sb3_model(
+                self.model, rollout_iteration=int(self._diag_rollout_seq)
+            )
+            if nn_pack:
+                json_row["training_backend"] = "sync"
+                if "total_loss" in nn_pack:
+                    json_row["train_loss"] = nn_pack["total_loss"]
+                if "policy_loss" in nn_pack:
+                    json_row["train_policy_loss"] = nn_pack["policy_loss"]
+                if "value_loss" in nn_pack:
+                    json_row["train_value_loss"] = nn_pack["value_loss"]
+                if "entropy_loss" in nn_pack:
+                    json_row["train_entropy_loss"] = nn_pack["entropy_loss"]
+                if "explained_variance" in nn_pack:
+                    json_row["train_explained_variance"] = nn_pack["explained_variance"]
+                if "approx_kl" in nn_pack:
+                    json_row["train_approx_kl"] = nn_pack["approx_kl"]
+                if "clip_fraction" in nn_pack:
+                    json_row["train_clip_fraction"] = nn_pack["clip_fraction"]
+                if "n_updates" in nn_pack:
+                    json_row["train_n_updates"] = nn_pack["n_updates"]
+                try:
+                    _append_nn_train_line(nn_pack)
+                except Exception:
+                    pass
             try:
                 _append_fps_diag_line(json_row)
             except Exception:

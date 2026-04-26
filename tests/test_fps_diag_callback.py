@@ -105,7 +105,9 @@ def test_fps_diag_callback_jsonl_schema(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr("rl.env._append_game_log_line", lambda _r: None)
 
     diag_path = tmp_path / "fps_diag.jsonl"
+    nn_train_path = tmp_path / "nn_train.jsonl"
     monkeypatch.setattr(sp_module, "FPS_DIAG_PATH", diag_path)
+    monkeypatch.setattr(sp_module, "NN_TRAIN_PATH", nn_train_path)
 
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
@@ -175,3 +177,10 @@ def test_fps_diag_callback_jsonl_schema(tmp_path: Path, monkeypatch: pytest.Monk
     assert row["machine_id"] == "test-machine"
     assert row["n_envs"] == 1
     assert isinstance(row["env_collect_s"], (int, float))
+    assert row.get("train_loss") is not None
+    assert nn_train_path.is_file()
+    nn_lines = [ln for ln in nn_train_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert nn_lines, "nn_train.jsonl should receive at least one learner row"
+    nn_row = json.loads(nn_lines[-1])
+    assert nn_row.get("training_backend") == "sync"
+    assert nn_row.get("total_loss") == row["train_loss"]

@@ -833,6 +833,22 @@ def run_game(
         f"progress every {_ACTION_PROGRESS_INTERVAL} actions + on day change"
     )
 
+    with open(_MAP_POOL_PATH, encoding="utf-8") as _pf:
+        _pool = json.load(_pf)
+    _mp_meta = next((m for m in _pool if m.get("map_id") == int(map_id)), {})
+    _map_is_std = str(_mp_meta.get("type", "")).lower() == "std"
+    from rl.heuristic_termination import (  # noqa: I001
+        DEFAULT_DISAGREEMENT_LOG,
+        SpiritStreaks,
+        config_from_env,
+        diag_enabled_from_env,
+        run_calendar_day,
+        spirit_enabled_from_env,
+    )
+
+    _spirit_s = SpiritStreaks()
+    _diag_n = 0
+
     try:
         while not state.done:
             # Calendar cap: same rule as ``GameState._end_turn`` (``turn`` increments
@@ -852,11 +868,45 @@ def run_game(
             if turn_action_count >= max_actions_per_active_turn:
                 raise RuntimeError(_FUSE_PER_TURN_MSG)
 
+            turn_before = int(state.turn)
             action = _choose_action(state, model, rng)
             prev_player = state.active_player
             state, _reward, _done = state.step(action)
             action_count += 1
             turn_action_count += 1
+
+            if (
+                not state.done
+                and (spirit_enabled_from_env() or diag_enabled_from_env())
+                and int(state.turn) > turn_before
+                and int(state.active_player) == 0
+            ):
+                _cfg = config_from_env()
+                _tier_ok = not _cfg.allowed_tiers or str(tier) in _cfg.allowed_tiers
+                p_log = str(os.environ.get("AWBW_HEURISTIC_DIAG_LOG", "") or str(DEFAULT_DISAGREEMENT_LOG))
+
+                def _enc(s, o: int):
+                    sp, sc = encode_state(s, observer=o, belief=None)
+                    return {"spatial": sp, "scalars": sc}
+
+                _k, _d = run_calendar_day(
+                    state,
+                    model,
+                    _cfg,
+                    _spirit_s,
+                    _enc,
+                    is_std_map=bool(_map_is_std),
+                    map_tier_ok=_tier_ok,
+                    episode_id=int(gid),
+                    map_id=int(map_id),
+                    learner_seat=0,
+                    log_path=Path(p_log),
+                    diag_line_budget=_diag_n,
+                )
+                _diag_n += int(_d)
+                if _k is not None:
+                    _log(f"play: spirit_broken end ({_k})  winner={state.winner!r}")
+                    break
 
             if state.turn > state.max_turns and not state.done:
                 _log(

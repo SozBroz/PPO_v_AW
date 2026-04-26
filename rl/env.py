@@ -50,6 +50,13 @@ from engine.belief import BeliefState
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.network import ACTION_SPACE_SIZE
 from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
+from rl.heuristic_termination import (
+    SPIRIT_BROKEN_REASON,
+    SpiritStreaks,
+    config_from_env,
+    run_calendar_day,
+    DEFAULT_DISAGREEMENT_LOG,
+)
 from server.write_watch_state import board_dict
 
 ROOT = Path(__file__).parent.parent
@@ -694,6 +701,10 @@ class AWBWEnv(gym.Env):
 
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
+        self._spirit_streaks = SpiritStreaks()
+        self._diag_lines_this_ep: int = 0
+        self._episode_map_is_std: bool = True
+        self._spirit_broken_kind: str | None = None
         self._p1_truncated_mid_turn: bool = False
         # Filled each ``reset()``; used for ego-centric obs + learner-frame rewards.
         self._learner_seat: int = 0
@@ -1050,6 +1061,13 @@ class AWBWEnv(gym.Env):
         if self.curriculum_tag:
             self._episode_info["curriculum_tag"] = self.curriculum_tag
 
+        self._spirit_streaks.reset()
+        self._diag_lines_this_ep = 0
+        self._spirit_broken_kind = None
+        _mid = int(self._episode_info.get("map_id") or 0)
+        _meta = next((m for m in self.map_pool if m.get("map_id") == _mid), {})
+        self._episode_map_is_std = str(_meta.get("type", "")).lower() == "std"
+
         # Per-episode diagnostic counters (see _log_finished_game).
         # These are O(1) per step and help flag degenerate episodes —
         # especially mask/decode divergence (invalid_action_count) and
@@ -1279,6 +1297,10 @@ class AWBWEnv(gym.Env):
             "winner": self.state.winner,
             "truncated": truncated,
         }
+        if (self.state.win_reason or "") == SPIRIT_BROKEN_REASON:
+            info["spirit_broken"] = True
+            if self._spirit_broken_kind is not None:
+                info["spirit_broken_kind"] = self._spirit_broken_kind
 
         if terminated:
             raw_inc = os.environ.get(INCOME_TERM_COEF_ENV, "0").strip()
@@ -1300,6 +1322,19 @@ class AWBWEnv(gym.Env):
                     reward -= float(raw_tc)
                 except ValueError:
                     pass
+
+        if (
+            self.state is not None
+            and self.state.done
+            and (self.state.win_reason or "") == SPIRIT_BROKEN_REASON
+        ):
+            w = int(self.state.winner) if self.state.winner is not None else -1
+            if w in (0, 1):
+                r_sparse = 1.0 if w == int(self._learner_seat) else -1.0
+                if self._reward_shaping_mode == "phi":
+                    reward = r_sparse - phi_before
+                else:
+                    reward = r_sparse
 
         # Phase 0a.2: finalize per-step wall split BEFORE logging so the
         # finished-game record reflects this step's contribution.
@@ -1552,6 +1587,7 @@ class AWBWEnv(gym.Env):
         Always finishes with ``sync_own_units`` so own-unit beliefs are
         authoritative on the engine's exact HP.
         """
+        turn_before = self.state.turn
         beliefs = list(self._beliefs.values())
 
         # Phase 5: belief diff early-exit. SELECT_UNIT in SELECT or MOVE stages
@@ -1576,6 +1612,7 @@ class AWBWEnv(gym.Env):
             self._invalidate_legal_cache()
             for b in beliefs:
                 b.sync_own_units(self.state)
+            self._maybe_spirit_calendar(turn_before)
             return self.state, reward, done
 
         # Pre-step snapshot + optional attack range.
@@ -1604,6 +1641,7 @@ class AWBWEnv(gym.Env):
         # Execute
         self.state, reward, done = self.state.step(action)
         self._invalidate_legal_cache()
+        self._maybe_spirit_calendar(turn_before)
 
         post_by_id: dict[int, Any] = {}
         for p in (0, 1):
@@ -1674,6 +1712,49 @@ class AWBWEnv(gym.Env):
             b.sync_own_units(self.state)
 
         return self.state, reward, done
+
+    def _maybe_spirit_calendar(self, turn_before: int) -> None:
+        """P1 just ended: ``turn`` advanced and P0 to move. Optional spirit + diag."""
+        from pathlib import Path as _P
+
+        from rl import heuristic_termination as _ht
+
+        st = self.state
+        if st is None or st.done:
+            return
+        if st.turn <= turn_before or int(st.active_player) != 0:
+            return
+        if not (_ht.spirit_enabled_from_env() or _ht.diag_enabled_from_env()):
+            return
+        model = getattr(self.opponent_policy, "_model", None)
+        if model is None and not _ht.diag_enabled_from_env():
+            return
+        cfg = config_from_env()
+        tier = str(self._episode_info.get("tier") or st.tier_name or "")
+        tier_ok = not cfg.allowed_tiers or tier in cfg.allowed_tiers
+
+        def _enc(s, observer: int):
+            sp, sc = encode_state(s, observer=observer, belief=None)
+            return {"spatial": sp, "scalars": sc}
+
+        p = str(os.environ.get("AWBW_HEURISTIC_DIAG_LOG", "") or DEFAULT_DISAGREEMENT_LOG)
+        _kind, nlines = run_calendar_day(
+            st,
+            model,
+            cfg,
+            self._spirit_streaks,
+            _enc,
+            is_std_map=bool(self._episode_map_is_std),
+            map_tier_ok=tier_ok,
+            episode_id=int(self._episode_id),
+            map_id=self._episode_info.get("map_id"),
+            learner_seat=int(self._learner_seat),
+            log_path=_P(p),
+            diag_line_budget=self._diag_lines_this_ep,
+        )
+        self._diag_lines_this_ep += int(nlines)
+        if _kind is not None:
+            self._spirit_broken_kind = str(_kind)
 
     def _run_random_opponent(self, accumulated_reward: float) -> float:
         """Run the non-learner seat using uniform-random legal actions."""
@@ -1957,8 +2038,11 @@ class AWBWEnv(gym.Env):
             "tie_breaker_property_count": getattr(
                 self, "_log_tie_breaker_property_count", None
             ),
-            "log_schema_version": "1.11",
+            "log_schema_version": "1.12",
         }
+        sk = getattr(self, "_spirit_broken_kind", None)
+        if sk is not None:
+            log_record["spirit_broken_kind"] = sk
         log_record.update(getattr(self, "_opening_book_log", {}))
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag

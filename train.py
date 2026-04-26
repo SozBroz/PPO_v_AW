@@ -339,6 +339,8 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "Set AWBW_FPS_DIAG=1. Sync: SubprocVecEnv worker step stats + "
             "rl/self_play diagnostics to logs/fps_diag.jsonl. Async: same file + "
             "[fps_diag] stdout each learner step (collect vs learner wall split). "
+            "NN scalars (loss / policy / value) also go to logs/nn_train.jsonl every learner step; "
+            "async fps_diag rows and [fps_diag] lines include the same loss fields. "
             "Workers inherit AWBW_FPS_DIAG when AWBW_TRACK_PER_WORKER_TIMES is not forced off."
         ),
     )

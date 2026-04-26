@@ -65,6 +65,17 @@ does **not** terminate/respawn ``train.py`` for proposed-args drift (diagnostics
 (see ``rl/self_play.py`` policy Inductor path). On Windows you still need MSVC C++ and a working
 Triton install; default remains compile-off there for reliability.
 
+**Spirit-broken heuristics** (calendar-day early termination + value gates; see ``rl/heuristic_termination.py``):
+by default this script sets ``AWBW_SPIRIT_BROKEN=1`` for the ``train.py`` child **only when** the
+variable is unset in the host environment. Use ``--no-spirit-broken`` to force off, or set
+``AWBW_SPIRIT_BROKEN=0`` before launching.
+
+**Throughput + NN metrics:** ``--fps-diag`` defaults **on** (pass ``--no-fps-diag`` to disable).
+That forwards ``train.py --fps-diag`` and sets ``AWBW_FPS_DIAG=1`` for the child so
+``logs/fps_diag.jsonl`` and ``[fps_diag]`` stdout stay live; learner loss is also appended to
+``logs/nn_train.jsonl`` every step (see ``rl/async_impala.py`` / diagnostics callback in
+``rl/self_play.py``).
+
 ``--throughput-tune`` (after live-game inject / snapshot refresh / ``n-envs`` bump) runs short
 ``train.py`` probes with ``--fps-diag`` and picks ``--n-envs`` by median ``env_steps_per_s_*``
 from ``logs/fps_diag.jsonl``. The default probe ceiling is probe-derived
@@ -1242,6 +1253,7 @@ def _launch_env(
     log_replay_frames: bool = False,
     torch_compile: bool = False,
     fps_diag: bool = False,
+    no_spirit_broken: bool = False,
 ) -> dict[str, str]:
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
@@ -1263,6 +1275,11 @@ def _launch_env(
         env["AWBW_TORCH_COMPILE"] = "1"
     if fps_diag:
         env["AWBW_FPS_DIAG"] = "1"
+    # Spirit-broken (rl/heuristic_termination.py): default on for solo bootstrap if host left unset.
+    if no_spirit_broken:
+        env["AWBW_SPIRIT_BROKEN"] = "0"
+    elif os.environ.get("AWBW_SPIRIT_BROKEN") is None:
+        env["AWBW_SPIRIT_BROKEN"] = "1"
     return env
 
 
@@ -1419,10 +1436,13 @@ def main() -> int:
     )
     ap.add_argument(
         "--fps-diag",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Forward to train.py --fps-diag (AWBW_FPS_DIAG=1): logs/fps_diag.jsonl + [fps_diag] stdout "
-            "for both sync (Subproc+PPO) and async (IMPALA collect vs learner) backends."
+            "for sync and async; async rows/lines include NN loss fields. "
+            "NN scalars are also written to logs/nn_train.jsonl during learning. "
+            "Default: on. Use --no-fps-diag to disable."
         ),
     )
     ap.add_argument(
@@ -1443,6 +1463,16 @@ def main() -> int:
         help=(
             "Set AWBW_TORCH_COMPILE=1 for the train.py process so rl/self_play may apply "
             "torch.compile to the policy (GPU; on Windows also needs MSVC C++ + Triton)."
+        ),
+    )
+    ap.add_argument(
+        "--no-spirit-broken",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable spirit_broken calendar heuristics for this run: sets AWBW_SPIRIT_BROKEN=0 "
+            "in the train.py child env (overrides the default on from start_solo_training when "
+            "the host did not set AWBW_SPIRIT_BROKEN)."
         ),
     )
     ap.add_argument(
@@ -1608,6 +1638,12 @@ def main() -> int:
         args.hybrid_opponent_min_envs,
         args.hybrid_gpu_opponent_workers,
     )
+    if args.no_spirit_broken:
+        log.info("spirit_broken: disabled (--no-spirit-broken); train env will set AWBW_SPIRIT_BROKEN=0")
+    elif os.environ.get("AWBW_SPIRIT_BROKEN") is None:
+        log.info(
+            "spirit_broken: default AWBW_SPIRIT_BROKEN=1 for train.py (host unset; override with env or --no-spirit-broken)"
+        )
 
     if args.dry_run_bootstrap:
         print(f"[dry-run] would mkdir {fleet_dir}")
@@ -1702,6 +1738,7 @@ def main() -> int:
             log_replay_frames=args.log_replay_frames,
             torch_compile=args.torch_compile,
             fps_diag=args.fps_diag,
+            no_spirit_broken=args.no_spirit_broken,
         )
         neff = _last_int_for_flag(train_argv, "--n-envs")
         env_overlay.update(
@@ -1875,6 +1912,7 @@ def main() -> int:
         log_replay_frames=args.log_replay_frames,
         torch_compile=args.torch_compile,
         fps_diag=args.fps_diag,
+        no_spirit_broken=args.no_spirit_broken,
     )
     env_overlay.update(
         _hybrid_gpu_cpu_opponent_env(

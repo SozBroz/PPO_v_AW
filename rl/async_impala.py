@@ -463,6 +463,7 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
     from rl.self_play import (
         LOGS_DIR,
         _append_fps_diag_line,
+        _append_nn_train_line,
         _atomic_model_save,
         _main_proc_rss_mb,
         _make_env_factory,
@@ -728,6 +729,7 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         f"rollout={_roll}{', default cap (VRAM)' if _capped else ''}) "
         f"| queue_max={trainer.async_queue_max}{_chunk_note}"
         f"{' | fps_diag->logs/fps_diag.jsonl+stdout' if fps_diag_on else ''}"
+        f" | nn_train->logs/nn_train.jsonl"
     )
 
     try:
@@ -870,6 +872,27 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             steps_done += t * b
             policy_version += 1
 
+            tot_l = float(loss.detach().cpu())
+            pi_l = float(pi_loss.detach().cpu())
+            v_l = float(v_loss.detach().cpu())
+            ent_m = float(ent_bonus.detach().cpu())
+            nn_row = {
+                "schema_version": "1.0",
+                "training_backend": "async",
+                "learner_update": int(learner_updates),
+                "total_timesteps": int(steps_done),
+                "total_loss": tot_l,
+                "policy_loss": pi_l,
+                "value_loss": v_l,
+                "entropy_mean": ent_m,
+                "machine_id": os.environ.get("AWBW_MACHINE_ID"),
+            }
+            nn_row = {k: v for k, v in nn_row.items() if v is not None}
+            try:
+                _append_nn_train_line(nn_row)
+            except Exception:
+                pass
+
             if fps_diag_on:
                 if diag_initial_rss_mb is None:
                     diag_initial_rss_mb = _main_proc_rss_mb()
@@ -902,6 +925,11 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                     "worker_step_time_p99_min_s": 0.0,
                     "n_envs": int(n_actors),
                     "machine_id": os.environ.get("AWBW_MACHINE_ID"),
+                    "learner_update": int(learner_updates),
+                    "train_loss": tot_l,
+                    "train_policy_loss": pi_l,
+                    "train_value_loss": v_l,
+                    "train_entropy_mean": ent_m,
                 }
                 try:
                     _append_fps_diag_line(json_row)
@@ -915,7 +943,8 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                     f"env_collect_s={collect_s:.3f} "
                     f"ppo_update_s={ppo_update_s_out if ppo_update_s_out is not None else '-'} "
                     f"steps_done={steps_done:,} "
-                    f"backend=async",
+                    f"backend=async "
+                    f"loss={tot_l:.4f} pi={pi_l:.4f} v={v_l:.4f} ent={ent_m:.4f}",
                     flush=True,
                 )
 
@@ -941,11 +970,11 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             if cap is not None and steps_done >= cap:
                 break
 
-            if not fps_diag_on and learner_updates % 10 == 0:
+            if learner_updates % 10 == 0:
                 print(
-                    f"[async_impala] upd={learner_updates} env_steps~{steps_done:,} "
-                    f"loss={float(loss.detach().cpu()):.4f} pi={float(pi_loss.detach().cpu()):.4f} "
-                    f"v={float(v_loss.detach().cpu()):.4f} ~{rate:,.0f} env-steps/s",
+                    f"[nn_train] backend=async upd={learner_updates} env_steps~{steps_done:,} "
+                    f"loss={tot_l:.4f} pi={pi_l:.4f} v={v_l:.4f} ent={ent_m:.4f} "
+                    f"~{rate:,.0f} env-steps/s",
                     flush=True,
                 )
 
