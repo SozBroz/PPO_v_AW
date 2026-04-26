@@ -64,6 +64,28 @@ ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
 
+# region agent log
+_AGENT_DEBUG_LOG_PATH = ROOT / "debug-a6d5a1.log"
+_AGENT_DEBUG_SESSION_ID = "a6d5a1"
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "sessionId": _AGENT_DEBUG_SESSION_ID,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": {**data, "pid": os.getpid()},
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+# endregion
+
 # Session game counter: set by training (SelfPlayTrainer) so all SubprocVecEnv workers share one sequence.
 SESSION_GAME_COUNTER_DB_ENV = "AWBW_SESSION_GAME_COUNTER_DB"
 
@@ -190,6 +212,22 @@ def _synthetic_env_cap_property_tiebreak(p0_props: int, p1_props: int) -> tuple[
     if d >= 2:
         return 0, "env_step_cap_tiebreak"
     return 1, "env_step_cap_tiebreak"
+
+
+def _resolve_opponent_critic_model(opp: object) -> Any:
+    """
+    Policy module for spirit + heuristic value diag (``predict_values`` on the
+    checkpoint). Wrappers such as :class:`rl.opening_book.OpeningBookCheckpointOpponent`
+    delegate P1 actions to an inner :class:`_CheckpointOpponent`; expose the same
+    ``_model`` the calendar heuristics expect.
+    """
+    m = getattr(opp, "_model", None)
+    if m is not None:
+        return m
+    inner = getattr(opp, "_inner", None)
+    if inner is not None:
+        return getattr(inner, "_model", None)
+    return None
 
 
 def _append_game_log_line(record: dict) -> None:
@@ -709,6 +747,7 @@ class AWBWEnv(gym.Env):
         self._diag_lines_this_ep: int = 0
         self._episode_map_is_std: bool = True
         self._spirit_broken_kind: str | None = None
+        self._spirit_debug_events: int = 0
         self._p1_truncated_mid_turn: bool = False
         # Filled each ``reset()``; used for ego-centric obs + learner-frame rewards.
         self._learner_seat: int = 0
@@ -1082,6 +1121,7 @@ class AWBWEnv(gym.Env):
         self._spirit_streaks.reset()
         self._diag_lines_this_ep = 0
         self._spirit_broken_kind = None
+        self._spirit_debug_events = 0
         _mid = int(self._episode_info.get("map_id") or 0)
         _meta = next((m for m in self.map_pool if m.get("map_id") == _mid), {})
         self._episode_map_is_std = str(_meta.get("type", "")).lower() == "std"
@@ -1746,18 +1786,120 @@ class AWBWEnv(gym.Env):
         from rl import heuristic_termination as _ht
 
         st = self.state
-        if st is None or st.done:
+        if st is None:
+            return
+        if st.done:
+            if self._spirit_debug_events < 4:
+                self._spirit_debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H10",
+                    "rl/env.py:AWBWEnv._maybe_spirit_calendar",
+                    "spirit calendar skipped because engine already ended the game",
+                    {
+                        "episode_id": int(self._episode_id),
+                        "turn": int(st.turn),
+                        "map_id": self._episode_info.get("map_id"),
+                        "winner": st.winner,
+                        "win_reason": st.win_reason,
+                        "income": [
+                            int(st.count_income_properties(0)),
+                            int(st.count_income_properties(1)),
+                        ],
+                        "alive_units": [
+                            sum(1 for u in st.units[0] if u.is_alive),
+                            sum(1 for u in st.units[1] if u.is_alive),
+                        ],
+                        "army_value": [
+                            float(army_value_for_player(st, 0)),
+                            float(army_value_for_player(st, 1)),
+                        ],
+                    },
+                )
+                # endregion
             return
         if st.turn <= turn_before or int(st.active_player) != 0:
             return
         if not (_ht.spirit_enabled_from_env() or _ht.diag_enabled_from_env()):
+            if self._spirit_debug_events < 4:
+                self._spirit_debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H3",
+                    "rl/env.py:AWBWEnv._maybe_spirit_calendar",
+                    "spirit calendar skipped because env/diag disabled",
+                    {
+                        "episode_id": int(self._episode_id),
+                        "turn": int(st.turn),
+                        "map_id": self._episode_info.get("map_id"),
+                        "spirit_env": os.environ.get("AWBW_SPIRIT_BROKEN"),
+                        "diag_env": os.environ.get("AWBW_HEURISTIC_VALUE_DIAG"),
+                    },
+                )
+                # endregion
             return
-        model = getattr(self.opponent_policy, "_model", None)
+        model = _resolve_opponent_critic_model(self.opponent_policy)
         if model is None and not _ht.diag_enabled_from_env():
+            if self._spirit_debug_events < 4:
+                self._spirit_debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H4",
+                    "rl/env.py:AWBWEnv._maybe_spirit_calendar",
+                    "spirit calendar skipped because opponent critic model is missing",
+                    {
+                        "episode_id": int(self._episode_id),
+                        "turn": int(st.turn),
+                        "map_id": self._episode_info.get("map_id"),
+                        "opponent_type": type(self.opponent_policy).__name__,
+                        "opponent_mode": (
+                            self.opponent_policy.mode()
+                            if hasattr(self.opponent_policy, "mode")
+                            else None
+                        ),
+                    },
+                )
+                # endregion
             return
         cfg = config_from_env()
         tier = str(self._episode_info.get("tier") or st.tier_name or "")
         tier_ok = not cfg.allowed_tiers or tier in cfg.allowed_tiers
+        if self._spirit_debug_events < 4:
+            self._spirit_debug_events += 1
+            # region agent log
+            _agent_debug_log(
+                "H3,H4,H5",
+                "rl/env.py:AWBWEnv._maybe_spirit_calendar",
+                "spirit calendar gate reached before heuristic evaluation",
+                {
+                    "episode_id": int(self._episode_id),
+                    "turn": int(st.turn),
+                    "turn_before": int(turn_before),
+                    "map_id": self._episode_info.get("map_id"),
+                    "tier": tier,
+                    "tier_ok": bool(tier_ok),
+                    "is_std_map": bool(self._episode_map_is_std),
+                    "spirit_enabled": bool(_ht.spirit_enabled_from_env()),
+                    "model_present": model is not None,
+                    "income": [
+                        int(st.count_income_properties(0)),
+                        int(st.count_income_properties(1)),
+                    ],
+                    "alive_units": [
+                        sum(1 for u in st.units[0] if u.is_alive),
+                        sum(1 for u in st.units[1] if u.is_alive),
+                    ],
+                    "army_value": [
+                        float(army_value_for_player(st, 0)),
+                        float(army_value_for_player(st, 1)),
+                    ],
+                    "streaks": {
+                        "snowball": list(self._spirit_streaks.snowball),
+                        "resign": list(self._spirit_streaks.resign),
+                    },
+                },
+            )
+            # endregion
 
         def _enc(s, observer: int):
             sp, sc = encode_state(s, observer=observer, belief=None)
@@ -1779,6 +1921,28 @@ class AWBWEnv(gym.Env):
             diag_line_budget=self._diag_lines_this_ep,
         )
         self._diag_lines_this_ep += int(nlines)
+        if self._spirit_debug_events < 6 or _kind is not None:
+            self._spirit_debug_events += 1
+            # region agent log
+            _agent_debug_log(
+                "H5",
+                "rl/env.py:AWBWEnv._maybe_spirit_calendar",
+                "spirit calendar heuristic result",
+                {
+                    "episode_id": int(self._episode_id),
+                    "turn": int(st.turn),
+                    "map_id": self._episode_info.get("map_id"),
+                    "kind": _kind,
+                    "winner": st.winner,
+                    "win_reason": st.win_reason,
+                    "diag_lines": int(nlines),
+                    "streaks": {
+                        "snowball": list(self._spirit_streaks.snowball),
+                        "resign": list(self._spirit_streaks.resign),
+                    },
+                },
+            )
+            # endregion
         if _kind is not None:
             self._spirit_broken_kind = str(_kind)
 
@@ -2083,6 +2247,119 @@ class AWBWEnv(gym.Env):
         log_record.update(getattr(self, "_opening_book_log", {}))
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag
+        # region agent log
+        try:
+            from rl import heuristic_termination as _ht
+
+            _model = _resolve_opponent_critic_model(self.opponent_policy)
+            _cfg = config_from_env()
+            _m = _ht.income_props_and_counts(self.state)
+            _d_prop, _d_count, _p0v, _p1v = _ht.material_margins(_m, _cfg.value_margin)
+            _p0 = _p1 = _r0 = _r1 = 0.0
+            if _model is not None:
+                def _debug_enc(s, observer: int):
+                    sp, sc = encode_state(s, observer=observer, belief=None)
+                    return {"spatial": sp, "scalars": sc}
+
+                _p0, _p1, _r0, _r1 = _ht._predict_p_win_both(self.state, _model, _debug_enc, cfg=_cfg)
+            _agent_debug_log(
+                "H5,H9,H10",
+                "rl/env.py:AWBWEnv._log_finished_game",
+                "spirit final-state predicate evaluation",
+                {
+                    "episode_id": int(self._episode_id),
+                    "map_id": log_record.get("map_id"),
+                    "turns": log_record.get("turns"),
+                    "win_condition": log_record.get("win_condition"),
+                    "terminated": bool(self.state.done),
+                    "truncated": bool(getattr(self, "_log_episode_truncated", False)),
+                    "model_present": _model is not None,
+                    "is_std_map": bool(self._episode_map_is_std),
+                    "material": _m,
+                    "d_prop": int(_d_prop),
+                    "d_count": int(_d_count),
+                    "p0_value_lead": bool(_p0v),
+                    "p1_value_lead": bool(_p1v),
+                    "p0_model_win": float(_p0),
+                    "p1_model_win": float(_p1),
+                    "v0_raw": float(_r0),
+                    "v1_raw": float(_r1),
+                    "snowball_holds": {
+                        "p0": bool(_ht.snowball_holds(_m, 0, _p0, _cfg)),
+                        "p1": bool(_ht.snowball_holds(_m, 1, _p1, _cfg)),
+                    },
+                    "resign_crush_holds": {
+                        "p0": bool(_ht.resign_crush_holds(_m, 0, _p0, _cfg)),
+                        "p1": bool(_ht.resign_crush_holds(_m, 1, _p1, _cfg)),
+                    },
+                    "thresholds": {
+                        "p_snowball": float(_cfg.p_snowball),
+                        "p_trailer_resign_max": float(_cfg.p_trailer_resign_max),
+                        "value_margin": float(_cfg.value_margin),
+                    },
+                },
+            )
+        except Exception as exc:
+            _agent_debug_log(
+                "H9",
+                "rl/env.py:AWBWEnv._log_finished_game",
+                "spirit final-state predicate evaluation failed",
+                {"error": repr(exc), "map_id": log_record.get("map_id")},
+            )
+        # endregion
+        # region agent log
+        _agent_debug_log(
+            "H2,H3,H4,H5,H6,H7,H8",
+            "rl/env.py:AWBWEnv._log_finished_game",
+            "finished game summary before game_log write",
+            {
+                "episode_id": int(self._episode_id),
+                "map_id": log_record.get("map_id"),
+                "map_name": log_record.get("map_name"),
+                "tier": log_record.get("tier"),
+                "winner": log_record.get("winner"),
+                "win_condition": log_record.get("win_condition"),
+                "turns": log_record.get("turns"),
+                "learner_seat": log_record.get("learner_seat"),
+                "opening_player": log_record.get("opening_player"),
+                "opponent_type": log_record.get("opponent_type"),
+                "opening_book": {
+                    "id_p0": log_record.get("opening_book_id_p0"),
+                    "used_p0": log_record.get("opening_book_used_p0"),
+                    "actions_p0": log_record.get("opening_book_actions_p0"),
+                    "desync_p0": log_record.get("opening_book_desync_p0"),
+                    "fallback_p0": log_record.get("opening_book_fallback_reason_p0"),
+                    "episode_enabled_p0": log_record.get(
+                        "opening_book_episode_enabled_p0"
+                    ),
+                    "suggest_calls_p0": log_record.get(
+                        "opening_book_suggest_calls_p0"
+                    ),
+                    "id_p1": log_record.get("opening_book_id_p1"),
+                    "used_p1": log_record.get("opening_book_used_p1"),
+                    "actions_p1": log_record.get("opening_book_actions_p1"),
+                    "desync_p1": log_record.get("opening_book_desync_p1"),
+                    "fallback_p1": log_record.get("opening_book_fallback_reason_p1"),
+                    "episode_enabled_p1": log_record.get(
+                        "opening_book_episode_enabled_p1"
+                    ),
+                    "suggest_calls_p1": log_record.get(
+                        "opening_book_suggest_calls_p1"
+                    ),
+                },
+                "spirit": {
+                    "kind": log_record.get("spirit_broken_kind"),
+                    "env": os.environ.get("AWBW_SPIRIT_BROKEN"),
+                    "debug_events": int(getattr(self, "_spirit_debug_events", 0)),
+                },
+                "material": {
+                    "income_property_count": log_record.get("income_property_count"),
+                    "alive_unit_count": log_record.get("alive_unit_count"),
+                    "army_value": log_record.get("army_value"),
+                },
+            },
+        )
+        # endregion
 
         # Per-step replay data — optional, gated by log_replay_frames.
         # `board` holds the static terrain + dimensions once; each entry in

@@ -45,16 +45,9 @@ FLAG_PRESENT = "_FLAG_PRESENT"
 
 PROBE_OWNED_KEYS = frozenset({"--n-envs", "--n-steps", "--batch-size"})
 
-# Default human opening book (train.py --opening-book*). Present on every curriculum stage so
-# sync and async trainers see the same argv; if the JSONL is missing, SelfPlayTrainer disables
-# the book with a warning. Override per stage, e.g. ``"--opening-book-prob": 0.0``, when a
-# later stage should stop using scripted openings.
-DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {
-    "--opening-book": "data/opening_books/ranked_std_human_openings.jsonl",
-    "--opening-book-prob": 1.0,
-    "--opening-book-days": 5,
-    "--opening-book-seat": 1,
-}
+# Opening book: opt-in per stage after ``tools/validate_opening_book.py`` on a real corpus.
+# Shipped default is empty (no --opening-book) so training does not depend on a placeholder JSONL.
+DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {}
 
 # Human / hand-edited curriculum_state.json often uses "stage_d"; schedule uses long names.
 _CURRICULUM_STAGE_SHORTHAND: dict[str, str] = {

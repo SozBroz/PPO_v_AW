@@ -795,6 +795,8 @@ class GameState:
         # Sensei COP: spawn Mech on every owned base without a unit
         elif co.co_id == 13 and cop:
             for prop in self.properties:
+                if len(self.units[player]) >= self.map_data.unit_limit:
+                    break
                 if prop.owner == player and prop.is_base:
                     if self.get_unit_at(prop.row, prop.col) is None:
                         mech = Unit(
@@ -2208,6 +2210,11 @@ class GameState:
         if self.get_unit_at(*action.move_pos) is not None:
             if oracle_strict:
                 raise IllegalActionError("BUILD: factory tile occupied")
+            return
+
+        if len(self.units[player]) >= self.map_data.unit_limit:
+            if oracle_strict:
+                raise IllegalActionError("BUILD: unit limit reached")
             return
 
         self.funds[player] -= cost

@@ -75,14 +75,18 @@ def iter_demo_rows_from_trace_record(
     pool = map_pool or _DEFAULT_POOL
     mdir = maps_dir or _DEFAULT_MAPS
     map_data = load_map(record["map_id"], pool, mdir)
+    co0 = int(record["co0"])
+    co1 = int(record["co1"])
     st = make_initial_state(
         map_data,
-        record["co0"],
-        record["co1"],
+        co0,
+        co1,
         starting_funds=0,
         tier_name=record.get("tier", "T2"),
     )
-    sid = f"{session_prefix}:{record.get('map_id', '')}"
+    mid = int(record["map_id"])
+    # Stable id for build_opening_book grouping (one session per source trace, not per row).
+    book_session_id = f"{session_prefix}:m{mid}"
     for i, entry in enumerate(record["full_trace"]):
         t = int(entry.get("turn", 0) or 0)
         if max_turn is not None and t > max_turn:
@@ -95,16 +99,19 @@ def iter_demo_rows_from_trace_record(
                     "awbw_turn": t,
                     "trace_index": i,
                     "demo_seat": ap,
+                    "co0": co0,
+                    "co1": co1,
+                    "book_session_id": book_session_id,
                 }
                 if source_game_id is not None:
                     ex["source_game_id"] = int(source_game_id)
                 if opening_only:
                     ex["opening_segment"] = True
                 yield build_demo_row_dict(
-                    f"{sid}:{i}",
+                    book_session_id,
                     st,
                     act,
-                    int(record["map_id"]),
+                    mid,
                     str(record.get("tier", "")),
                     **ex,
                 )
@@ -166,6 +173,7 @@ def collect_demo_rows_from_oracle_zip(
     mdir = maps_dir or _DEFAULT_MAPS
     out: list[dict[str, Any]] = []
     n = 0
+    book_session_id = f"{session_prefix}:zip{zip_path.stem}:m{int(map_id)}"
 
     def before(st: GameState, act: Action) -> None:
         nonlocal n
@@ -178,7 +186,11 @@ def collect_demo_rows_from_oracle_zip(
             return
         ex: dict[str, Any] = {
             "calendar_turn": cal,
+            "trace_index": n,
             "demo_seat": int(st.active_player),
+            "co0": int(co0),
+            "co1": int(co1),
+            "book_session_id": book_session_id,
         }
         if source_game_id is not None:
             ex["source_game_id"] = int(source_game_id)
@@ -186,7 +198,7 @@ def collect_demo_rows_from_oracle_zip(
             ex["opening_segment"] = True
         out.append(
             build_demo_row_dict(
-                f"{session_prefix}:{zip_path.stem}:{n}",
+                book_session_id,
                 st,
                 act,
                 map_id,

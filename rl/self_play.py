@@ -1089,7 +1089,7 @@ class _PicklableEnvFactory:
         opening_book_seat: int = 1,
         opening_book_prob: float = 1.0,
         opening_book_strict_co: bool = False,
-        opening_book_max_day: int | None = 5,
+        opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
     ) -> None:
         self.map_pool = map_pool
@@ -1201,7 +1201,7 @@ def _make_env_factory(
     opening_book_seat: int = 1,
     opening_book_prob: float = 1.0,
     opening_book_strict_co: bool = False,
-    opening_book_max_day: int | None = 5,
+    opening_book_max_day: int | None = None,
     opening_book_seed: int = 0,
 ) -> Callable[[], Any]:
     """Return a picklable zero-arg env factory (SubprocVecEnv, async IMPALA actors)."""
@@ -1626,7 +1626,7 @@ class SelfPlayTrainer:
         opening_book_seat: int = 1,
         opening_book_prob: float = 1.0,
         opening_book_strict_co: bool = False,
-        opening_book_max_day: int | None = 5,
+        opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
     ) -> None:
         tb = str(training_backend or "sync").strip().lower()

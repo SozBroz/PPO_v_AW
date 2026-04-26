@@ -3,16 +3,42 @@ Load JSONL opening books and suggest legal flat actions for the opponent seat.
 
 Each line is an object with ``map_id``, ``seat``, ``horizon_days``, and
 ``action_indices`` (ordered flat indices from human demo ingest).
+``horizon_days`` of 0 means no per-day cap; length is the list of
+``action_indices`` (typical for books built from truncated pro replays).
 """
 from __future__ import annotations
 
 import json
+import os
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+# region agent log
+_AGENT_DEBUG_LOG_PATH = Path(__file__).parent.parent / "debug-a6d5a1.log"
+_AGENT_DEBUG_SESSION_ID = "a6d5a1"
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "sessionId": _AGENT_DEBUG_SESSION_ID,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": {**data, "pid": os.getpid()},
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+# endregion
 
 
 @dataclass
@@ -73,7 +99,10 @@ class OpeningBookController:
         self._seat = int(seat)
         self._strict_co = bool(strict_co)
         self._rng = rng
-        self._max_calendar_turn = max_calendar_turn
+        mct = max_calendar_turn
+        if mct is not None and int(mct) <= 0:
+            mct = None
+        self._max_calendar_turn: int | None = mct
         self._book: _Book | None = None
         self._cursor = 0
         self._episode_token: int | None = None
@@ -82,6 +111,8 @@ class OpeningBookController:
         self.desync = False
         self.desync_reason: str | None = None
         self.book_id: str | None = None
+        self._debug_events = 0
+        self.suggest_calls: int = 0
 
     def on_episode_start(
         self,
@@ -100,13 +131,47 @@ class OpeningBookController:
         self.desync_reason = None
         self.book_id = None
         self._book = None
+        self._debug_events = 0
+        self.suggest_calls = 0
         cands = list(self._index.by_map_seat.get((int(map_id), int(self._seat)), ()))
         if self._strict_co and co_id_for_seat is not None:
             cands = [b for b in cands if b.co_id is None or b.co_id == int(co_id_for_seat)]
+        # region agent log
+        _agent_debug_log(
+            "H6,H7,H8",
+            "rl/opening_book.py:OpeningBookController.on_episode_start",
+            "opening book episode lookup",
+            {
+                "episode_id": int(episode_id),
+                "map_id": int(map_id),
+                "seat": int(self._seat),
+                "strict_co": bool(self._strict_co),
+                "co_id_for_seat": co_id_for_seat,
+                "candidate_count": len(cands),
+                "indexed_keys_count": len(self._index.by_map_seat),
+            },
+        )
+        # endregion
         if not cands:
             return
         self._book = self._rng.choice(cands)
         self.book_id = self._book.book_id
+        # region agent log
+        _agent_debug_log(
+            "H7,H8",
+            "rl/opening_book.py:OpeningBookController.on_episode_start",
+            "opening book selected",
+            {
+                "episode_id": int(episode_id),
+                "book_id": self.book_id,
+                "map_id": int(self._book.map_id),
+                "seat": int(self._book.seat),
+                "co_id": self._book.co_id,
+                "horizon_days": int(self._book.horizon_days),
+                "action_count": len(self._book.action_indices),
+            },
+        )
+        # endregion
 
     def suggest_flat(
         self,
@@ -116,24 +181,114 @@ class OpeningBookController:
     ) -> int | None:
         b = self._book
         if b is None or not b.action_indices:
+            if self._debug_events < 3:
+                self._debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H7,H8",
+                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+                    "opening book unavailable for suggestion",
+                    {
+                        "calendar_turn": int(calendar_turn),
+                        "book_id": self.book_id,
+                        "has_book": b is not None,
+                        "actions_used": int(self.actions_used),
+                    },
+                )
+                # endregion
             return None
+        self.suggest_calls += 1
         if self._max_calendar_turn is not None and int(calendar_turn) > int(
             self._max_calendar_turn
         ):
+            if self._debug_events < 3:
+                self._debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H8",
+                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+                    "opening book blocked by max calendar turn",
+                    {
+                        "calendar_turn": int(calendar_turn),
+                        "max_calendar_turn": int(self._max_calendar_turn),
+                        "book_id": self.book_id,
+                    },
+                )
+                # endregion
             return None
         if b.horizon_days and int(calendar_turn) > int(b.horizon_days):
+            if self._debug_events < 3:
+                self._debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H8",
+                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+                    "opening book blocked by horizon days",
+                    {
+                        "calendar_turn": int(calendar_turn),
+                        "horizon_days": int(b.horizon_days),
+                        "book_id": self.book_id,
+                    },
+                )
+                # endregion
             return None
         if self._cursor >= len(b.action_indices):
+            if self._debug_events < 3:
+                self._debug_events += 1
+                # region agent log
+                _agent_debug_log(
+                    "H8",
+                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+                    "opening book exhausted",
+                    {
+                        "cursor": int(self._cursor),
+                        "action_count": len(b.action_indices),
+                        "book_id": self.book_id,
+                    },
+                )
+                # endregion
             return None
         ai = int(b.action_indices[self._cursor])
         if ai < 0 or ai >= action_mask.shape[0]:
             self._mark_desync("flat_out_of_range")
+            # region agent log
+            _agent_debug_log(
+                "H8",
+                "rl/opening_book.py:OpeningBookController.suggest_flat",
+                "opening book desync: flat out of range",
+                {"book_id": self.book_id, "cursor": int(self._cursor), "action_index": int(ai), "mask_size": int(action_mask.shape[0])},
+            )
+            # endregion
             return None
         if not bool(action_mask[ai]):
             self._mark_desync("action_not_legal")
+            # region agent log
+            _agent_debug_log(
+                "H8",
+                "rl/opening_book.py:OpeningBookController.suggest_flat",
+                "opening book desync: action not legal",
+                {"book_id": self.book_id, "cursor": int(self._cursor), "action_index": int(ai), "legal_count": int(np.asarray(action_mask, dtype=bool).sum())},
+            )
+            # endregion
             return None
         self._cursor += 1
         self.actions_used += 1
+        if self._debug_events < 3:
+            self._debug_events += 1
+            # region agent log
+            _agent_debug_log(
+                "H8",
+                "rl/opening_book.py:OpeningBookController.suggest_flat",
+                "opening book action used",
+                {
+                    "book_id": self.book_id,
+                    "calendar_turn": int(calendar_turn),
+                    "action_index": int(ai),
+                    "cursor_after": int(self._cursor),
+                    "actions_used": int(self.actions_used),
+                },
+            )
+            # endregion
         return ai
 
     def _mark_desync(self, reason: str) -> None:
@@ -153,7 +308,7 @@ class OpeningBookCheckpointOpponent:
         book_seat: int = 1,
         book_prob: float = 1.0,
         strict_co: bool = False,
-        max_day: int | None = 5,
+        max_day: int | None = None,
         seed: int = 0,
     ) -> None:
         import weakref
@@ -162,17 +317,28 @@ class OpeningBookCheckpointOpponent:
         self._index = OpeningBookIndex.from_jsonl(Path(book_path))
         self._book_seat = int(book_seat)
         self._book_prob = float(max(0.0, min(1.0, book_prob)))
+        md = max_day
+        if md is not None and int(md) <= 0:
+            md = None
         self._ctl = OpeningBookController(
             self._index,
             seat=self._book_seat,
             strict_co=bool(strict_co),
             rng=random.Random(int(seed) + 17),
-            max_calendar_turn=max_day,
+            max_calendar_turn=md,
         )
         self._prob_rng = random.Random(int(seed))
         self._env_ref: Any = None
         self._last_episode_id: int | None = None
+        self._episode_use_book: bool = False
         self._wref = weakref
+
+    def reload_pool(self, zip_paths: list[str] | None = None) -> int | None:
+        """Delegate Phase 10c opponent pool refresh to the inner checkpoint opponent."""
+        fn = getattr(self._inner, "reload_pool", None)
+        if fn is None:
+            return None
+        return fn(zip_paths)
 
     def attach_env(self, env: object) -> None:
         if hasattr(self._inner, "attach_env"):
@@ -182,6 +348,11 @@ class OpeningBookCheckpointOpponent:
     @property
     def reload_count(self) -> int:
         return int(getattr(self._inner, "reload_count", 0) or 0)
+
+    @property
+    def _model(self) -> Any:
+        """Same checkpoint as P1 after book lines; used by spirit / heuristic value diag."""
+        return getattr(self._inner, "_model", None)
 
     def needs_observation(self) -> bool:
         fn = getattr(self._inner, "needs_observation", None)
@@ -214,9 +385,26 @@ class OpeningBookCheckpointOpponent:
                 self._ctl.on_episode_start(
                     episode_id=eid, map_id=map_id, co_id_for_seat=co_id
                 )
-        use = self._book_prob > 0.0 and bool(self._ctl._index.by_map_seat)
-        if use and self._prob_rng.random() < self._book_prob:
-            t = int(getattr(st, "turn", 0) or 0) if st is not None else 0
+                self._episode_use_book = (
+                    self._book_prob > 0.0
+                    and self._ctl.book_id is not None
+                    and self._prob_rng.random() < self._book_prob
+                )
+        seat_ok = True
+        if st is not None and env is not None:
+            enemy_seat = int(getattr(env, "_enemy_seat", self._book_seat))
+            active = int(st.active_player)
+            seat_ok = (
+                int(self._book_seat) == enemy_seat and active == int(self._book_seat)
+            )
+        use_book = (
+            seat_ok
+            and self._episode_use_book
+            and bool(self._ctl._index.by_map_seat)
+            and st is not None
+        )
+        if use_book:
+            t = int(getattr(st, "turn", 0) or 0)
             a = self._ctl.suggest_flat(calendar_turn=t, action_mask=m)
             if a is not None:
                 self._sync_log(env)
@@ -237,3 +425,5 @@ class OpeningBookCheckpointOpponent:
         d[f"opening_book_actions_{p}"] = int(self._ctl.actions_used)
         d[f"opening_book_desync_{p}"] = bool(self._ctl.desync)
         d[f"opening_book_fallback_reason_{p}"] = self._ctl.desync_reason
+        d[f"opening_book_episode_enabled_{p}"] = bool(self._episode_use_book)
+        d[f"opening_book_suggest_calls_{p}"] = int(self._ctl.suggest_calls)

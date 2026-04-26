@@ -342,7 +342,7 @@ def load_map(
         height=height,
         width=width,
         cap_limit=meta["cap_limit"],
-        unit_limit=meta["unit_limit"],
+        unit_limit=int(meta["unit_limit"]),
         unit_bans=meta.get("unit_bans", []),
         tiers=tiers,
         objective_type=objective_type,

@@ -29,6 +29,28 @@ from torch.utils.checkpoint import checkpoint
 from rl.network import AWBWFeaturesExtractor
 from rl.vtrace import from_importance_weights
 
+# region agent log
+_AGENT_DEBUG_LOG_PATH = Path(__file__).parent.parent / "debug-a6d5a1.log"
+_AGENT_DEBUG_SESSION_ID = "a6d5a1"
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "sessionId": _AGENT_DEBUG_SESSION_ID,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(__import__("json").dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+# endregion
+
 if TYPE_CHECKING:
     from rl.self_play import SelfPlayTrainer
 
@@ -551,6 +573,25 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         opening_book_seed=int(getattr(trainer, "opening_book_seed", 0) or 0),
     )
     n_live = len(getattr(trainer, "live_games_id", None) or [])
+    # region agent log
+    _agent_debug_log(
+        "H1,H2,H6",
+        "rl/async_impala.py:run_impala_training",
+        "async trainer env/opening/spirit configuration before actor factories",
+        {
+            "n_actors": int(n_actors),
+            "n_live": int(n_live),
+            "live_games_id": list(getattr(trainer, "live_games_id", None) or []),
+            "opening_book_path": env_kw.get("opening_book_path"),
+            "opening_book_seat": env_kw.get("opening_book_seat"),
+            "opening_book_prob": env_kw.get("opening_book_prob"),
+            "opening_book_max_day": env_kw.get("opening_book_max_day"),
+            "spirit_env": os.environ.get("AWBW_SPIRIT_BROKEN"),
+            "training_backend": getattr(trainer, "training_backend", None),
+            "curriculum_tag": getattr(trainer, "curriculum_tag", None),
+        },
+    )
+    # endregion
 
     if resume_path.exists():
         model = load_maskable_ppo_compat(

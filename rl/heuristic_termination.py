@@ -24,6 +24,28 @@ EPS_VALUE = 1.0  # for ratio denominator when both armies are empty
 ROOT = Path(__file__).parent.parent
 DEFAULT_DISAGREEMENT_LOG = ROOT / "logs" / "heuristic_value_disagreement.jsonl"
 
+# region agent log
+_AGENT_DEBUG_LOG_PATH = ROOT / "debug-a6d5a1.log"
+_AGENT_DEBUG_SESSION_ID = "a6d5a1"
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "sessionId": _AGENT_DEBUG_SESSION_ID,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": {**data, "pid": os.getpid()},
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+# endregion
+
 
 def spirit_enabled_from_env() -> bool:
     v = (os.environ.get("AWBW_SPIRIT_BROKEN", "") or "").strip().lower()
@@ -135,6 +157,13 @@ def snowball_holds(
     return p_win_seat >= float(cfg.p_snowball)
 
 
+def snowball_material_holds(m: dict[str, Any], seat: int, cfg: SpiritConfig) -> bool:
+    d_prop, d_count, p0v, p1v = material_margins(m, cfg.value_margin)
+    if seat == 0:
+        return d_prop >= 2 and d_count >= 2 and p0v
+    return -d_prop >= 2 and -d_count >= 2 and p1v
+
+
 def resign_crush_holds(
     m: dict[str, Any], seat: int, p_win_seat: float, cfg: SpiritConfig
 ) -> bool:
@@ -147,6 +176,14 @@ def resign_crush_holds(
         if d_prop < 2 or d_count < 2 or not p0v:
             return False
     return p_win_seat < float(cfg.p_trailer_resign_max)
+
+
+def resign_crush_material_holds(m: dict[str, Any], seat: int, cfg: SpiritConfig) -> bool:
+    """Trailer S is down materially enough that neutral critic output is uninformative."""
+    d_prop, d_count, p0v, p1v = material_margins(m, cfg.value_margin)
+    if seat == 0:
+        return d_prop <= -2 and d_count <= -2 and p1v
+    return d_prop >= 2 and d_count >= 2 and p0v
 
 
 @dataclass
@@ -378,18 +415,56 @@ def run_calendar_day(
             log_path=log_path,
             lines_used=diag_line_budget,
         )
-    if not spirit_enabled_from_env() or model is None:
+    if not spirit_enabled_from_env():
         return None, n_written
 
+    d_prop, d_count, p0v, p1v = material_margins(m, cfg.value_margin)
+    material_crush = (
+        (abs(d_prop) >= 2 and abs(d_count) >= 2)
+        or (int(m["count_p0"]) == 0 or int(m["count_p1"]) == 0)
+        or (float(m["value_p0"]) == 0.0 or float(m["value_p1"]) == 0.0)
+    )
+    if material_crush:
+        # region agent log
+        _agent_debug_log(
+            "H5,H9",
+            "rl/heuristic_termination.py:run_calendar_day",
+            "spirit material/value gate state",
+            {
+                "episode_id": int(episode_id),
+                "turn": int(state.turn),
+                "map_id": map_id,
+                "tier_name": str(state.tier_name),
+                "learner_seat": int(learner_seat),
+                "material": m,
+                "d_prop": int(d_prop),
+                "d_count": int(d_count),
+                "p0_value_lead": bool(p0v),
+                "p1_value_lead": bool(p1v),
+                "p0_model_win": float(p0),
+                "p1_model_win": float(p1),
+                "v0_raw": float(r0),
+                "v1_raw": float(r1),
+                "thresholds": {
+                    "p_snowball": float(cfg.p_snowball),
+                    "p_trailer_resign_max": float(cfg.p_trailer_resign_max),
+                    "value_margin": float(cfg.value_margin),
+                },
+                "streaks_before": {
+                    "snowball": list(streaks.snowball),
+                    "resign": list(streaks.resign),
+                },
+            },
+        )
+        # endregion
+
     for s in (0, 1):
-        ps = p0 if s == 0 else p1
-        if snowball_holds(m, s, ps, cfg):
+        if snowball_material_holds(m, s, cfg):
             streaks.snowball[s] += 1
         else:
             streaks.snowball[s] = 0
     for s in (0, 1):
-        ps = p0 if s == 0 else p1
-        if resign_crush_holds(m, s, ps, cfg):
+        if resign_crush_material_holds(m, s, cfg):
             streaks.resign[s] += 1
         else:
             streaks.resign[s] = 0

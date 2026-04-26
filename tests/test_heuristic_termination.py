@@ -18,8 +18,10 @@ from rl.heuristic_termination import (
     material_margins,
     maybe_log_disagreements,
     raw_value_to_p_win,
+    resign_crush_material_holds,
     resign_crush_holds,
     run_calendar_day,
+    snowball_material_holds,
     snowball_holds,
     SPIRIT_BROKEN_REASON,
 )
@@ -79,6 +81,10 @@ def test_snowball_and_resign_streaks_mock() -> None:
     _, _, _, p1v = material_margins(m_lose, cfg.value_margin)
     assert p1v is True
     assert resign_crush_holds(m_lose, 0, 0.2, cfg) is True
+
+    material_only = SpiritConfig()
+    assert snowball_material_holds(m, 0, material_only) is True
+    assert resign_crush_material_holds(m_lose, 0, material_only) is True
 
     def _enc(_st, o):
         import numpy as np
@@ -143,6 +149,64 @@ def test_snowball_and_resign_streaks_mock() -> None:
     )
     assert k2 is None
     del os.environ["AWBW_SPIRIT_BROKEN"]
+
+
+def test_spirit_broken_material_only_ignores_neutral_value_head() -> None:
+    s = _tiny_state()
+    s.done = False
+    s.winner = None
+    for prop in s.properties:
+        prop.owner = 0
+    s.units[0] = s.units[0] * 20
+    s.units[1] = s.units[1][:1]
+
+    class Pol:
+        def obs_to_tensor(self, obs):
+            import torch
+
+            return {k: torch.as_tensor(v).unsqueeze(0) for k, v in obs.items()}, None
+
+        def predict_values(self, obs_t):
+            import torch
+
+            return torch.zeros((1, 1))
+
+    mdl = MagicMock()
+    mdl.device = "cpu"
+    mdl.policy = Pol()
+
+    def _enc(_st, _observer):
+        import numpy as np
+
+        return {
+            "spatial": np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32),
+            "scalars": np.zeros((N_SCALARS,), dtype=np.float32),
+        }
+
+    os.environ["AWBW_SPIRIT_BROKEN"] = "1"
+    try:
+        st = SpiritStreaks()
+        cfg = SpiritConfig()
+        kind = None
+        for _ in range(3):
+            kind, _ = run_calendar_day(
+                s,
+                mdl,
+                cfg,
+                st,
+                _enc,
+                is_std_map=True,
+                map_tier_ok=True,
+                episode_id=1,
+                map_id=133665,
+                learner_seat=0,
+            )
+        assert kind == "snowball"
+        assert s.done is True
+        assert s.winner == 0
+        assert s.win_reason == SPIRIT_BROKEN_REASON
+    finally:
+        del os.environ["AWBW_SPIRIT_BROKEN"]
 
 
 def test_spirit_broken_constant() -> None:

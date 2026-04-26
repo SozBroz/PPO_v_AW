@@ -27,6 +27,9 @@ Examples::
   python scripts/replay_to_human_demos.py --manifest data/human_openings/raw/manifest.jsonl \\
     --manifest-base-dir data/human_openings/raw --opening-only --both-seats \\
     --max-days-from-manifest --out data/human_openings/demos/opening_demos.jsonl
+
+To cap length with a **shorter copy** of the trace (no day flags in training), pre-cut
+with :mod:`tools.truncate_trace_for_opening` then run this script on the truncated file.
 """
 from __future__ import annotations
 
@@ -67,7 +70,7 @@ def main() -> int:
     ap.add_argument(
         "--include-move",
         action="store_true",
-        help="Keep MOVE-stage rows (flat index does not encode destination; see docs/play_ui.md)",
+        help="Keep MOVE-stage rows (required for legal opening books; implied by --opening-only).",
     )
     ap.add_argument("--map-pool", type=Path, default=ROOT / "data" / "gl_map_pool.json")
     ap.add_argument("--maps-dir", type=Path, default=ROOT / "data" / "maps")
@@ -102,6 +105,7 @@ def main() -> int:
         help="For oracle zips, run replay_oracle_zip and fail the row on exception",
     )
     args = ap.parse_args()
+    include_move_effective = bool(args.include_move or args.opening_only)
 
     from tools.human_demo_rows import (  # noqa: E402
         collect_demo_rows_from_oracle_zip,
@@ -151,7 +155,7 @@ def main() -> int:
                         map_pool=args.map_pool,
                         maps_dir=args.maps_dir,
                         session_prefix=f"{args.session_prefix}:g{gid}",
-                        include_move_stage=args.include_move,
+                        include_move_stage=include_move_effective,
                         seats=seats,
                         max_turn=max_turn,
                         opening_only=bool(args.opening_only),
@@ -224,7 +228,7 @@ def main() -> int:
                 co1=int(meta["co1"]),
                 tier_name=str(meta.get("tier", "T3")),
                 session_prefix=f"{args.session_prefix}:g{gid}",
-                include_move_stage=args.include_move,
+                include_move_stage=include_move_effective,
                 seats=seats,
                 max_calendar_turn=mct,
                 opening_only=bool(args.opening_only),
@@ -248,7 +252,7 @@ def main() -> int:
                 map_pool=args.map_pool,
                 maps_dir=args.maps_dir,
                 session_prefix=args.session_prefix,
-                include_move_stage=args.include_move,
+                include_move_stage=include_move_effective,
                 seats=seats,
             ),
             args.out,
@@ -268,7 +272,7 @@ def main() -> int:
         co1=args.co1,
         tier_name=args.tier,
         session_prefix=args.session_prefix,
-        include_move_stage=args.include_move,
+        include_move_stage=include_move_effective,
         seats=seats,
     )
     n = write_demo_rows_jsonl(iter(rows), args.out)

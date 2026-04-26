@@ -458,8 +458,11 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         help="Only use books whose co_id matches the live seat CO (if co_id set in book).",
     )
     parser.add_argument(
-        "--opening-book-days", type=int, default=5,
-        help="Max engine calendar day for book lines (0 = no day cap in controller).",
+        "--opening-book-days", type=int, default=0,
+        help=(
+            "Max engine calendar day for book lines (0 = no day cap; use with short "
+            "truncated traces + action-list books from build_opening_book)."
+        ),
     )
     parser.add_argument("--opening-book-seed", type=int, default=0, help="RNG seed for book pick / prob.")
     parser.add_argument(

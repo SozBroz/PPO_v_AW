@@ -2,6 +2,13 @@
 """
 Build `ranked_std_human_openings.jsonl` from `opening_demos.jsonl` (one book per
 session that lists ordered ``action_idx`` for the book seat).
+
+**Length of the opening** is the number of actions in ``action_indices`` — typically
+from **short** replays produced by :mod:`tools.truncate_trace_for_opening` so you do
+not rely on calendar metadata or ``--opening-book-days`` in training (use default 0).
+
+Each line sets ``horizon_days`` to **0** (no per-day cap in the opening controller;
+only the action list and legality matter).
 """
 from __future__ import annotations
 
@@ -20,11 +27,11 @@ if str(ROOT) not in sys.path:
 
 
 def _book_key_for_session(
-    map_id: int, seat: int, co_id: int | None, session_id: str, horizon: int
+    map_id: int, seat: int, co_id: int | None, session_id: str, n_actions: int
 ) -> str:
     h = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8]
     co = int(co_id) if co_id is not None else -1
-    return f"g{map_id}_s{seat}_co{co}_d{horizon}_{h}"
+    return f"g{map_id}_s{seat}_co{co}_n{n_actions}_{h}"
 
 
 def main() -> int:
@@ -64,7 +71,7 @@ def main() -> int:
             row = json.loads(line)
             if int(row.get("active_player", -1)) != int(args.seat):
                 continue
-            sid = str(row.get("session_id", "unknown"))
+            sid = str(row.get("book_session_id") or row.get("session_id", "unknown"))
             by_session[sid].append(row)
 
     books: list[dict[str, Any]] = []
@@ -74,34 +81,37 @@ def main() -> int:
             continue
         r0 = rows[0]
         map_id = int(r0.get("map_id", 0) or 0)
-        h_days = int(r0.get("awbw_turn", 0) or r0.get("calendar_turn", 0) or 0)
-        horizon = h_days or 5
-        co_id = None
-        if int(args.seat) == 0:
-            # infer from episode row: would need p0 co — approximate from game not in row
-            pass
-        else:
-            # p1: cannot read co from demo row; leave None or parse from session
+        action_indices = [int(r.get("action_idx", 0)) for r in rows]
+        n_act = len(action_indices)
+        co0 = int(r0.get("co0", 0) or 0)
+        co1 = int(r0.get("co1", 0) or 0)
+        co_id: int | None = co0 if int(args.seat) == 0 else co1
+        if co_id == 0:
             co_id = None
-        pfx = (map_id, int(args.seat), tuple(int(r.get("action_idx", 0)) for r in rows[:8]))
-        book_id = _book_key_for_session(map_id, int(args.seat), co_id, sid, horizon)
-        sm = f"{book_id}{json.dumps(pfx, sort_keys=True)}".encode("utf-8", errors="replace")
+        tier = r0.get("tier")
+        tier_s = str(tier) if tier not in (None, "") else None
+        book_id = _book_key_for_session(map_id, int(args.seat), co_id, sid, n_act)
         books.append(
             {
                 "book_id": book_id,
                 "source_game_id": int(r0.get("source_game_id", 0) or 0),
                 "map_id": map_id,
                 "seat": int(args.seat),
+                "co0": co0 if co0 else None,
+                "co1": co1 if co1 else None,
                 "co_id": co_id,
                 "co_name": None,
-                "horizon_days": int(horizon),
+                "tier": tier_s,
+                "horizon_days": 0,
                 "opening_player": 0,
                 "settings_hash": "unknown",
                 "session_id": sid,
-                "action_indices": [int(r.get("action_idx", 0)) for r in rows],
+                "book_session_id": sid,
+                "action_indices": action_indices,
                 "validation": {
-                    "legal_replay": True,
+                    "legal_replay": False,
                     "source": "build_opening_book",
+                    "note": "Run tools/validate_opening_book.py before training.",
                 },
             }
         )

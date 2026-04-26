@@ -23,7 +23,12 @@ Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps 
   capture/bootstrap knobs come from the orchestrator curriculum merge into ``proposed_args.json``,
   not from static ``propose_train_args`` output. After curriculum, the **first** launch applies
   ``fleet/<id>/operator_train_args_override.json`` per-flag (same order as
-  :mod:`scripts.fleet_orchestrator` on a tick). Remaining gaps: ``--train-extra-args``.
+  :mod:`scripts.fleet_orchestrator` on a tick). **Opening book:** if
+  ``--opening-book*`` flags are **absent** from ``proposed['args']``, they are filled from
+  :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (currently empty; add a
+  validated JSONL in curriculum or ``proposed_args`` when ready). Pass
+  ``--no-default-opening-book`` to skip that injection (no-op while defaults are empty).
+  Remaining gaps: ``--train-extra-args``.
   ``n_envs<=4`` on pc-b is operator-validated
   (FPS plan 2026-04-22); propose_train_args enforces the cap from probe.
 
@@ -654,6 +659,37 @@ def _merge_curriculum_for_initial_launch(
 
 
 _OPERATOR_TRAIN_ARGS_OVERRIDE_BASENAME = "operator_train_args_override.json"
+
+
+def _merge_default_opening_book_train_args(
+    proposed: dict[str, Any],
+    *,
+    log: logging.Logger,
+    enabled: bool = True,
+) -> None:
+    """
+    If ``proposed['args']`` does not set opening-book train flags, apply
+    :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (currently empty — opt-in
+    ``--opening-book*`` after validating a real JSONL). Keys already present are left unchanged.
+    """
+    if not enabled:
+        return
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from tools.curriculum_advisor import DEFAULT_OPENING_BOOK_TRAIN_ARGS  # noqa: PLC0415
+
+    am: dict[str, Any] = proposed.setdefault("args", {})
+    added: list[str] = []
+    for k, v in DEFAULT_OPENING_BOOK_TRAIN_ARGS.items():
+        if k not in am:
+            am[k] = v
+            added.append(k)
+    if added:
+        log.info(
+            "default opening book: filled missing arg(s) %s (same as curriculum "
+            "DEFAULT_OPENING_BOOK_TRAIN_ARGS)",
+            ", ".join(added),
+        )
 
 
 def _merge_operator_train_args_override_into_proposed(
@@ -1597,6 +1633,14 @@ def main() -> int:
         help="Do not inject AWBW_ALLOW_CUDA_OPPONENT / lean+fat thread env (use rl/self_play defaults only).",
     )
     ap.add_argument(
+        "--no-default-opening-book",
+        action="store_true",
+        help=(
+            "Do not fill missing --opening-book* keys from curriculum "
+            "DEFAULT_OPENING_BOOK_TRAIN_ARGS (no-op while that dict is empty)."
+        ),
+    )
+    ap.add_argument(
         "--training-backend",
         type=str,
         default="sync",
@@ -1683,6 +1727,11 @@ def main() -> int:
             proposed_fake = _merge_operator_train_args_override_into_proposed(
                 proposed_fake, fleet_dir=fleet_dir, log=log
             )
+        _merge_default_opening_book_train_args(
+            proposed_fake,
+            log=log,
+            enabled=not args.no_default_opening_book,
+        )
         probe_tune: dict[str, Any] = {}
         pp = fleet_dir / "probe.json"
         if pp.is_file():
@@ -1847,6 +1896,11 @@ def main() -> int:
     )
     proposed = _merge_operator_train_args_override_into_proposed(
         proposed, fleet_dir=fleet_dir, log=log
+    )
+    _merge_default_opening_book_train_args(
+        proposed,
+        log=log,
+        enabled=not args.no_default_opening_book,
     )
     extra = shlex.split(args.train_extra_args, posix=os.name != "nt")
     probe_tune: dict[str, Any] = {}
