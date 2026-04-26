@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from engine.game import GameState
+from rl.log_timestamp import log_now_iso
 from engine.spirit_pressure import SPIRIT_BROKEN_REASON
 from engine.unit import UNIT_STATS
 EPS_VALUE = 1.0  # for ratio denominator when both armies are empty
@@ -38,6 +39,7 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict
             "message": message,
             "data": {**data, "pid": os.getpid()},
             "timestamp": int(time.time() * 1000),
+            "timestamp_iso": log_now_iso(),
         }
         with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, default=str) + "\n")
@@ -329,7 +331,7 @@ def maybe_log_disagreements(
             continue
         a0, a1 = _class_buckets(state)
         rec: dict[str, Any] = {
-            "ts": time.time(),
+            "ts": log_now_iso(),
             "case": case,
             "turn": int(state.turn),
             "map_id": map_id,

@@ -50,7 +50,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from rl.log_timestamp import log_now_iso, log_now_wall
 from pathlib import Path
 from typing import Any, Optional
 
@@ -107,8 +107,8 @@ _TRAIN_PY_TAIL = re.compile(r"train\.py[\"']?$", re.IGNORECASE)
 
 
 def _log(msg: str) -> None:
-    """UTC wall-clock timestamp on every line (ISO-8601 with ms)."""
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    """US Eastern wall clock on every line (ISO-8601 with ms, America/New_York)."""
+    ts = log_now_iso()
     print(f"[ai_vs_ai] {ts} | {msg}", flush=True)
 
 
@@ -803,7 +803,7 @@ def run_game(
     gid = game_id or snapshot_games_id or (int(time.time()) % 999000 + 1000)
     out_dir = output_dir or _REPLAY_OUT
     out_path = Path(out_dir) / f"{gid}.zip"
-    start_date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    start_date_str = log_now_wall()
 
     # ---- Snapshot collection ----
     # Take one snapshot at the start of EACH player-turn (after END_TURN processes)

@@ -45,9 +45,9 @@ class SpiritPlayConfig:
     min_day: int = 8
     required_own_turn_streak: int = 3
     # Hard (crushing) — ratio is actor_value / opponent_value
-    income_property_lead: int = 2
-    unit_count_lead: int = 2
-    unit_value_ratio: float = 1.10
+    income_property_lead: int = 3
+    unit_count_lead: int = 3
+    unit_value_ratio: float = 1.12
     # Soft hold
     soft_income_property_lead: int = 1
     soft_unit_count_lead: int = 1
@@ -62,7 +62,7 @@ class SpiritPlayConfig:
     unit_value_ratio_weight: float = 2.0
     funds_weight: float = 0.00002
     # Gates (shared with RL diag naming)
-    value_margin: float = 0.10  # for resign material only (ratio lead uses this margin)
+    value_margin: float = 0.12  # army value lead threshold (1 + margin); resign + diag
     allowed_tiers: frozenset[str] = field(default_factory=frozenset)
     require_std_map: bool = True
 
@@ -71,9 +71,9 @@ def spirit_play_config_from_env() -> SpiritPlayConfig:
     c = SpiritPlayConfig(
         min_day=max(1, _read_int("AWBW_SPIRIT_MIN_DAY", 8)),
         required_own_turn_streak=max(1, _read_int("AWBW_SPIRIT_REQUIRED_STREAK", 3)),
-        income_property_lead=max(0, _read_int("AWBW_SPIRIT_INCOME_LEAD", 2)),
-        unit_count_lead=max(0, _read_int("AWBW_SPIRIT_UNIT_COUNT_LEAD", 2)),
-        unit_value_ratio=max(1.0, _read_float("AWBW_SPIRIT_UNIT_VALUE_RATIO", 1.10)),
+        income_property_lead=max(0, _read_int("AWBW_SPIRIT_INCOME_LEAD", 3)),
+        unit_count_lead=max(0, _read_int("AWBW_SPIRIT_UNIT_COUNT_LEAD", 3)),
+        unit_value_ratio=max(1.0, _read_float("AWBW_SPIRIT_UNIT_VALUE_RATIO", 1.12)),
         soft_income_property_lead=max(0, _read_int("AWBW_SPIRIT_SOFT_INCOME_LEAD", 1)),
         soft_unit_count_lead=max(0, _read_int("AWBW_SPIRIT_SOFT_UNIT_COUNT_LEAD", 1)),
         soft_unit_value_ratio=max(1.0, _read_float("AWBW_SPIRIT_SOFT_UNIT_VALUE_RATIO", 1.06)),
@@ -84,7 +84,7 @@ def spirit_play_config_from_env() -> SpiritPlayConfig:
         unit_count_weight=_read_float("AWBW_SPIRIT_W_COUNT", 0.35),
         unit_value_ratio_weight=_read_float("AWBW_SPIRIT_W_RATIO", 2.0),
         funds_weight=_read_float("AWBW_SPIRIT_W_FUNDS", 0.00002),
-        value_margin=_read_float("AWBW_SPIRIT_VALUE_MARGIN", 0.10),
+        value_margin=_read_float("AWBW_SPIRIT_VALUE_MARGIN", 0.12),
     )
     raw = (os.environ.get("AWBW_SPIRIT_TIERS", "") or "").strip()
     if raw:
@@ -141,11 +141,13 @@ def _material_margins(
     return d_prop, d_count, p0_value_lead, p1_value_lead
 
 
-def _resign_crush_material(m: dict[str, Any], seat: int, value_margin: float) -> bool:
-    d_prop, d_count, p0v, p1v = _material_margins(m, value_margin)
+def _resign_crush_material(m: dict[str, Any], seat: int, cfg: SpiritPlayConfig) -> bool:
+    d_prop, d_count, p0v, p1v = _material_margins(m, cfg.value_margin)
+    kp = int(cfg.income_property_lead)
+    kc = int(cfg.unit_count_lead)
     if seat == 0:
-        return d_prop <= -2 and d_count <= -2 and p1v
-    return d_prop >= 2 and d_count >= 2 and p0v
+        return d_prop <= -kp and d_count <= -kc and p1v
+    return d_prop >= kp and d_count >= kc and p0v
 
 
 def _gate_applies(state: Any, cfg: SpiritPlayConfig) -> bool:
@@ -256,18 +258,29 @@ def maybe_spirit_after_end_turn(state: GameState, ended_player: int) -> None:
     new_ema = (1.0 - alpha) * old_ema + alpha * score
     sp.pressure_ema[actor] = new_ema
 
+    pressure_incremented = False
     if hard and new_ema >= float(cfg.ema_threshold):
         sp.pressure_streak[actor] += 1
+        pressure_incremented = True
     elif soft:
         pass
     else:
         sp.pressure_streak[actor] = 0
 
     # Resign (trailer) streak — material only, own-turn for this actor
-    if _resign_crush_material(m, actor, cfg.value_margin):
+    resign_incremented = False
+    if _resign_crush_material(m, actor, cfg):
         sp.resign_streak[actor] += 1
+        resign_incremented = True
     else:
         sp.resign_streak[actor] = 0
+
+    # Only crushing (pressure) progress clears the opponent. Resign ticks from the
+    # trailer must not wipe the leader's snowball streak each enemy turn-end.
+    if pressure_incremented:
+        sp.pressure_streak[opp] = 0
+        sp.pressure_ema[opp] = 0.0
+        sp.resign_streak[opp] = 0
 
     req = int(cfg.required_own_turn_streak)
     if sp.pressure_streak[actor] >= req:

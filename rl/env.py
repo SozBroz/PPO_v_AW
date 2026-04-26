@@ -26,7 +26,7 @@ import os
 import random
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 from threading import Lock
@@ -50,6 +50,7 @@ from engine.belief import BeliefState
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.network import ACTION_SPACE_SIZE
 from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
+from rl.log_timestamp import log_now_iso, log_timestamp_iso
 from rl.heuristic_termination import (
     SPIRIT_BROKEN_REASON,
     army_value_for_player,
@@ -78,6 +79,7 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict
             "message": message,
             "data": {**data, "pid": os.getpid()},
             "timestamp": int(time.time() * 1000),
+            "timestamp_iso": log_now_iso(),
         }
         with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, default=str) + "\n")
@@ -2019,7 +2021,7 @@ class AWBWEnv(gym.Env):
             return
         
         timestamp = time.time()
-        timestamp_iso = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+        timestamp_iso = log_timestamp_iso(timestamp)
 
         started_at = self._episode_info.get("episode_started_at") or timestamp
         episode_wall_s = max(0.0, timestamp - started_at)
