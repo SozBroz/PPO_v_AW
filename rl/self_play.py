@@ -19,6 +19,12 @@ Training loop
 """
 from __future__ import annotations
 
+# Win + Py3.12: ensure PROCESSOR_IDENTIFIER before any import that may call
+# ``platform`` (torch/sb3); stdlib can otherwise hit WMI KeyError.
+from rl import _win_triton_warnings
+
+_win_triton_warnings.apply()
+
 import atexit
 import gc
 import json
@@ -386,9 +392,8 @@ def _mask_fn(env: "AWBWEnv") -> np.ndarray:  # type: ignore[name-defined]
 
 
 def _ensure_win32_processor_env_for_sb3_save() -> None:
-    """SB3's ``save`` embeds ``get_system_info``; without this, some Win+Py3.12 hosts hit WMI KeyError."""
-    if sys.platform == "win32" and not (os.environ.get("PROCESSOR_IDENTIFIER") or "").strip():
-        os.environ["PROCESSOR_IDENTIFIER"] = "Unknown"
+    """SB3's ``save`` embeds ``get_system_info``; re-apply WMI workaround if env was cleared."""
+    _win_triton_warnings.ensure_win32_processor_identifier()
 
 
 def _atomic_model_save(model, dest_no_ext: str | os.PathLike) -> None:

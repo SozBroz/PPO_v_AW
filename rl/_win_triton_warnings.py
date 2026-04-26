@@ -6,20 +6,39 @@ after training/tests install the filter (see ``apply()``).
 
 **Performance:** `warnings.filterwarnings` only affects *printing*; it does not
 change device placement, kernels, or steps/sec. Training speed is unchanged.
+
+**Windows + Py3.12+:** if ``PROCESSOR_IDENTIFIER`` is missing, the stdlib
+:func:`platform.processor` / ``uname`` path calls WMI (``_wmi_query``), which
+can KeyError or otherwise fail on some hosts. Setting a placeholder is what
+``platform`` would do after WMI success anyway; it avoids the WMI call.
 """
 from __future__ import annotations
 
+import os
 import sys
 import warnings
 
-_APPLIED = False
+_TRITON_FILTER_APPLIED = False
+
+
+def ensure_win32_processor_identifier() -> None:
+    """
+    If unset, set ``PROCESSOR_IDENTIFIER`` so ``platform`` never queries WMI
+    (see CPython :mod:`platform` ``_Processor.get`` on win32). Idempotent; safe
+    to call from every :func:`apply` and before ``platform.processor()``.
+    """
+    if sys.platform == "win32" and not (os.environ.get("PROCESSOR_IDENTIFIER") or "").strip():
+        os.environ["PROCESSOR_IDENTIFIER"] = "Unknown"
 
 
 def apply() -> None:
-    global _APPLIED
-    if _APPLIED or sys.platform != "win32":
+    if sys.platform != "win32":
         return
-    _APPLIED = True
+    ensure_win32_processor_identifier()
+    global _TRITON_FILTER_APPLIED
+    if _TRITON_FILTER_APPLIED:
+        return
+    _TRITON_FILTER_APPLIED = True
     warnings.filterwarnings(
         "ignore",
         message="Failed to find CUDA",

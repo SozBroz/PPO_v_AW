@@ -9,7 +9,6 @@ Run: python tools/_phase10i_step_benchmark.py
 from __future__ import annotations
 
 import json
-import platform
 import random
 import statistics
 import sys
@@ -19,6 +18,12 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+from rl import _win_triton_warnings
+
+_win_triton_warnings.apply()
+
+import platform
 
 # ---------------------------------------------------------------------------
 # Patches: only engine.game.get_legal_actions is wrapped for timing.
