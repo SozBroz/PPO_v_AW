@@ -550,6 +550,7 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         opening_book_max_day=getattr(trainer, "opening_book_max_day", None),
         opening_book_seed=int(getattr(trainer, "opening_book_seed", 0) or 0),
     )
+    n_live = len(getattr(trainer, "live_games_id", None) or [])
 
     if resume_path.exists():
         model = load_maskable_ppo_compat(
@@ -577,13 +578,16 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         skeleton_zip = str(Path(trainer.bc_init).resolve())
     else:
         trainer.live_snapshot_dir.mkdir(parents=True, exist_ok=True)
+        fkw0 = dict(env_kw)
+        if n_live > 0:
+            fkw0["opening_book_path"] = None
         factory0 = _make_env_factory(
             trainer.map_pool,
             str(ckpt_dir),
             worker_index=0,
             gpu_infer_semaphore=gpu_sem,
             opponent_force_cpu=opponent_force_cpu,
-            **env_kw,
+            **fkw0,
         )
         dummy_env = ActionMasker(factory0(), _mask_fn)
         model = MaskablePPO(
@@ -629,11 +633,13 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         weight_path,
     )
 
-    n_live = len(trainer.live_games_id)
     trainer.live_snapshot_dir.mkdir(parents=True, exist_ok=True)
     seats = trainer.live_learner_seats or [0] * n_live
     factories: list[Callable[[], Any]] = []
     for i in range(n_actors):
+        ekw = dict(env_kw)
+        if i < n_live:
+            ekw["opening_book_path"] = None
         if i < n_live:
             gid = int(trainer.live_games_id[i])
             spath = _resolve_live_snapshot_pkl_path(trainer.live_snapshot_dir, gid)
@@ -647,7 +653,7 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                     worker_index=i,
                     gpu_infer_semaphore=gpu_sem,
                     opponent_force_cpu=opponent_force_cpu,
-                    **env_kw,
+                    **ekw,
                 )
             )
         else:
@@ -658,7 +664,7 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                     worker_index=i,
                     gpu_infer_semaphore=gpu_sem,
                     opponent_force_cpu=opponent_force_cpu,
-                    **env_kw,
+                    **ekw,
                 )
             )
 

@@ -1,4 +1,4 @@
-"""Forced episode truncation (max_env_steps) and game_log rows (schema 1.11)."""
+"""Forced episode truncation (max_env_steps) and game_log rows (schema 1.13)."""
 from __future__ import annotations
 
 import json
@@ -67,7 +67,10 @@ def test_max_env_steps_truncates_and_logs(
     assert row["truncated"] is True
     assert row["truncation_reason"] == "max_env_steps"
     assert row["terminated"] is False
-    assert row["log_schema_version"] == "1.11"
+    assert row["log_schema_version"] == "1.13"
+    assert "alive_unit_count" in row and "army_value" in row
+    assert len(row["alive_unit_count"]) == 2
+    assert len(row["army_value"]) == 2
     # Synthetic P0 vs P1 property tiebreak (engine never set winner).
     assert row["winner"] in (-1, 0, 1)
     assert row["win_condition"] in ("env_step_cap_tie", "env_step_cap_tiebreak")

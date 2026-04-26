@@ -53,6 +53,7 @@ from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
 from rl.heuristic_termination import (
     SPIRIT_BROKEN_REASON,
     SpiritStreaks,
+    army_value_for_player,
     config_from_env,
     run_calendar_day,
     DEFAULT_DISAGREEMENT_LOG,
@@ -80,6 +81,9 @@ SLOW_GAME_WALL_S_ENV = "AWBW_SLOW_GAME_WALL_S"
 TIME_COST_ENV = "AWBW_TIME_COST"
 # Optional fixed penalty when an episode truncates without an engine terminal result.
 TRUNCATION_PENALTY_ENV = "AWBW_TRUNCATION_PENALTY"
+# End-turn "hoarding" penalty: subtract when learner ends turn with bank above threshold.
+HOARD_FUNDS_THRESHOLD_ENV = "AWBW_HOARD_FUNDS_THRESHOLD"
+HOARD_PENALTY_ENV = "AWBW_HOARD_PENALTY"
 # Terminal shaping: ``AWBW_INCOME_TERM_COEF`` × (income_props_p0 − p1) / cap_limit when episode ends.
 INCOME_TERM_COEF_ENV = "AWBW_INCOME_TERM_COEF"
 # When ``1``, zero all BUILD action-mask entries except ``INFANTRY`` (narrow bootstrap).
@@ -724,6 +728,20 @@ class AWBWEnv(gym.Env):
             self._learner_greedy_mix = 0.0
         self._learner_greedy_mix = max(0.0, min(1.0, self._learner_greedy_mix))
 
+        # Hoarding penalty: END_TURN with unspent funds above threshold (read once at spawn).
+        try:
+            self._hoard_funds_threshold = int(
+                float(os.environ.get(HOARD_FUNDS_THRESHOLD_ENV, "25000") or 25000)
+            )
+        except ValueError:
+            self._hoard_funds_threshold = 25_000
+        try:
+            self._hoard_penalty = float(os.environ.get(HOARD_PENALTY_ENV, "0") or 0.0)
+        except ValueError:
+            self._hoard_penalty = 0.0
+        if self._hoard_penalty < 0.0:
+            self._hoard_penalty = 0.0
+
         # Reward shaping mode + Φ coefficients — read once per env instance
         # so SubprocVecEnv workers inherit a stable value at spawn. Restart
         # the run to change. See plan rl_capture-combat_recalibration.
@@ -1271,6 +1289,14 @@ class AWBWEnv(gym.Env):
                     reward -= float(raw_tp)
                 except ValueError:
                     pass
+
+        if (
+            self._hoard_penalty > 0.0
+            and self.state is not None
+            and action.action_type == ActionType.END_TURN
+            and int(self.state.funds[acting]) > int(self._hoard_funds_threshold)
+        ):
+            reward -= float(self._hoard_penalty)
 
         # Partial win at the P0 step cap: engine never emits ±1 without a terminal, so
         # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a solid
@@ -1965,6 +1991,16 @@ class AWBWEnv(gym.Env):
             "funds_end": self.state.funds.copy(),
             "gold_spent": self.state.gold_spent.copy(),
 
+            # End state — army (same cost×hp/100 as Φ / spirit)
+            "alive_unit_count": [
+                sum(1 for u in self.state.units[0] if u.is_alive),
+                sum(1 for u in self.state.units[1] if u.is_alive),
+            ],
+            "army_value": [
+                float(army_value_for_player(self.state, 0)),
+                float(army_value_for_player(self.state, 1)),
+            ],
+
             # Losses
             "losses_units": self.state.losses_units.copy(),
 
@@ -2032,13 +2068,14 @@ class AWBWEnv(gym.Env):
             # 1.10: tie_breaker_property_count — learner property lead when step-cap partial win.
             # 1.11: winner / win_condition filled from property tiebreak when truncated
             #       and engine left winner unset (env_step_cap_* reasons).
+            # 1.13: alive_unit_count, army_value at episode end.
             "terminated": bool(self.state.done),
             "truncated": bool(getattr(self, "_log_episode_truncated", False)),
             "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
             "tie_breaker_property_count": getattr(
                 self, "_log_tie_breaker_property_count", None
             ),
-            "log_schema_version": "1.12",
+            "log_schema_version": "1.13",
         }
         sk = getattr(self, "_spirit_broken_kind", None)
         if sk is not None:

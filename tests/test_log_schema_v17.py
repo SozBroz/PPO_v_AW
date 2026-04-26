@@ -80,7 +80,9 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     monkeypatch.delenv("AWBW_MACHINE_ID", raising=False)
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
-    assert row["log_schema_version"] == "1.11"
+    assert row["log_schema_version"] == "1.13"
+    assert len(row.get("alive_unit_count", [])) == 2
+    assert len(row.get("army_value", [])) == 2
     assert row.get("tie_breaker_property_count") is None
 
     assert row.get("learner_seat") in (0, 1)
@@ -113,5 +115,5 @@ def test_log_schema_v17_machine_id_from_env(
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
     assert row["machine_id"] == "test-pc"
-    assert row["log_schema_version"] == "1.11"
+    assert row["log_schema_version"] == "1.13"
     assert isinstance(row["terrain_usage_p0"], float)

@@ -1946,12 +1946,16 @@ class SelfPlayTrainer:
             seats = self.live_learner_seats or [0] * n_live
             factories: list[Callable[[], Any]] = []
             for i in range(self.n_envs):
+                ekw = dict(env_kw)
+                if i < n_live:
+                    ekw["opening_book_path"] = None
                 if i < n_live:
                     gid = int(self.live_games_id[i])
                     spath = _resolve_live_snapshot_pkl_path(self.live_snapshot_dir, gid)
+                    ob_note = " opening_book=off" if env_kw.get("opening_book_path") else ""
                     print(
                         f"[self_play] live env {i}: games_id={gid} snapshot={spath} "
-                        f"learner_seat={(seats[i] if i < len(seats) else 0)}"
+                        f"learner_seat={(seats[i] if i < len(seats) else 0)}{ob_note}"
                     )
                     factories.append(
                         _make_env_factory(
@@ -1962,7 +1966,7 @@ class SelfPlayTrainer:
                             live_learner_seat=seats[i],
                             worker_index=i,
                             gpu_infer_semaphore=gpu_sem,
-                            **env_kw,
+                            **ekw,
                         )
                     )
                 else:
@@ -1972,7 +1976,7 @@ class SelfPlayTrainer:
                             str(self.checkpoint_dir),
                             worker_index=i,
                             gpu_infer_semaphore=gpu_sem,
-                            **env_kw,
+                            **ekw,
                         )
                     )
             use_async = (os.environ.get("AWBW_ASYNC_VEC", "") or "").strip().lower() in (
@@ -2028,7 +2032,7 @@ class SelfPlayTrainer:
                 fleet_opponent_root=self.fleet_opponent_root,
                 inference_device=opp_dev,
             )
-            if self.opening_book_path:
+            if self.opening_book_path and n_live == 0:
                 from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
 
                 opponent = OpeningBookCheckpointOpponent(
