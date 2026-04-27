@@ -1,0 +1,8 @@
+{
+  "current_stage_name": "stage_b_capture_competent",
+  "decay_phase": 0,
+  "entered_stage_at_ts": 1745750760.0,
+  "games_observed_in_stage": 29,
+  "last_proposal_ts": 1777293184.2098536,
+  "last_seen_finished_games": 5035
+}

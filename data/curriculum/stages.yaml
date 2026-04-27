@@ -1,0 +1,717 @@
+# AWBW Curriculum Stages — formal sub-stage architecture
+#
+# Architecture:
+#   Major stage (A, B, C, …) = a stable distribution period.
+#   Each major stage may contain sub-stages:
+#     stub  — widened distribution + scaffolds active; NO promotion allowed
+#     decay — scaffolds decaying on schedule; NO promotion allowed
+#     clean — scaffolds disabled; promotion ALLOWED if criteria pass
+#     promotion_eval — clean eval gate; may promote to next major stage
+#
+# Scaffold fields on every stage:
+#   learner_greedy_mix: float (0.0 = off, 1.0 = always teacher)
+#   capture_move_gate: bool
+#   opening_book_prob: float
+#
+# Promotion is ONLY allowed when:
+#   stage_phase in (clean, promotion_eval)
+#   learner_greedy_mix == 0.0
+#   capture_move_gate == false
+#   opening_book_prob == 0.0
+#
+# Sub-stage transition rules:
+#   stub -> decay: decide_substage_transition() returns ADVANCE_TO_DECAY
+#   decay -> clean: decide_substage_transition() returns ADVANCE_TO_CLEAN
+#   clean -> next major stage: decide_stage_transition() returns PROMOTE
+#
+# Widening rule:
+#   When distribution_change is non-null (co_pool, map_pool, both),
+#   the stage MUST have sub-stages (stub -> decay -> clean).
+#   A stage without widening (distribution_change: none) is inherently "clean".
+#
+
+stages:
+
+  # ──────────────────────────────────────────────────────────
+  # Stage A — Cold capture bootstrap
+  # Widening: none (single CO, single map)
+  # Sub-stages: N/A — treated as implicit "clean" w/ scaffolds
+  # ──────────────────────────────────────────────────────────
+  - stage_id: stage_a_capture_bootstrap
+    stage_family: A
+    stage_phase: clean          # scaffold-present but promotion allowed (bootstrap only)
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: fixed
+    map_pool: [123858]          # Misery
+    co_pool_mode: fixed
+    co_pool: [14]               # Jess
+
+    scaffolds:
+      learner_greedy_mix: 0.30
+      capture_move_gate: true
+      opening_book_prob: 1.0
+
+    cold_opponent: greedy_capture
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 200
+    stub_to_decay: null         # no widening → no stub
+    decay_to_clean: null
+    rollback_criteria: null
+
+    promotion_criteria:
+      min_eval_games: 100
+      min_terminal_rate: 0.60
+      max_max_env_steps_truncation_rate: 0.30
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.45
+      max_first_capture_step_p50: 15
+      min_captures_by_day5_p50: 4
+
+    move_forward_criteria:
+      min_episodes: 200
+      min_terminal_rate: 0.20
+      max_invalid_action_rate: 0.005
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 4
+
+    description: >
+      Cold start: greedy_capture opponent, capture-move gate, Jess mirror
+      (no Andy free repair). All scaffolds active. This is the bootstrap — it
+      has promotion_allowed because there is no prior distribution to widen from,
+      but metrics bars are deliberately low.
+
+  # ──────────────────────────────────────────────────────────
+  # Stage B — Capture competent
+  # Widening: none
+  # ──────────────────────────────────────────────────────────
+  - stage_id: stage_b_capture_competent
+    stage_family: B
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: fixed
+    map_pool: [123858]
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.15
+      capture_move_gate: true
+      opening_book_prob: 1.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 300
+    stub_to_decay: null
+    decay_to_clean: null
+    rollback_criteria: null
+
+    promotion_criteria:
+      min_eval_games: 100
+      min_terminal_rate: 0.65
+      max_max_env_steps_truncation_rate: 0.25
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.52
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+
+    move_forward_criteria:
+      min_episodes: 300
+      min_terminal_rate: 0.30
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+
+    description: >
+      Capture solid; broaden cold opponent to greedy_mix.
+      Reduce greedy_mix from 0.30 to 0.15. Keep capture gate.
+
+  # ──────────────────────────────────────────────────────────
+  # Stage C — Terrain competent
+  # Widening: none (same map, same CO)
+  # ──────────────────────────────────────────────────────────
+  - stage_id: stage_c_terrain_competent
+    stage_family: C
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: fixed
+    map_pool: [123858]
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.05
+      capture_move_gate: false
+      opening_book_prob: 1.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 500
+    stub_to_decay: null
+    decay_to_clean: null
+    rollback_criteria: null
+
+    promotion_criteria:
+      min_eval_games: 100
+      min_terminal_rate: 0.70
+      max_max_env_steps_truncation_rate: 0.20
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.62
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+
+    move_forward_criteria:
+      min_episodes: 500
+      min_terminal_rate: 0.40
+      max_invalid_action_rate: 0.002
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+
+    description: >
+      Terrain competent; drop capture-move gate; minimal greedy mix.
+      All scaffolds reduced. Winrate bar 0.62.
+
+  # ══════════════════════════════════════════════════════════
+  # Stage D — GL Std map pool widening (single Jess CO)
+  # Widening: map_pool
+  # Sub-stages: D0_stub → D1_decay → D2_clean → D3_promotion_eval
+  # ══════════════════════════════════════════════════════════
+  - stage_id: stage_d0_gl_std_map_pool_stub
+    stage_family: D
+    stage_phase: stub
+    distribution_change: map_pool
+    promotion_allowed: false
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.25
+      capture_move_gate: true
+      opening_book_prob: 0.50
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 300
+    stub_to_decay:
+      min_episodes: 300
+      min_terminal_rate: 0.20
+      max_max_env_steps_truncation_rate: 0.80
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      max_first_capture_step_p90: 30
+      min_captures_by_day5_p50: 4
+      min_income_by_day5_ratio_vs_book_or_greedy: 0.70
+      max_teacher_override_rate: 0.35
+      max_capture_gate_intervention_rate: 0.45
+      min_clean_probe_capture_sanity_rate: 0.60
+    decay_to_clean: null
+    rollback_criteria:
+      after_episodes: 500
+      max_invalid_action_rate_above: 0.005
+      first_capture_step_p50_above: 30
+      captures_by_day5_p50_below: 2
+      terminal_rate_below: 0.05
+      max_env_steps_truncation_rate_above: 0.90
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 300
+      min_terminal_rate: 0.20
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      max_teacher_override_rate: 0.35
+      max_capture_gate_intervention_rate: 0.45
+      min_clean_probe_capture_sanity_rate: 0.60
+
+    description: >
+      Map pool widens to all GL Std maps. Heavy scaffolding to absorb
+      new capture routes / property geometry. No promotion. Advance to
+      decay when scaffold metrics stabilize.
+
+  - stage_id: stage_d1_gl_std_map_pool_decay
+    stage_family: D
+    stage_phase: decay
+    distribution_change: map_pool
+    promotion_allowed: false
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.25    # start of schedule
+      capture_move_gate: true
+      opening_book_prob: 0.50
+
+    cold_opponent: greedy_mix
+    # Decay schedule: [start, mid1, mid2, end]
+    # Each phase runs min_episodes / len(schedule) episodes
+    learner_greedy_mix_schedule: [0.25, 0.15, 0.05, 0.00]
+    capture_move_gate_schedule: [true, true, false, false]
+    opening_book_prob_schedule: [0.50, 0.25, 0.10, 0.00]
+
+    min_episodes: 800
+    stub_to_decay: null
+    decay_to_clean:
+      min_episodes: 800
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_first_capture_step_p50: 12
+      max_first_capture_step_p90: 30
+      min_captures_by_day5_p50: 4
+      min_income_by_day5_ratio_vs_stub: 0.85
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_terminal_rate: 0.30
+      max_clean_probe_truncation_rate: 0.70
+      min_clean_probe_capture_sanity_rate: 0.75
+      clean_probe_wr_not_worse_than_stub_by_more_than: 0.20
+    rollback_criteria:
+      after_episodes: 1200
+      clean_probe_capture_sanity_rate_below: 0.50
+      first_capture_step_p50_above: 25
+      captures_by_day5_p50_below: 2
+      max_env_steps_truncation_rate_above: 0.90
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 800
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_capture_sanity_rate: 0.75
+
+    description: >
+      Scaffold decay across 4 phases. Scaffolds must reach zero before
+      advancing to clean. Clean probes verify the policy survives without
+      opening books or capture gate.
+
+  - stage_id: stage_d2_gl_std_map_pool_clean
+    stage_family: D
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.0
+      capture_move_gate: false
+      opening_book_prob: 0.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 400
+    stub_to_decay: null
+    decay_to_clean: null
+    rollback_criteria:
+      after_episodes: 800
+      min_terminal_rate_above: 0.60
+      max_max_env_steps_truncation_rate_above: 0.30
+
+    promotion_criteria:
+      min_eval_games: 100
+      preferred_eval_games: 200
+      min_terminal_rate: 0.70
+      max_max_env_steps_truncation_rate: 0.20
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.58
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 4
+      min_income_by_day5_ratio_vs_book_or_greedy: 0.85
+      no_single_map_below_wr: 0.40
+
+    move_forward_criteria:
+      min_episodes: 400
+      min_terminal_rate: 0.70
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.58
+
+    description: >
+      Clean no-scaffold stage. All scaffolds at zero. Promotion gate requires
+      valid eval (terminal_rate >= 0.70, truncation <= 0.20) and winrate >= 0.58.
+      Must not have catastrophic single-map buckets.
+
+  # ══════════════════════════════════════════════════════════
+  # Stage E — CO pool widening (all GL Std maps + multiple COs)
+  # Widening: co_pool
+  # Sub-stages: E0_stub → E1_decay → E2_clean → E3_promotion_eval
+  # ══════════════════════════════════════════════════════════
+  - stage_id: stage_e0_gl_mixed_co_stub
+    stage_family: E
+    stage_phase: stub
+    distribution_change: co_pool
+    promotion_allowed: false
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: expanded
+    co_pool: [14, 0, 1, 2, 3]     # Jess, Andy, Max, Sami, Eagle (T4 pool)
+
+    scaffolds:
+      learner_greedy_mix: 0.15
+      capture_move_gate: true
+      opening_book_prob: 0.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 300
+    stub_to_decay:
+      min_episodes: 300
+      min_terminal_rate: 0.20
+      max_max_env_steps_truncation_rate: 0.80
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      max_first_capture_step_p90: 30
+      min_captures_by_day5_p50: 4
+      min_income_by_day5_ratio_vs_book_or_greedy: 0.70
+      max_teacher_override_rate: 0.30
+      max_capture_gate_intervention_rate: 0.40
+      min_clean_probe_capture_sanity_rate: 0.60
+    decay_to_clean: null
+    rollback_criteria:
+      after_episodes: 500
+      max_invalid_action_rate_above: 0.005
+      first_capture_step_p50_above: 30
+      captures_by_day5_p50_below: 2
+      terminal_rate_below: 0.05
+      max_env_steps_truncation_rate_above: 0.90
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 300
+      min_terminal_rate: 0.20
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      max_teacher_override_rate: 0.30
+      max_capture_gate_intervention_rate: 0.40
+      min_clean_probe_capture_sanity_rate: 0.60
+
+    description: >
+      CO pool widens from Jess-only to T4 CO pool. CO widening is less disruptive
+      than map widening; lighter scaffolding (greedy_mix 0.15 vs 0.25). No
+      opening book since CO-specific books are not yet available.
+
+  - stage_id: stage_e1_gl_mixed_co_decay
+    stage_family: E
+    stage_phase: decay
+    distribution_change: co_pool
+    promotion_allowed: false
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: expanded
+    co_pool: [14, 0, 1, 2, 3]
+
+    scaffolds:
+      learner_greedy_mix: 0.15
+      capture_move_gate: true
+      opening_book_prob: 0.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: [0.15, 0.10, 0.05, 0.00]
+    capture_move_gate_schedule: [true, true, false, false]
+    opening_book_prob_schedule: [0.0]
+
+    min_episodes: 600
+    stub_to_decay: null
+    decay_to_clean:
+      min_episodes: 600
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_first_capture_step_p50: 12
+      max_first_capture_step_p90: 30
+      min_captures_by_day5_p50: 4
+      min_income_by_day5_ratio_vs_stub: 0.85
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_terminal_rate: 0.30
+      max_clean_probe_truncation_rate: 0.70
+      min_clean_probe_capture_sanity_rate: 0.75
+      clean_probe_wr_not_worse_than_stub_by_more_than: 0.20
+    rollback_criteria:
+      after_episodes: 900
+      clean_probe_capture_sanity_rate_below: 0.50
+      first_capture_step_p50_above: 25
+      captures_by_day5_p50_below: 2
+      max_env_steps_truncation_rate_above: 0.90
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 600
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_capture_sanity_rate: 0.75
+
+    description: >
+      CO widening decay. Scaffolds reduce to zero. Lighter schedule than map
+      widening since CO changes are less disruptive to capture routing.
+
+  - stage_id: stage_e2_gl_mixed_co_clean
+    stage_family: E
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: expanded
+    co_pool: [14, 0, 1, 2, 3]
+
+    scaffolds:
+      learner_greedy_mix: 0.0
+      capture_move_gate: false
+      opening_book_prob: 0.0
+
+    cold_opponent: random
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 400
+    stub_to_decay: null
+    decay_to_clean: null
+    rollback_criteria:
+      after_episodes: 800
+      min_terminal_rate_above: 0.60
+      max_max_env_steps_truncation_rate_above: 0.30
+
+    promotion_criteria:
+      min_eval_games: 100
+      preferred_eval_games: 200
+      min_terminal_rate: 0.70
+      max_max_env_steps_truncation_rate: 0.20
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.52
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 4
+      min_income_by_day5_ratio_vs_book_or_greedy: 0.85
+      no_single_co_matchup_below_wr: 0.35
+
+    move_forward_criteria:
+      min_episodes: 400
+      min_terminal_rate: 0.70
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.52
+
+    description: >
+      Clean stage for mixed CO training. Winrate bar 0.52 (easier than D2) since
+      CO diversity makes the task harder. No single CO matchup should collapse below 0.35.
+
+  # ══════════════════════════════════════════════════════════
+  # Stage F — Full broad sampling (map + CO + tier fully random)
+  # Widening: both
+  # Sub-stages: F0_stub → F1_decay → F2_clean → F3_promotion_eval
+  # ══════════════════════════════════════════════════════════
+  - stage_id: stage_f0_full_random_stub
+    stage_family: F
+    stage_phase: stub
+    distribution_change: both
+    promotion_allowed: false
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: all_enabled
+    co_pool: null
+    tier_mode: all_enabled
+    tier: null
+
+    scaffolds:
+      learner_greedy_mix: 0.25
+      capture_move_gate: true
+      opening_book_prob: 0.50
+
+    cold_opponent: random
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 500
+    stub_to_decay:
+      min_episodes: 500
+      min_terminal_rate: 0.15
+      max_max_env_steps_truncation_rate: 0.85
+      max_invalid_action_rate: 0.005
+      max_first_capture_step_p50: 14
+      max_first_capture_step_p90: 35
+      min_captures_by_day5_p50: 3
+      min_income_by_day5_ratio_vs_book_or_greedy: 0.65
+      max_teacher_override_rate: 0.40
+      max_capture_gate_intervention_rate: 0.50
+      min_clean_probe_capture_sanity_rate: 0.55
+    decay_to_clean: null
+    rollback_criteria:
+      after_episodes: 800
+      max_invalid_action_rate_above: 0.008
+      first_capture_step_p50_above: 40
+      captures_by_day5_p50_below: 1
+      terminal_rate_below: 0.03
+      max_env_steps_truncation_rate_above: 0.95
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 500
+      min_terminal_rate: 0.15
+      max_invalid_action_rate: 0.005
+      max_first_capture_step_p50: 14
+      max_teacher_override_rate: 0.40
+      max_capture_gate_intervention_rate: 0.50
+      min_clean_probe_capture_sanity_rate: 0.55
+
+    description: >
+      Maximum widening: fully random map + CO + tier within GL Std pool.
+      Heaviest scaffolding. Wide distribution means the agent needs maximum
+      support to keep early-game sane. Longer stub window (500 episodes).
+
+  - stage_id: stage_f1_full_random_decay
+    stage_family: F
+    stage_phase: decay
+    distribution_change: both
+    promotion_allowed: false
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: all_enabled
+    co_pool: null
+    tier_mode: all_enabled
+    tier: null
+
+    scaffolds:
+      learner_greedy_mix: 0.25
+      capture_move_gate: true
+      opening_book_prob: 0.50
+
+    cold_opponent: random
+    learner_greedy_mix_schedule: [0.25, 0.15, 0.05, 0.00]
+    capture_move_gate_schedule: [true, true, false, false]
+    opening_book_prob_schedule: [0.50, 0.25, 0.10, 0.00]
+
+    min_episodes: 1000
+    stub_to_decay: null
+    decay_to_clean:
+      min_episodes: 1000
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_first_capture_step_p50: 12
+      max_first_capture_step_p90: 30
+      min_captures_by_day5_p50: 3
+      min_income_by_day5_ratio_vs_stub: 0.80
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_terminal_rate: 0.25
+      max_clean_probe_truncation_rate: 0.75
+      min_clean_probe_capture_sanity_rate: 0.70
+      clean_probe_wr_not_worse_than_stub_by_more_than: 0.25
+    rollback_criteria:
+      after_episodes: 1500
+      clean_probe_capture_sanity_rate_below: 0.45
+      first_capture_step_p50_above: 30
+      captures_by_day5_p50_below: 1
+      max_env_steps_truncation_rate_above: 0.95
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 1000
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_capture_sanity_rate: 0.70
+
+    description: >
+      Full-random decay. Longer window than previous decays (1000 episodes)
+      since the distribution is maximally wide and adaptation takes longer.
+
+  - stage_id: stage_f2_full_random_clean
+    stage_family: F
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: all_gl_std
+    map_pool: null
+    co_pool_mode: all_enabled
+    co_pool: null
+    tier_mode: all_enabled
+    tier: null
+
+    scaffolds:
+      learner_greedy_mix: 0.0
+      capture_move_gate: false
+      opening_book_prob: 0.0
+
+    cold_opponent: random
+    learner_greedy_mix_schedule: null
+    capture_move_gate_schedule: null
+    opening_book_prob_schedule: null
+
+    min_episodes: 500
+    stub_to_decay: null
+    decay_to_clean: null
+    rollback_criteria:
+      after_episodes: 1000
+      min_terminal_rate_above: 0.55
+      max_max_env_steps_truncation_rate_above: 0.40
+
+    promotion_criteria:
+      min_eval_games: 100
+      preferred_eval_games: 200
+      min_terminal_rate: 0.65
+      max_max_env_steps_truncation_rate: 0.30
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.52
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+      min_income_by_day5_ratio_vs_book_or_greedy: 0.80
+      no_single_map_below_wr: 0.35
+      no_single_co_matchup_below_wr: 0.30
+
+    move_forward_criteria:
+      min_episodes: 500
+      min_terminal_rate: 0.65
+      max_invalid_action_rate: 0.001
+      min_winrate: 0.52
+
+    description: >
+      Final clean stage: fully random training distribution.
+      Winrate bar relaxed to 0.52 (harder task). Terminal rate bar relaxed
+      to 0.65. Truncation bar 0.30 (broad sampling produces longer games).
