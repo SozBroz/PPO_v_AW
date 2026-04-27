@@ -46,8 +46,9 @@ FLAG_PRESENT = "_FLAG_PRESENT"
 PROBE_OWNED_KEYS = frozenset({"--n-envs", "--n-steps", "--batch-size"})
 
 # Opening book: use ranked_std_human_openings.jsonl for P1 opponent seat by default.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {
-    "--opening-book": str(REPO_ROOT / "data" / "opening_books" / "ranked_std_human_openings.jsonl"),
+    "--opening-book": str(_REPO_ROOT / "data" / "opening_books" / "ranked_std_human_openings.jsonl"),
     "--opening-book-seat": 1,
     "--opening-book-prob": 1.0,
 }
