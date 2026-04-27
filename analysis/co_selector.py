@@ -35,6 +35,53 @@ def get_enabled_tiers(map_meta: dict) -> list[dict]:
     return [t for t in map_meta.get("tiers", []) if t.get("enabled") and t.get("co_ids")]
 
 
+def _get_allowed_co_ids_for_tier(map_meta: dict, tier_name: str) -> list[int]:
+    """
+    Get all CO IDs allowed for a tier based on hierarchy.
+    Lower tiers (numerically lower) can use COs from higher tiers.
+    Based on request: T2 can use T2, T3, T4; T3 can use T3, T4; T4 can use T4.
+    Tier order: TL, T0, T1, T2, T3, T4, T5 (T2 < T3 < T4)
+    """
+    # Parse tier number from tier_name (e.g., "T2" -> 2, "TL" -> -1, "T0" -> 0)
+    if tier_name.startswith("T"):
+        try:
+            if tier_name[1:].isdigit():
+                tier_num = int(tier_name[1:])
+            elif tier_name == "TL":
+                tier_num = -1  # TL is lowest
+            else:
+                tier_num = -2  # Unknown tier
+        except ValueError:
+            tier_num = -2
+    else:
+        tier_num = -2
+    
+    allowed_co_ids = []
+    # Check all tiers in the map
+    for tier in map_meta.get("tiers", []):
+        tname = tier.get("tier_name", "")
+        if tname.startswith("T"):
+            try:
+                if tname[1:].isdigit():
+                    t_num = int(tname[1:])
+                elif tname == "TL":
+                    t_num = -1
+                else:
+                    t_num = -2
+            except ValueError:
+                t_num = -2
+        else:
+            t_num = -2
+        
+        # COs from this tier are allowed if tier number >= requested tier number
+        # (higher or equal tier number means it's a higher or equal tier)
+        # Example: For T2 (tier_num=2), allow tiers with t_num >= 2 (T2, T3, T4, T5)
+        if t_num >= tier_num:
+            allowed_co_ids.extend(tier.get("co_ids", []))
+    
+    return list(set(allowed_co_ids))  # Remove duplicates
+
+
 def select_co(map_id: int, tier_name: str, mode: str = "auto") -> int:
     """
     Select a CO for the given map and tier.
@@ -62,7 +109,7 @@ def select_co(map_id: int, tier_name: str, mode: str = "auto") -> int:
             tiers = map_meta.get("tiers", [])
             tier = tiers[-1] if tiers else {"co_ids": []}
 
-    eligible_co_ids: list[int] = tier.get("co_ids", [])
+    eligible_co_ids: list[int] = _get_allowed_co_ids_for_tier(map_meta, tier_name)
     if not eligible_co_ids:
         raise ValueError(f"No eligible COs for map {map_id} tier {tier_name}")
 

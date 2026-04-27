@@ -128,12 +128,15 @@ _N_UNIT_TYPES = 14
 UNIT_TO_CHANNEL: dict[UnitType, int] = {ut: min(int(ut), _N_UNIT_TYPES - 1) for ut in UnitType}
 
 # Tier name → normalized scalar
+# NOTE: All tiers encode to 1.0 (T4 value) - different tier encodings waste training
+# time as the PPO tries to learn tier-specific behaviors that don't exist.
+# Tiers only affect CO selection at game start, not gameplay mechanics.
 _TIER_MAP: dict[str, float] = {
-    "T0": 0.0,
-    "TL": 0.1,
-    "T1": 0.25,
-    "T2": 0.5,
-    "T3": 0.75,
+    "T0": 1.0,
+    "TL": 1.0,
+    "T1": 1.0,
+    "T2": 1.0,
+    "T3": 1.0,
     "T4": 1.0,
 }
 
@@ -557,7 +560,7 @@ def encode_state(
         scalars[9] = my_turn
         scalars[10] = co_me.co_id / 30.0
         scalars[11] = co_en.co_id / 30.0
-        scalars[12] = _TIER_MAP.get(state.tier_name, 0.5)
+        scalars[12] = _TIER_MAP.get(state.tier_name, 1.0)
         scalars[13] = 1.0 if weather == "rain" else 0.0
         scalars[14] = 1.0 if weather == "snow" else 0.0
         scalars[15] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
@@ -577,7 +580,7 @@ def encode_state(
                 my_turn,
                 co_me.co_id / 30.0,
                 co_en.co_id / 30.0,
-                _TIER_MAP.get(state.tier_name, 0.5),
+                _TIER_MAP.get(state.tier_name, 1.0),
                 1.0 if weather == "rain" else 0.0,
                 1.0 if weather == "snow" else 0.0,
                 getattr(state, "co_weather_segments_remaining", 0) / 2.0,

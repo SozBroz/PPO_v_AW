@@ -488,6 +488,52 @@ def _strip_non_infantry_builds(
                 mask[idx] = False
 
 
+def _is_co_allowed_in_tier(meta: dict, tier_name: str, co_id: int) -> bool:
+    """
+    Check if a CO is allowed in a tier based on hierarchy.
+    Lower tiers (numerically lower) can use COs from higher tiers.
+    Based on request: T2 can use T2, T3, T4; T3 can use T3, T4; T4 can use T4.
+    Tier order: TL, T0, T1, T2, T3, T4, T5 (T2 < T3 < T4)
+    """
+    # Parse tier number from tier_name (e.g., "T2" -> 2, "TL" -> -1, "T0" -> 0)
+    if tier_name.startswith("T"):
+        try:
+            if tier_name[1:].isdigit():
+                tier_num = int(tier_name[1:])
+            elif tier_name == "TL":
+                tier_num = -1  # TL is lowest
+            else:
+                tier_num = -2  # Unknown tier
+        except ValueError:
+            tier_num = -2
+    else:
+        tier_num = -2
+    
+    # Check all tiers in the map
+    for tier in meta.get("tiers", []):
+        tname = tier.get("tier_name", "")
+        if tname.startswith("T"):
+            try:
+                if tname[1:].isdigit():
+                    t_num = int(tname[1:])
+                elif tname == "TL":
+                    t_num = -1
+                else:
+                    t_num = -2
+            except ValueError:
+                t_num = -2
+        else:
+            t_num = -2
+        
+        # CO is allowed if it's in this tier AND this tier number >= requested tier number
+        # (higher or equal tier number means it's a higher or equal tier)
+        # Example: For T2 (tier_num=2), allow tiers with t_num >= 2 (T2, T3, T4, T5)
+        if co_id in tier.get("co_ids", []) and t_num >= tier_num:
+            return True
+    
+    return False
+
+
 def sample_training_matchup(
     sample_map_pool: list[dict],
     *,
@@ -567,9 +613,9 @@ def sample_training_matchup(
     tname = tier["tier_name"]
 
     if co_p0 is not None:
-        if co_p0 not in co_ids:
+        if not _is_co_allowed_in_tier(meta, tname, co_p0):
             raise ValueError(
-                f"CO {co_p0} not in tier {tname} for map "
+                f"CO {co_p0} not allowed in tier {tname} for map "
                 f"{meta.get('name', meta['map_id'])}"
             )
         p0_co = co_p0
@@ -577,9 +623,9 @@ def sample_training_matchup(
         p0_co = _choice(co_ids)
 
     if co_p1 is not None:
-        if co_p1 not in co_ids:
+        if not _is_co_allowed_in_tier(meta, tname, co_p1):
             raise ValueError(
-                f"CO {co_p1} not in tier {tname} for map "
+                f"CO {co_p1} not allowed in tier {tname} for map "
                 f"{meta.get('name', meta['map_id'])}"
             )
         p1_co = co_p1

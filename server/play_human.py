@@ -441,6 +441,52 @@ def _pick_tier(meta: dict, tier_name: str) -> dict:
     raise ValueError(f"No enabled tier {tier_name!r} for map {meta.get('map_id')}")
 
 
+def _is_co_allowed_in_tier(meta: dict, tier_name: str, co_id: int) -> bool:
+    """
+    Check if a CO is allowed in a tier based on hierarchy.
+    Lower tiers (numerically lower) can use COs from higher tiers.
+    Based on request: T2 can use T2, T3, T4; T3 can use T3, T4; T4 can use T4.
+    Tier order: TL, T0, T1, T2, T3, T4, T5 (T2 < T3 < T4)
+    """
+    # Parse tier number from tier_name (e.g., "T2" -> 2, "TL" -> -1, "T0" -> 0)
+    if tier_name.startswith("T"):
+        try:
+            if tier_name[1:].isdigit():
+                tier_num = int(tier_name[1:])
+            elif tier_name == "TL":
+                tier_num = -1  # TL is lowest
+            else:
+                tier_num = -2  # Unknown tier
+        except ValueError:
+            tier_num = -2
+    else:
+        tier_num = -2
+    
+    # Check all tiers in the map
+    for tier in meta.get("tiers", []):
+        tname = tier.get("tier_name", "")
+        if tname.startswith("T"):
+            try:
+                if tname[1:].isdigit():
+                    t_num = int(tname[1:])
+                elif tname == "TL":
+                    t_num = -1
+                else:
+                    t_num = -2
+            except ValueError:
+                t_num = -2
+        else:
+            t_num = -2
+        
+        # CO is allowed if it's in this tier AND this tier number >= requested tier number
+        # (higher or equal tier number means it's a higher or equal tier)
+        # Example: For T2 (tier_num=2), allow tiers with t_num >= 2 (T2, T3, T4, T5)
+        if co_id in tier.get("co_ids", []) and t_num >= tier_num:
+            return True
+    
+    return False
+
+
 def new_session(
     *,
     map_id: Optional[int],
@@ -483,11 +529,11 @@ def new_session(
 
     p0 = int(human_co_id or _DEFAULT_HUMAN_CO)
     p1 = int(bot_co_id or _DEFAULT_BOT_CO)
-    if p0 not in co_ids:
-        msg = f"human co_id {p0} not in tier {tier_name}"
+    if not _is_co_allowed_in_tier(meta, tier_name, p0):
+        msg = f"human co_id {p0} not allowed in tier {tier_name}"
         return {"session_id": "", "ok": False, "error": msg}, msg
-    if p1 not in co_ids:
-        msg = f"bot co_id {p1} not in tier {tier_name}"
+    if not _is_co_allowed_in_tier(meta, tier_name, p1):
+        msg = f"bot co_id {p1} not allowed in tier {tier_name}"
         return {"session_id": "", "ok": False, "error": msg}, msg
 
     map_data = load_map(mid, POOL_PATH, MAPS_DIR)
