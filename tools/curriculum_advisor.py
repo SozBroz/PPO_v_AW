@@ -45,9 +45,12 @@ FLAG_PRESENT = "_FLAG_PRESENT"
 
 PROBE_OWNED_KEYS = frozenset({"--n-envs", "--n-steps", "--batch-size"})
 
-# Opening book: opt-in per stage after ``tools/validate_opening_book.py`` on a real corpus.
-# Shipped default is empty (no --opening-book) so training does not depend on a placeholder JSONL.
-DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {}
+# Opening book: use ranked_std_human_openings.jsonl for P1 opponent seat by default.
+DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {
+    "--opening-book": str(REPO_ROOT / "data" / "opening_books" / "ranked_std_human_openings.jsonl"),
+    "--opening-book-seat": 1,
+    "--opening-book-prob": 1.0,
+}
 
 # Human / hand-edited curriculum_state.json often uses "stage_d"; schedule uses long names.
 _CURRICULUM_STAGE_SHORTHAND: dict[str, str] = {
