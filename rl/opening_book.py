@@ -175,6 +175,18 @@ class OpeningBookController:
 
     def suggest_flat(
         self,
+        state: GameState,
+        calendar_turn: int,
+        player_ix: int,
+        action_mask: np.ndarray,
+        action_metadata: list[ActionMetadata],
+    ) -> Optional[int]:
+        """
+        Suggests an opening book action for the current state, with arguments
+        suitable for flat action space algorithms.
+        """
+        try:
+        self,
         *,
         calendar_turn: int,
         action_mask: np.ndarray,

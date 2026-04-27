@@ -16,13 +16,10 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-PC_B_MAX_ENVS = 4
 # Looser cap for throughput-tune sweeps (``start_solo_training --throughput-tune``);
 # initial ``proposed_args`` still uses ``absolute_cap=12`` via ``max_safe_n_envs_from_probe``.
 THROUGHPUT_TUNE_MAX_ENVS_CAP = 16
-PC_B_REASON = (
-    "operator-validated stable point; n_envs=6 dies at iter 5 (FPS plan 2026-04-22)"
-)
+# Removed PC_B_MAX_ENVS cap - pc-b now uses same heuristic as other machines
 HEURISTIC_REASON = "heuristic from probe; not yet validated by operator"
 
 # Rollout geometry (PPO): raise --n-steps only when RAM suggests headroom and
@@ -103,10 +100,7 @@ def propose_from_probe(probe: dict[str, Any]) -> dict[str, Any]:
 
     max_safe = max_safe_n_envs_from_probe(probe, absolute_cap=12)
 
-    if mid == "pc-b":
-        n_envs = min(PC_B_MAX_ENVS, max_safe)
-    else:
-        n_envs = max_safe
+    n_envs = max_safe
 
     n_steps, geom_note = _choose_n_steps(ram_gb, n_envs)
 
@@ -115,10 +109,10 @@ def propose_from_probe(probe: dict[str, Any]) -> dict[str, Any]:
             batch_size = min(n_envs * n_steps // 4, 1024)
             if batch_size < 1:
                 batch_size = 1
-            reason = f"{PC_B_REASON}; {geom_note}" if geom_note else PC_B_REASON
+            reason = f"heuristic from probe; {geom_note}" if geom_note else HEURISTIC_REASON
         else:
             batch_size = 256
-            reason = PC_B_REASON
+            reason = HEURISTIC_REASON
     else:
         batch_size = min(n_envs * n_steps // 4, 1024)
         if batch_size < 1:

@@ -1903,6 +1903,10 @@ def main() -> int:
         enabled=not args.no_default_opening_book,
     )
     extra = shlex.split(args.train_extra_args, posix=os.name != "nt")
+    # Merge train_extra into proposed args so build_train_argv preserves them
+    extra_map = _train_extra_to_args_map(extra)
+    for k, v in extra_map.items():
+        proposed.setdefault("args", {})[k] = v
     probe_tune: dict[str, Any] = {}
     pp = fleet_dir / "probe.json"
     if pp.is_file():

@@ -20,6 +20,7 @@ from rl import _win_triton_warnings
 _win_triton_warnings.apply()
 
 import collections
+import math
 import copy
 import json
 import os
@@ -179,15 +180,16 @@ PHI_PROFILE_ENV = "AWBW_PHI_PROFILE"
 PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient
 PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
 PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient
-# (α, β, κ) when in phi mode and a coefficient env is unset:
-PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float]] = {
-    "balanced": (2e-5, 0.05, 0.05),
-    "capture": (2e-5, 0.02, 0.25),
+PHI_GAMMA_ENV = "AWBW_PHI_GAMMA"   # income-saturation coefficient
+# (α, β, κ, γ) when in phi mode and a coefficient env is unset:
+PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
+    "balanced": (2e-5, 0.05, 0.05, 0.20),
+    "capture": (2e-5, 0.02, 0.25, 0.20),
 }
 # Φ: one-time bonus for removing an enemy unit on the learner’s engine step,
-# in the same value units as the army line (``α × cost × hp/100``), scaled
+# in the same value units as the army line (α × cost × hp/100), scaled
 # with ``_phi_alpha`` so it tracks profile/env overrides.
-PHI_ENEMY_KILL_BONUS_FRAC = 0.1
+PHI_ENEMY_KILL_BONUS_FRAC = 0.3
 
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
@@ -791,7 +793,7 @@ class AWBWEnv(gym.Env):
         if prof_raw not in PHI_PROFILE_DEFAULTS:
             prof_raw = "balanced"
         self._phi_profile: str = prof_raw
-        p_alpha, p_beta, p_kappa = PHI_PROFILE_DEFAULTS[prof_raw]
+        p_alpha, p_beta, p_kappa, p_gamma = PHI_PROFILE_DEFAULTS[prof_raw]
 
         def _read_float(env_name: str, default: float) -> float:
             try:
@@ -802,6 +804,7 @@ class AWBWEnv(gym.Env):
         self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, p_alpha)
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
+        self._phi_gamma: float = _read_float(PHI_GAMMA_ENV, p_gamma)
 
         self._step_times: collections.deque[float] | None = (
             collections.deque(maxlen=100) if effective_track_per_worker_times() else None
@@ -1509,6 +1512,22 @@ class AWBWEnv(gym.Env):
                 l_new = -1.0
         return l_new + rest
 
+    def _income_saturation(self, state: GameState, me: int, en: int) -> float:
+        """Superlinear income-property lead bonus in learner frame.
+        
+        Grows as log(1 + max(0, inc_lead))^2 to avoid saturation while still
+        rewarding map saturation. Sign-aware: positive when ahead, negative when behind.
+        Only applied from day 8 onward to avoid poisoning early-game exploration.
+        """
+        if int(state.turn) < 8:
+            return 0.0
+        inc_me = state.count_income_properties(me)
+        inc_en = state.count_income_properties(en)
+        lead = inc_me - inc_en
+        if lead == 0:
+            return 0.0
+        return math.log(1.0 + abs(lead)) ** 2 * (1.0 if lead > 0 else -1.0)
+
     def _compute_phi(self, state: GameState) -> float:
         """Potential Φ(s) in the **learner** frame (me = ``_learner_seat``)."""
         me = int(self._learner_seat)
@@ -1545,6 +1564,7 @@ class AWBWEnv(gym.Env):
             self._phi_alpha * (v_me - v_en)
             + self._phi_beta * (p_me - p_en)
             + self._phi_kappa * (cap_me - cap_en)
+            + self._phi_gamma * self._income_saturation(state, me, en)
         )
 
     def _phi_enemy_kill_one_time_bonus(
