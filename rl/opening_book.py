@@ -14,7 +14,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -175,22 +175,11 @@ class OpeningBookController:
 
     def suggest_flat(
         self,
-        state: GameState,
-        calendar_turn: int,
-        player_ix: int,
-        action_mask: np.ndarray,
-        action_metadata: list[ActionMetadata],
-    ) -> Optional[int]:
-        """
-        Suggests an opening book action for the current state, with arguments
-        suitable for flat action space algorithms.
-        """
-        try:
-        self,
         *,
         calendar_turn: int,
         action_mask: np.ndarray,
     ) -> int | None:
+        """Next legal flat action from the selected book line, or ``None`` if unavailable."""
         b = self._book
         if b is None or not b.action_indices:
             if self._debug_events < 3:
