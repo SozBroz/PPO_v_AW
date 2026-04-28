@@ -410,6 +410,22 @@ def test_inject_live_games_appends_flags(tmp_path: Path) -> None:
     assert ex[i + 1] == "9"
 
 
+def test_inject_live_games_skipped_when_no_auto(tmp_path: Path) -> None:
+    """CLI default is opt-out (no_auto True): same tree must not append live flags."""
+    m = _load_sst()
+    import logging
+
+    log = logging.getLogger("test_inject_skip")
+    base = tmp_path / "g"
+    (base / "9" / "live_replay.json").parent.mkdir(parents=True)
+    (base / "9" / "live_replay.json").write_text("{}", encoding="utf-8")
+    ex, gids = m._inject_live_games_train_extra(
+        ["--n-envs", "24"], base, no_auto=True, log=log
+    )
+    assert gids == []
+    assert ex == ["--n-envs", "24"]
+
+
 def test_resolve_live_snapshot_pkl_nested(tmp_path: Path) -> None:
     from rl.self_play import _resolve_live_snapshot_pkl_path
 
@@ -602,4 +618,6 @@ def test_cli_includes_no_orchestrator_auto_apply() -> None:
         check=False,
     )
     assert r.returncode == 0
-    assert "no-orchestrator-auto-apply" in (r.stdout or "")
+    out = r.stdout or ""
+    assert "no-orchestrator-auto-apply" in out
+    assert "use-exported-live-games" in out

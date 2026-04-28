@@ -137,8 +137,9 @@ leaving the baseline ``n-envs``. On success it also writes
 ``fleet/<id>/operator_train_args_override.json`` with ``--n-envs`` and a PPO-valid
 ``--batch-size`` so orchestrator refresh keeps that geometry.
 
-By default, when ``replays/amarinner_my_games`` (or ``--live-games-dir``) contains export
-subfolders (``tools/amarriner_export_my_games_replays.py``), this script:
+**Exported live replays (opt-in):** pass ``--use-exported-live-games`` when
+``replays/amarinner_my_games`` (or ``--live-games-dir``) contains export subfolders
+(``tools/amarriner_export_my_games_replays.py``). Then this script:
 
 - Refreshes each ``engine_snapshot.pkl`` from that game's ``live_replay.json`` when the JSON is
   newer (or the pkl is missing), so the first Subproc envs start from the **latest** state
@@ -148,7 +149,7 @@ subfolders (``tools/amarriner_export_my_games_replays.py``), this script:
 - Appends ``--live-learner-seats`` so the training POV matches line 1 of ``secrets.txt`` in each
   game (``meta.json`` + ``live_replay.json``), unless you pass ``--live-learner-seats`` yourself.
 - Raises effective ``--n-envs`` to at least N when needed. Use ``--no-auto-live-games`` to
-  disable all of the above auto behavior.
+  suppress this scan even after ``--use-exported-live-games`` (e.g. scripting).
 """
 from __future__ import annotations
 
@@ -514,8 +515,8 @@ def _inject_live_games_train_extra(
 ) -> tuple[list[str], list[int]]:
     """
     Append ``--live-snapshot-dir`` and ``--live-games-id`` for each export under
-    *live_dir*, unless ``--no-auto-live-games`` or the operator already passed
-    ``--live-games-id`` in *train_extra*.
+    *live_dir*, unless auto is off (no ``--use-exported-live-games``, or
+    ``--no-auto-live-games``), or the operator already passed ``--live-games-id`` in *train_extra*.
     """
     if no_auto or live_dir is None:
         return train_extra, []
@@ -1647,16 +1648,28 @@ def main() -> int:
         type=Path,
         default=REPO_ROOT / "replays" / "amarinner_my_games",
         help=(
-            "If this folder has per-games_id subdirs (from tools/amarriner_export_my_games_replays.py), "
-            "by default: refresh pkl from live_replay when newer, then append --live-snapshot-dir, one "
-            "--live-games-id per game, optional --live-learner-seats from secrets + meta, and raise --n-envs. "
-            "Use --no-auto-live-games or --no-refresh-live-snapshots to opt out of parts of this."
+            "Root for Amarriner per-games_id export folders. Used only when "
+            "--use-exported-live-games is set (or you pass --live-games-id / --live-snapshot-dir "
+            "via --train-extra-args yourself)."
+        ),
+    )
+    ap.add_argument(
+        "--use-exported-live-games",
+        action="store_true",
+        default=False,
+        help=(
+            "Scan --live-games-dir for export subdirs; refresh engine_snapshot.pkl when live_replay.json "
+            "is newer (unless --no-refresh-live-snapshots), append --live-snapshot-dir, --live-games-id "
+            "per game, optional --live-learner-seats from secrets.txt + meta, and bump --n-envs as needed. "
+            "Default is off so a populated replays/ tree does not hijack solo bootstrap."
         ),
     )
     ap.add_argument(
         "--no-auto-live-games",
         action="store_true",
-        help="Do not append --live-games-id from --live-games-dir.",
+        help=(
+            "Do not scan --live-games-id from --live-games-dir (overrides --use-exported-live-games)."
+        ),
     )
     ap.add_argument(
         "--no-refresh-live-snapshots",
@@ -1771,6 +1784,9 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
+    no_auto_live_games_effective = (not bool(args.use_exported_live_games)) or bool(
+        args.no_auto_live_games
+    )
     # Curriculum stage progress needs proposed vs applied reconciliation; orchestrator defaults to
     # --auto-apply so train.py respawns when merged proposed drifts (--no-orchestrator-auto-apply off).
     orchestrator_auto_apply = not bool(args.no_orchestrator_auto_apply)
@@ -1790,7 +1806,8 @@ def main() -> int:
     log.info(
         "start_solo_training pid=%d machine_id=%s orchestrator_auto_apply=%s "
         "(no_orch_auto_apply=%s) torch_compile=%s "
-        "training_backend=%s hybrid_gpu_cpu_opponents=%s (min_envs=%s hybrid_gpu_opp_workers_arg=%s)",
+        "training_backend=%s hybrid_gpu_cpu_opponents=%s (min_envs=%s hybrid_gpu_opp_workers_arg=%s) "
+        "use_exported_live_games=%s no_auto_live_games_effective=%s live_games_dir=%s",
         os.getpid(),
         machine_id,
         orchestrator_auto_apply,
@@ -1800,6 +1817,9 @@ def main() -> int:
         not args.no_hybrid_gpu_cpu_opponents,
         args.hybrid_opponent_min_envs,
         args.hybrid_gpu_opponent_workers,
+        bool(args.use_exported_live_games),
+        no_auto_live_games_effective,
+        args.live_games_dir,
     )
     if args.no_spirit_broken:
         log.info("spirit_broken: disabled (--no-spirit-broken); train env will set AWBW_SPIRIT_BROKEN=0")
@@ -1864,7 +1884,7 @@ def main() -> int:
             proposed_fake,
             extra,
             args.live_games_dir,
-            no_auto_live=args.no_auto_live_games,
+            no_auto_live=no_auto_live_games_effective,
             no_refresh=args.no_refresh_live_snapshots,
             map_pool=args.live_map_pool,
             maps_dir=args.live_maps_dir,
@@ -1897,7 +1917,8 @@ def main() -> int:
                 print(
                     f"[dry-run] ERROR: effective --n-envs ({ne}) is less than the number of "
                     f"auto live games ({len(live_gids)}). Raise --n-envs in --train-extra-args "
-                    f"(e.g. --n-envs {len(live_gids)}) or use --no-auto-live-games.",
+                    f"(e.g. --n-envs {len(live_gids)}), or omit --use-exported-live-games / "
+                    "pass --no-auto-live-games.",
                     file=sys.stderr,
                 )
                 return 1
@@ -2063,7 +2084,7 @@ def main() -> int:
         proposed,
         extra,
         args.live_games_dir,
-        no_auto_live=args.no_auto_live_games,
+        no_auto_live=no_auto_live_games_effective,
         no_refresh=args.no_refresh_live_snapshots,
         map_pool=args.live_map_pool,
         maps_dir=args.live_maps_dir,
@@ -2099,7 +2120,7 @@ def main() -> int:
             log.error(
                 "effective --n-envs (%s) must be >= number of auto live games (%s) "
                 "under %s. Increase --n-envs in --train-extra-args or proposed_args, "
-                "or use --no-auto-live-games.",
+                "or omit --use-exported-live-games / pass --no-auto-live-games.",
                 ne,
                 len(live_gids),
                 args.live_games_dir,

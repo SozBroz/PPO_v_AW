@@ -182,6 +182,10 @@ PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
 PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient
 PHI_GAMMA_ENV = "AWBW_PHI_GAMMA"   # income-saturation coefficient
 # (α, β, κ, γ) when in phi mode and a coefficient env is unset:
+#   α (alpha, 2e-5): army value coefficient — unit cost × hp/100, scaled by 2e-5
+#   β (beta,  0.05): property count coefficient — +0.05 per owned property
+#   κ (kappa, 0.05): contested-cap coefficient — partial capture progress toward enemy tiles (cp < 20)
+#   γ (gamma, 0.20): income-saturation coefficient — log-scale bonus for income property lead
 PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
     "balanced": (2e-5, 0.05, 0.05, 0.20),
     "capture": (2e-5, 0.02, 0.25, 0.20),
@@ -1333,6 +1337,8 @@ class AWBWEnv(gym.Env):
         # capturer → cp resets sequence is captured as a single ΔΦ on this step.
         if self._reward_shaping_mode == "phi":
             phi_before = self._compute_phi(self.state)
+            # Snapshot learner's capture progress before learner action (for interrupt detection)
+            pre_action_capture_progress = self._get_learner_capture_progress()
             en_s = int(self._enemy_seat)
             pre_enemy_alive: dict[int, tuple[UnitType, int]] = {
                 u.unit_id: (u.unit_type, u.hp)
@@ -1342,6 +1348,7 @@ class AWBWEnv(gym.Env):
         else:
             phi_before = 0.0
             pre_enemy_alive = None
+            pre_action_capture_progress = None
 
         acting = int(self.state.active_player)
         self.state, reward, done = self._engine_step_with_belief(action)
@@ -1414,6 +1421,15 @@ class AWBWEnv(gym.Env):
         if self._reward_shaping_mode == "phi":
             phi_after = 0.0 if (terminated or truncated) else self._compute_phi(self.state)
             reward += phi_after - phi_before
+            # Explicit penalty for learner capture progress that was lost (interrupted/reset).
+            # If learner started a capture (pre→mid progress increased) but opponent killed the
+            # capturer or it got reset, apply -κ × lost_progress penalty.
+            if pre_action_capture_progress is not None:
+                post_progress = self._get_learner_capture_progress() if not (terminated or truncated) else 0.0
+                # Only penalize if learner made progress from their action that got lost
+                if post_progress < pre_action_capture_progress:
+                    lost = pre_action_capture_progress - post_progress
+                    reward -= self._phi_kappa * lost
 
         if truncated and not terminated:
             raw_tp = os.environ.get(TRUNCATION_PENALTY_ENV, "0").strip()
@@ -1703,7 +1719,19 @@ class AWBWEnv(gym.Env):
         return math.log(1.0 + abs(lead)) ** 2 * (1.0 if lead > 0 else -1.0)
 
     def _compute_phi(self, state: GameState) -> float:
-        """Potential Φ(s) in the **learner** frame (me = ``_learner_seat``)."""
+        """Potential Φ(s) in the **learner** frame (me = ``_learner_seat``).
+
+        Φ = α × army_value_diff + β × property_diff + κ × contested_cap_diff + γ × income_saturation
+
+        Terms:
+        - army_value: Σ unit.cost × hp/100 for alive units
+        - property_diff: owned properties (directly owned, not neutral)
+        - contested_cap: partial capture progress (chip = 1 - cp/20) on enemy-owned properties
+          WARNING: κ rewards *progress toward* capture, not completion — this can incentivize
+          repeatedly starting captures without finishing them. Consider setting κ=0 or using
+          completed-capture-only logic.
+        - income_saturation: log-scale bonus for income property lead after day 8
+        """
         me = int(self._learner_seat)
         en = int(self._enemy_seat)
 
@@ -1740,6 +1768,26 @@ class AWBWEnv(gym.Env):
             + self._phi_kappa * (cap_me - cap_en)
             + self._phi_gamma * self._income_saturation(state, me, en)
         )
+
+    def _get_learner_capture_progress(self) -> float:
+        """Compute learner's partial capture progress (chip sum) toward enemy properties.
+
+        This is the κ-contribution from learner's perspective: sum of (1 - cp/20) for
+        all properties that learner is capturing but doesn't yet own. Used to detect
+        when captures get interrupted/reset so we can apply explicit negative reward.
+        """
+        if self.state is None:
+            return 0.0
+        me = int(self._learner_seat)
+        cap_progress = 0.0
+        for prop in self.state.properties:
+            cp = prop.capture_points
+            if cp >= 20:
+                continue
+            # Only count progress toward properties we don't own yet
+            if prop.owner != me:
+                cap_progress += 1.0 - cp / 20.0
+        return cap_progress
 
     def _phi_enemy_kill_one_time_bonus(
         self, pre_enemy_alive: dict[int, tuple[UnitType, int]]
@@ -2306,12 +2354,16 @@ class AWBWEnv(gym.Env):
             "captures_completed_p0": sum(
                 1
                 for e in self.state.game_log
-                if e.get("type") == "capture" and e.get("player") == 0
+                if e.get("type") == "capture"
+                and e.get("player") == 0
+                and e.get("cp_remaining", 20) == 0
             ),
             "captures_completed_p1": sum(
                 1
                 for e in self.state.game_log
-                if e.get("type") == "capture" and e.get("player") == 1
+                if e.get("type") == "capture"
+                and e.get("player") == 1
+                and e.get("cp_remaining", 20) == 0
             ),
             "infantry_builds_p0": sum(
                 1
