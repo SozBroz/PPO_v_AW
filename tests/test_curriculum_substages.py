@@ -66,11 +66,11 @@ from tools.curriculum_advisor import (
 def minimal_yaml(tmp_path: Path) -> Path:
     yaml_content = """
 stages:
-  - stage_id: stage_a_capture_bootstrap
+  - stage_id: stage_a0_capture_decay
     stage_family: A
-    stage_phase: clean
+    stage_phase: decay
     distribution_change: none
-    promotion_allowed: true
+    promotion_allowed: false
     map_pool_mode: fixed
     map_pool: [123858]
     co_pool_mode: fixed
@@ -80,12 +80,46 @@ stages:
       capture_move_gate: true
       opening_book_prob: 1.0
     cold_opponent: greedy_capture
+    learner_greedy_mix_schedule: [0.30, 0.15, 0.00]
+    capture_move_gate_schedule: [true, true, false]
+    opening_book_prob_schedule: [1.0, 0.50, 0.00]
+    min_episodes: 400
+    stub_to_decay: null
+    decay_to_clean:
+      min_episodes: 400
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_teacher_override_rate_final: 0.03
+      max_capture_gate_intervention_rate_final: 0.05
+      min_clean_probe_capture_sanity_rate: 0.75
+    rollback_criteria:
+      after_episodes: 800
+    description: a decay
+
+  - stage_id: stage_a1_capture_clean
+    stage_family: A
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+    map_pool_mode: fixed
+    map_pool: [123858]
+    co_pool_mode: fixed
+    co_pool: [14]
+    scaffolds:
+      learner_greedy_mix: 0.0
+      capture_move_gate: false
+      opening_book_prob: 0.0
+    cold_opponent: greedy_capture
     min_episodes: 200
+    stub_to_decay: null
+    decay_to_clean: null
+    rollback_criteria: null
     promotion_criteria:
       min_eval_games: 100
       min_terminal_rate: 0.60
       min_winrate: 0.45
-    description: bootstrap
+    description: a clean
 
   - stage_id: stage_d0_gl_std_map_pool_stub
     stage_family: D
@@ -211,9 +245,10 @@ class TestStagePhase:
 
 class TestLoadYaml:
     def test_load_minimal_schedule(self, schedule):
-        assert len(schedule) == 4
+        assert len(schedule) == 5
         ids = [s.stage_id for s in schedule]
-        assert "stage_a_capture_bootstrap" in ids
+        assert "stage_a0_capture_decay" in ids
+        assert "stage_a1_capture_clean" in ids
         assert "stage_d0_gl_std_map_pool_stub" in ids
         assert "stage_d1_gl_std_map_pool_decay" in ids
         assert "stage_d2_gl_std_map_pool_clean" in ids
@@ -222,7 +257,8 @@ class TestLoadYaml:
         for s in schedule:
             assert len(s.stage_family) == 1
         by_id = {s.stage_id: s for s in schedule}
-        assert by_id["stage_a_capture_bootstrap"].stage_phase == StagePhase.CLEAN
+        assert by_id["stage_a0_capture_decay"].stage_phase == StagePhase.DECAY
+        assert by_id["stage_a1_capture_clean"].stage_phase == StagePhase.CLEAN
         assert by_id["stage_d0_gl_std_map_pool_stub"].stage_phase == StagePhase.STUB
         assert by_id["stage_d1_gl_std_map_pool_decay"].stage_phase == StagePhase.DECAY
         assert by_id["stage_d2_gl_std_map_pool_clean"].stage_phase == StagePhase.CLEAN
@@ -242,7 +278,7 @@ class TestLoadYaml:
         assert stub.scaffolds.opening_book_prob == 0.50
 
     def test_decay_schedule_parsed(self, schedule):
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         assert decay.learner_greedy_mix_schedule == [0.25, 0.15, 0.05, 0.00]
         assert decay.capture_move_gate_schedule == [True, True, False, False]
         assert decay.opening_book_prob_schedule == [0.50, 0.25, 0.10, 0.00]
@@ -255,7 +291,7 @@ class TestLoadYaml:
         assert stub.stub_to_decay.max_teacher_override_rate == 0.35
 
     def test_decay_to_clean_criteria(self, schedule):
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         assert decay.decay_to_clean is not None
         assert decay.decay_to_clean.learner_greedy_mix_at_end == 0.0
         assert decay.decay_to_clean.capture_move_gate_at_end is False
@@ -304,7 +340,7 @@ class TestScaffoldDecay:
 
     def test_scaffold_at_episode_decay_phases(self, schedule):
         """Decay stages return scaffolds at the correct phase boundary."""
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         # 4 phases over 800 episodes = 200 episodes each
         # Phase 0: episodes 0-199
         sc0 = decay.scaffold_at_episode(episode_idx=0)
@@ -336,18 +372,31 @@ class TestScaffoldDecay:
 
 class TestNormalizeStageName:
     def test_direct(self):
-        assert normalize_curriculum_stage_name("stage_a_capture_bootstrap") == "stage_a_capture_bootstrap"
+        assert normalize_curriculum_stage_name("stage_a0_capture_decay") == "stage_a0_capture_decay"
+        assert normalize_curriculum_stage_name("stage_a1_capture_clean") == "stage_a1_capture_clean"
         assert normalize_curriculum_stage_name("stage_d0_gl_std_map_pool_stub") == "stage_d0_gl_std_map_pool_stub"
 
     def test_shorthand(self):
+        assert normalize_curriculum_stage_name("stage_c") == "stage_c0_terrain_decay"
         assert normalize_curriculum_stage_name("stage_d") == "stage_d0_gl_std_map_pool_stub"
         assert normalize_curriculum_stage_name("stage_e") == "stage_e0_gl_mixed_co_stub"
         assert normalize_curriculum_stage_name("stage_f") == "stage_f0_full_random_stub"
-        assert normalize_curriculum_stage_name("stage_a") == "stage_a_capture_bootstrap"
+        assert normalize_curriculum_stage_name("stage_a") == "stage_a0_capture_decay"
 
     def test_legacy_renames(self):
-        assert normalize_curriculum_stage_name("stage_d_self_play_pure") == "stage_f_self_play_pure"
+        assert normalize_curriculum_stage_name("stage_d_self_play_pure") == (
+            "stage_f0_full_random_stub"
+        )
         assert normalize_curriculum_stage_name("stage_d_gl_std_map_pool_t3") == "stage_d0_gl_std_map_pool_stub"
+        assert normalize_curriculum_stage_name("stage_c_terrain_competent") == (
+            "stage_c1_terrain_competent"
+        )
+        assert normalize_curriculum_stage_name("stage_a_capture_bootstrap") == (
+            "stage_a1_capture_clean"
+        )
+        assert normalize_curriculum_stage_name("stage_b_capture_competent") == (
+            "stage_b1_capture_clean"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -410,6 +459,19 @@ class TestDecideSubstageTransitionStub:
         result = decide_substage_transition(m, sm, stub, games_in_stage=100)
         assert result == SubStageDecision.STAY
 
+    def test_stub_stays_until_games_in_stage_even_if_window_is_full(self, schedule):
+        """STUB→decay gates on games_in_stage, not rollout window length (window may stay at 200)."""
+        stub = next(s for s in schedule if s.stage_phase == StagePhase.STUB)
+        m = _metrics(games_in_window=200)
+        sm = _s_metrics(
+            teacher_override_rate=0.20,
+            capture_gate_intervention_rate=0.30,
+            clean_probe_capture_sanity_rate=0.70,
+        )
+        result = decide_substage_transition(m, sm, stub, games_in_stage=299)
+        assert stub.stub_to_decay is not None and stub.stub_to_decay.min_episodes == 300
+        assert result == SubStageDecision.STAY
+
     def test_stub_advance_criteria_met(self, schedule):
         stub = next(s for s in schedule if s.stage_phase == StagePhase.STUB)
         m = _metrics(games_in_window=300, median_first_p0_capture_step=8.0, median_captures_completed_p0=5.0)
@@ -446,14 +508,14 @@ class TestDecideSubstageTransitionStub:
 
 class TestDecideSubstageTransitionDecay:
     def test_decay_stay_too_few_games(self, schedule):
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         m = _metrics(games_in_window=400)
         sm = _s_metrics()
         result = decide_substage_transition(m, sm, decay, games_in_stage=400)
         assert result == SubStageDecision.STAY
 
     def test_decay_advance_criteria_met(self, schedule):
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         m = _metrics(games_in_window=800, median_first_p0_capture_step=8.0, median_captures_completed_p0=5.0)
         sm = _s_metrics(
             teacher_override_rate=0.01,
@@ -466,7 +528,7 @@ class TestDecideSubstageTransitionDecay:
         assert result == SubStageDecision.ADVANCE_TO_CLEAN
 
     def test_decay_rollback_clean_probe_bad(self, schedule):
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         # Override rollback criteria so clean_probe_capture_sanity_rate_below = 0.50
         # (instead of inheriting stub's non-matching criteria)
         # Also set decay_to_clean to have very low min_episodes so we pass criteria
@@ -616,7 +678,7 @@ class TestAntiDependencyRules:
         assert result == StageDecision.NO_PROMOTION_STUB_OR_DECAY
 
     def test_decay_no_promotion_via_stage_decision(self, schedule):
-        decay = next(s for s in schedule if s.stage_phase == StagePhase.DECAY)
+        decay = next(s for s in schedule if s.stage_id == "stage_d1_gl_std_map_pool_decay")
         m = _metrics(win_rate=0.90)
         sm = _s_metrics()
         result = decide_stage_transition(m, sm, decay)
@@ -724,6 +786,28 @@ class TestAntiDependencyRules:
 
 
 class TestFindNextStage:
+    def test_yaml_embedded_schedule_has_c_substage_chain(self, tmp_path: Path) -> None:
+        embedded = Path(_REPO_ROOT / "data" / "curriculum" / "stages.yaml")
+        sched = load_stages_yaml(embedded)
+        by_id = {s.stage_id: s for s in sched}
+        c0 = by_id["stage_c0_terrain_decay"]
+        c1 = by_id["stage_c1_terrain_competent"]
+        nxt = _find_next_stage(sched, c0)
+        assert nxt is not None and nxt.stage_id == c1.stage_id
+        assert c0.stage_phase == StagePhase.DECAY
+        assert c1.stage_phase == StagePhase.CLEAN
+        assert c1.scaffolds.learner_greedy_mix == 0.0
+
+    def test_b1_promote_next_family_first_row_is_c0_decay_not_stub(self, tmp_path: Path) -> None:
+        embedded = Path(_REPO_ROOT / "data" / "curriculum" / "stages.yaml")
+        sched = load_stages_yaml(embedded)
+        by_id = {s.stage_id: s for s in sched}
+        b1 = by_id["stage_b1_capture_clean"]
+        nxt = _find_next_stage(sched, b1)
+        assert nxt is not None
+        assert nxt.stage_id == "stage_c0_terrain_decay"
+        assert nxt.stage_phase == StagePhase.DECAY
+
     def test_within_family_stub_to_decay(self, schedule):
         stub = next(s for s in schedule if s.stage_id == "stage_d0_gl_std_map_pool_stub")
         nxt = _find_next_stage(schedule, stub)
@@ -768,8 +852,7 @@ class TestCurriculumStateIO:
     def test_read_missing_file_returns_default(self, tmp_path: Path):
         path = tmp_path / "nonexistent.json"
         state = read_state(path)
-        # Default stage is stage_a_capture_bootstrap
-        assert "stage" in state.current_stage_name
+        assert state.current_stage_name.startswith("stage_a0")
         assert state.games_observed_in_stage == 0
 
 
@@ -810,7 +893,7 @@ class TestComputeProposalStable:
 
         schedule = load_stages_yaml(minimal_yaml)
         state = CurriculumState(
-            current_stage_name="stage_a_capture_bootstrap",
+            current_stage_name="stage_a1_capture_clean",
             games_observed_in_stage=0,
             entered_stage_at_ts=0.0,
             last_proposal_ts=0.0,

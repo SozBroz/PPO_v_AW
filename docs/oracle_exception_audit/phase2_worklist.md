@@ -8,7 +8,7 @@ Apply every DELETE / REPLACE-WITH-ENGINE-FIX / PARTIAL verdict in `tools/oracle_
 
 ## Pre-flight checks
 
-1. `cd C:\Users\phili\AWBW`
+1. `cd D:\AWBW`
 2. Confirm `git status` is clean (or stash) — the campaign tracks before/after by file diff and audit cluster diff.
 3. Confirm `logs/desync_register_pre_purge_2026-04-20.jsonl` and `logs/desync_clusters_pre_purge.json` exist (Phase 0 baseline).
 4. Confirm `logs/desync_regression_log.md` already has the BEFORE entry for this campaign (Phase 0).
@@ -70,7 +70,7 @@ Line numbers reference `tools/oracle_zip_replay.py` at the pre-purge revision. R
 After A–D are applied, run the existing test suite to find collateral damage:
 
 ```powershell
-cd C:\Users\phili\AWBW
+cd D:\AWBW
 python -m pytest tests/ -x --tb=short 2>&1 | tee logs\phase2_pytest_post_purge.log
 ```
 
@@ -87,7 +87,7 @@ Do NOT modify production code to keep tests passing if the test was guarding del
 The audit CLI is single-process sequential (no `--workers`). Expect ~10–30 minutes wall-clock for the full GL pool.
 
 ```powershell
-cd C:\Users\phili\AWBW
+cd D:\AWBW
 python -m tools.desync_audit --catalog data\amarriner_gl_std_catalog.json --register logs\desync_register.jsonl --seed 1
 python -m tools.cluster_desync_register --register logs\desync_register.jsonl --json logs\desync_clusters.json --markdown logs\desync_clusters.md
 ```

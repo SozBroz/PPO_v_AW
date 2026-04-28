@@ -97,10 +97,10 @@ This file **consolidates forward MCTS work** from:
 
 | Source (archive / reference) | Role |
 | ------------------------------ | ---- |
-| [`.cursor/plans/mcts_optimization_campaign.plan.md`](c:\Users\phili\AWBW\.cursor\plans\mcts_optimization_campaign.plan.md) | Scale-up strategy, pillars, success criteria, research pointers |
-| [`.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`](c:\Users\phili\AWBW\.cursor\plans\train.py_fps_campaign_c26ce6d4.plan.md) § Phase 11 / **11f** | Shipped 11a–11e spine; **pending 11f** escalator narrative |
-| [`MASTERPLAN.md`](c:\Users\phili\AWBW\MASTERPLAN.md) §4, §14 | Phase 2 thresholds, staged MCTS-0…4, production vs prototype |
-| [`docs/mcts_review_composer_o.md`](c:\Users\phili\AWBW\docs\mcts_review_composer_o.md) Part A + **Part B** | Checklist audit + **trace metadata, resamples, edge stats, risk control** |
+| [`.cursor/plans/mcts_optimization_campaign.plan.md`](D:\AWBW\.cursor\plans\mcts_optimization_campaign.plan.md) | Scale-up strategy, pillars, success criteria, research pointers |
+| [`.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`](D:\AWBW\.cursor\plans\train.py_fps_campaign_c26ce6d4.plan.md) § Phase 11 / **11f** | Shipped 11a–11e spine; **pending 11f** escalator narrative |
+| [`MASTERPLAN.md`](D:\AWBW\MASTERPLAN.md) §4, §14 | Phase 2 thresholds, staged MCTS-0…4, production vs prototype |
+| [`docs/mcts_review_composer_o.md`](D:\AWBW\docs\mcts_review_composer_o.md) Part A + **Part B** | Checklist audit + **trace metadata, resamples, edge stats, risk control** |
 
 **Proceed from this file** for todos and ordering; the sources above remain historical detail.
 
@@ -111,12 +111,12 @@ This file **consolidates forward MCTS work** from:
 
 ## Already shipped (do not duplicate)
 
-- **11a** [`engine/game.py`](c:\Users\phili\AWBW\engine\game.py) `apply_full_turn`
-- **11b** [`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py) turn-level PUCT
-- **11c** `--mcts-mode eval_only` in [`train.py`](c:\Users\phili\AWBW\train.py), [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py)
-- **11d** [`tools/mcts_health.py`](c:\Users\phili\AWBW\tools\mcts_health.py) + orchestrator merge path
+- **11a** [`engine/game.py`](D:\AWBW\engine\game.py) `apply_full_turn`
+- **11b** [`rl/mcts.py`](D:\AWBW\rl\mcts.py) turn-level PUCT
+- **11c** `--mcts-mode eval_only` in [`train.py`](D:\AWBW\train.py), [`scripts/symmetric_checkpoint_eval.py`](D:\AWBW\scripts\symmetric_checkpoint_eval.py)
+- **11d** [`tools/mcts_health.py`](D:\AWBW\tools\mcts_health.py) + orchestrator merge path
 - **11e** `terrain_usage_p0` + schema for gate inputs
-- **11f / Part B (stochastic root risk, 2026-04)** — `apply_full_turn(..., return_trace=True)` (optional 5-tuple); [`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py) `EdgeStats`, `luck_resamples`, `risk_mode`, root JSONL log; [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py) CLI + telemetry (`mcts_root_entropy`, `mcts_chosen_risk`); tests in [`tests/test_mcts.py`](c:\Users\phili\AWBW\tests\test_mcts.py). See [`docs/mcts_review_composer_o.md`](c:\Users\phili\AWBW\docs\mcts_review_composer_o.md) Part B, [`MASTERPLAN.md`](c:\Users\phili\AWBW\MASTERPLAN.md) §14.
+- **11f / Part B (stochastic root risk, 2026-04)** — `apply_full_turn(..., return_trace=True)` (optional 5-tuple); [`rl/mcts.py`](D:\AWBW\rl\mcts.py) `EdgeStats`, `luck_resamples`, `risk_mode`, root JSONL log; [`scripts/symmetric_checkpoint_eval.py`](D:\AWBW\scripts\symmetric_checkpoint_eval.py) CLI + telemetry (`mcts_root_entropy`, `mcts_chosen_risk`); tests in [`tests/test_mcts.py`](D:\AWBW\tests\test_mcts.py). See [`docs/mcts_review_composer_o.md`](D:\AWBW\docs\mcts_review_composer_o.md) Part B, [`MASTERPLAN.md`](D:\AWBW\MASTERPLAN.md) §14.
 
 ## Recommended work order (high level)
 
@@ -159,4 +159,4 @@ Parallelism: **04–07** can overlap **08–09** after **03** is underway, but d
 
 ## Plan file (absolute path)
 
-`c:\Users\phili\AWBW\.cursor\plans\mcts_forward_unified.plan.md`
+`D:\AWBW\.cursor\plans\mcts_forward_unified.plan.md`

@@ -3,7 +3,7 @@ name: workhorse1 fleet sync
 overview: "Re-onboard 192.168.0.160 (\"workhorse1\") as the eternal main training host: bring the repo and checkpoints up to parity with the operator PC, run **async IMPALA** training with the same hybrid GPU/CPU opponent strategy as [scripts/start_solo_training.py](scripts/start_solo_training.py), and use **SSH/SCP (or rsync)** for all bulk checkpoint exchange—**not** Samba—following [docs/multi_machine_weight_sync_design.md](docs/multi_machine_weight_sync_design.md). Clarify the project's \"highest stage\" language from MASTERPLAN vs fleet runbooks."
 todos:
   - id: ssh-audit
-    content: "SSH to workhorse1: nvidia-smi, Python venv, D:/awbw git rev vs C:/Users/phili/AWBW, list checkpoints/logs to delete or archive"
+    content: "SSH to workhorse1: nvidia-smi, Python venv, D:/awbw git rev vs D:/AWBW, list checkpoints/logs to delete or archive"
     status: pending
   - id: seed-weights
     content: SCP/SFTP this PC latest.zip + needed pool zips to workhorse1 with sha256 verify + atomic replace into checkpoints/
@@ -58,7 +58,7 @@ The long-run **"summit"** the doc points to is **Phase 2 (production MCTS) on a 
 
 | Concern | Direction |
 |--------|------------|
-| **Truth for "latest policy"** | **This machine** (`C:\Users\phili\AWBW`) is ahead — **one-time seed** + periodic push to workhorse1. |
+| **Truth for "latest policy"** | **This machine** (`D:\AWBW`) is ahead — **one-time seed** + periodic push to workhorse1. |
 | **workhorse1 role** | Treat as [`fleet_env.load_machine_role`](rl/fleet_env.py) `main`: repo on disk (historically **`D:\awbw`**) — **no** `AWBW_SHARED_ROOT` for training unless it equals the repo (same file as skill's sanity check for main). |
 | **Machine id** | Use a dedicated id, e.g. `--machine-id workhorse1`, so [`fleet/workhorse1/`](fleet/workhorse1/) (probe, `status.json`, `proposed_args.json`, `eval/`, `pool/`) is isolated from `pc-b`. |
 | **Orchestrator** | [scripts/fleet_orchestrator.py](scripts/fleet_orchestrator.py) takes a **single** `--shared-root` and multiple `--pools` under that tree. Without a shared filesystem, a **unified** two-pool tick only works if you **rsync/scp the whole `fleet/<id>/` + relevant `checkpoints/pool/<id>`** into one place **or** run **one orchestrator per host** (simpler). **Recommendation for Phase 1 of bring-up:** run **standalone** stack on workhorse1 (`--pools workhorse1` only); keep **pc-b**'s existing orchestration as the operator hub for promotion/eval. Add **scripted** zip + manifest exchange between hosts before merging orchestrator views. |
@@ -68,7 +68,7 @@ The long-run **"summit"** the doc points to is **Phase 2 (production MCTS) on a 
 ## On-box bring-up (after plan approval; requires SSH to 192.168.0.160)
 
 1. **Inventory** (read-only first): OpenSSH, Python/venv, CUDA driver, `nvidia-smi`, free disk, existing **`D:\awbw`**, and whether a stale **`checkpoints\latest.zip`**, `checkpoints\pool\**`, and `logs\**` predate the current encoder/policy contract (MASTERPLAN §1: old zips are not loadable without transplant).
-2. **Git parity:** `git fetch` / `git pull` to **the same commit** as `C:\Users\phili\AWBW` (or merge/rebase as you prefer). No Samba: **git remote over SSH/HTTPS** from workhorse1.
+2. **Git parity:** `git fetch` / `git pull` to **the same commit** as `D:\AWBW` (or merge/rebase as you prefer). No Samba: **git remote over SSH/HTTPS** from workhorse1.
 3. **Clean stale training artifacts (destructive, operator-approved):** Archive or delete old **`checkpoints\checkpoint_*.zip`**, suspicious **`checkpoints\latest.zip`**, oversized **`logs\*.jsonl`**, and optionally reset **`fleet\**\**` for the old machine id so `workhorse1` starts fresh—**then** copy a **known-good** `latest.zip` (and any pool opponent zips you need) **from this PC** via `scp`/`sftp` (push from here or pull on workhorse1).
 4. **Venv** — match **torch + CUDA** stack to the repo's `requirements.txt` / what pc-b uses; run **`python scripts/rebuild_cython_extensions.py`** (Windows path from [start_solo_training.py](scripts/start_solo_training.py) docstring) so engine extensions match.
 5. **Probe + bootstrap:** `python tools/probe_machine_caps.py --machine-id workhorse1` then `python scripts/start_solo_training.py --machine-id workhorse1 --auto-apply --training-backend async` plus whatever **extra args** you use on pc-b for **hybrid GPU opponents** and env count (the bootstrap already documents **`--train-extra-args`** and **`--no-hybrid-gpu-cpu-opponents`**; hybrid defaults help "as many GPU opponent slots as the semaphore allows, rest CPU" — see docstring around hybrid env vars in [scripts/start_solo_training.py](scripts/start_solo_training.py) and [rl/async_impala.py](rl/async_impala.py) for `AWBW_ASYNC_GPU_OPPONENTS`).

@@ -248,13 +248,13 @@ def actor_process_main(
     env_factory: Callable[[], Any],
     skeleton_zip: str,
     weight_path: str,
-    queue: mp.Queue,
+    rollout_queue: mp.Queue,
     stop_event: mp.Event,
     unroll_len: int,
     device_str: str,
     poll_s: float,
 ) -> None:
-    """One actor: build env, roll unrolls, push dict chunks to queue."""
+    """One actor: build env, roll unrolls, push dict chunks to rollout_queue."""
     # Hide GPUs from this process *before* importing torch. Otherwise each spawned
     # actor can initialize its own CUDA context on the same card as the learner;
     # six contexts routinely exhaust ~12GB Windows setups (driver reports 0 B free).
@@ -360,7 +360,7 @@ def actor_process_main(
             # and exaggerated "all actors idle" in Task Manager when the learner fell behind).
             while not stop_event.is_set():
                 try:
-                    queue.put(chunk, block=True, timeout=1.0)
+                    rollout_queue.put(chunk, block=True, timeout=1.0)
                     break
                 except queue.Full:
                     continue

@@ -57,9 +57,9 @@ DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {
 
 # Human / hand-edited curriculum_state.json often uses "stage_d"; schedule uses long names.
 _CURRICULUM_STAGE_SHORTHAND: dict[str, str] = {
-    "stage_a": "stage_a_capture_bootstrap",
-    "stage_b": "stage_b_capture_competent",
-    "stage_c": "stage_c_terrain_competent",
+    "stage_a": "stage_a0_capture_decay",
+    "stage_b": "stage_b0_capture_decay",
+    "stage_c": "stage_c0_terrain_decay",
     "stage_d": "stage_d0_gl_std_map_pool_stub",
     "stage_e": "stage_e0_gl_mixed_co_stub",
     "stage_f": "stage_f0_full_random_stub",
@@ -68,9 +68,9 @@ _CURRICULUM_STAGE_SHORTHAND: dict[str, str] = {
 
 # Reverse map: family letter -> first sub-stage name (used for shorthand fallback)
 _FAMILY_TO_FIRST_STUB: dict[str, str] = {
-    "A": "stage_a_capture_bootstrap",
-    "B": "stage_b_capture_competent",
-    "C": "stage_c_terrain_competent",
+    "A": "stage_a0_capture_decay",
+    "B": "stage_b0_capture_decay",
+    "C": "stage_c0_terrain_decay",
     "D": "stage_d0_gl_std_map_pool_stub",
     "E": "stage_e0_gl_mixed_co_stub",
     "F": "stage_f0_full_random_stub",
@@ -93,6 +93,10 @@ class StagePhase(Enum):
 
     def __str__(self) -> str:
         return self.name.lower()
+
+
+def _is_promotion_eval_phase(phase: StagePhase) -> bool:
+    return phase in (StagePhase.CLEAN, StagePhase.PROMOTION_EVAL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -458,8 +462,8 @@ def load_stages_yaml(path: Path) -> list[StageConfig]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def normalize_curriculum_stage_name(name: str) -> str:
-    """Map shorthand or legacy names to canonical stage_id strings."""
+def _normalize_curriculum_stage_name_once(name: str) -> str:
+    """Single substitution step for :func:`normalize_curriculum_stage_name`."""
     s = str(name).strip()
     # Direct shorthand map
     if s in _CURRICULUM_STAGE_SHORTHAND:
@@ -480,6 +484,29 @@ def normalize_curriculum_stage_name(name: str) -> str:
         return "stage_e0_gl_mixed_co_stub"
     if s == "stage_f_self_play_pure":
         return "stage_f0_full_random_stub"
+    # Monolithic stage C (pre sub-stage split): land on clean eval row so promotion can run.
+    if s == "stage_c_terrain_competent":
+        return "stage_c1_terrain_competent"
+    # Monolithic A/B (pre decay+clean split): migrate to promotion-eval rows so PROMOTE works.
+    if s == "stage_a_capture_bootstrap":
+        return "stage_a1_capture_clean"
+    if s == "stage_b_capture_competent":
+        return "stage_b1_capture_clean"
+    return s
+
+
+def normalize_curriculum_stage_name(name: str) -> str:
+    """Map shorthand or legacy names to canonical stage_id strings.
+
+    Applies one-hop substitutions repeatedly so chained legacy migrations converge
+    (e.g. ``stage_d_self_play_pure`` → ``stage_f_self_play_pure`` → ``stage_f0_full_random_stub``).
+    """
+    s = str(name).strip()
+    for _ in range(24):
+        nxt = _normalize_curriculum_stage_name_once(s)
+        if nxt == s:
+            return s
+        s = nxt
     return s
 
 
@@ -745,9 +772,22 @@ def compute_metrics(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _check_criteria(metrics: CompetenceMetrics, s_metrics: ScaffoldMetrics, crit: SubStageCriteria) -> tuple[bool, str]:
-    """Return (passed, reason)."""
-    if metrics.games_in_window < crit.min_episodes:
+def _check_criteria(
+    metrics: CompetenceMetrics,
+    s_metrics: ScaffoldMetrics,
+    crit: SubStageCriteria,
+    *,
+    require_rollout_min_games: bool = True,
+) -> tuple[bool, str]:
+    """Return (passed, reason).
+
+    Sub-stage decay->clean uses :func:`decide_substage_transition` to require
+    ``games_in_stage >= crit.min_episodes`` (time in the current YAML row). That
+    counter can exceed the rolling ``window_games`` cap; pass
+    ``require_rollout_min_games=False`` so quality checks still run on the window
+    without requiring 500+ rows in the last 200 games.
+    """
+    if require_rollout_min_games and metrics.games_in_window < crit.min_episodes:
         return False, f"games_in_window {metrics.games_in_window} < {crit.min_episodes}"
 
     if s_metrics.invalid_action_rate > crit.max_invalid_action_rate:
@@ -803,7 +843,11 @@ def decide_substage_transition(
         crit = stage.stub_to_decay
         if crit is None:
             return SubStageDecision.STAY
-        passed, reason = _check_criteria(metrics, s_metrics, crit)
+        if games_in_stage < crit.min_episodes:
+            return SubStageDecision.STAY
+        passed, reason = _check_criteria(
+            metrics, s_metrics, crit, require_rollout_min_games=False
+        )
         if not passed:
             return SubStageDecision.STAY
         return SubStageDecision.ADVANCE_TO_DECAY
@@ -837,7 +881,12 @@ def decide_substage_transition(
             if wr_drop > crit.clean_probe_wr_not_worse_than_stub_by_more_than:
                 return SubStageDecision.STAY
 
-        passed, _ = _check_criteria(metrics, s_metrics, crit)
+        if games_in_stage < crit.min_episodes:
+            return SubStageDecision.STAY
+
+        passed, _ = _check_criteria(
+            metrics, s_metrics, crit, require_rollout_min_games=False
+        )
         if not passed:
             return SubStageDecision.STAY
         return SubStageDecision.ADVANCE_TO_CLEAN
@@ -898,10 +947,10 @@ def _load_default_schedule() -> list[StageConfig]:
     if yaml_path.is_file():
         return load_stages_yaml(yaml_path)
 
-    # Minimal fallback — covers only stages that existed before this plan
+    # Minimal fallback if yaml missing — one clean promotion row matching stage_a1 semantics
     return [
         StageConfig(
-            stage_id="stage_a_capture_bootstrap",
+            stage_id="stage_a1_capture_clean",
             stage_family="A",
             stage_phase=StagePhase.CLEAN,
             distribution_change="none",
@@ -910,9 +959,18 @@ def _load_default_schedule() -> list[StageConfig]:
             map_pool=[123858],
             co_pool_mode="fixed",
             co_pool=[14],
-            scaffolds=ScaffoldConfig(learner_greedy_mix=0.30, capture_move_gate=True, opening_book_prob=1.0),
+            scaffolds=ScaffoldConfig(learner_greedy_mix=0.0, capture_move_gate=False, opening_book_prob=0.0),
             cold_opponent="greedy_capture",
             min_episodes=200,
+            promotion_criteria=PromotionCriteria(
+                min_eval_games=100,
+                min_terminal_rate=0.60,
+                max_max_env_steps_truncation_rate=0.30,
+                max_invalid_action_rate=0.001,
+                min_winrate=0.45,
+                max_first_capture_step_p50=15.0,
+                min_captures_by_day5_p50=4.0,
+            ),
         ),
     ]
 
@@ -927,31 +985,40 @@ def _stage_index_by_id(schedule: list[StageConfig], stage_id: str) -> int:
     return -1
 
 
+def _first_stage_in_family_ordered(
+    schedule: list[StageConfig], family_letter: str
+) -> StageConfig | None:
+    """First YAML row belonging to ``family_letter`` (schedule order wins)."""
+    for s in schedule:
+        if s.stage_family == family_letter:
+            return s
+    return None
+
+
 def _find_next_stage(schedule: list[StageConfig], current: StageConfig) -> StageConfig | None:
     """Find the next stage in the schedule.
 
-    For widening families (D, E, F), advance within the family:
-      stub -> decay -> clean -> promotion_eval
-    For non-widening families (A, B, C), advance to the next family.
+    Within a family with multiple substages: next row in YAML order.
+
+    Promotion from that family's last substage: first row of the next alphabet family,
+    preserving schedule order — not restricted to stub (family C begins with decay).
     """
-    # Within-family advance
-    family_stages = [s for s in schedule if s.stage_family == current.stage_family]
+    # Within-family advance (preserve schedule iteration order among same family_*)
+    family_stages = [x for x in schedule if x.stage_family == current.stage_family]
     if len(family_stages) > 1:
         for i, s in enumerate(family_stages):
             if s.stage_id == current.stage_id and i + 1 < len(family_stages):
                 return family_stages[i + 1]
-        # Already at last sub-stage of this family; advance to next family's first stub
-        next_family = chr(ord(current.stage_family) + 1)
-        for s in schedule:
-            if s.stage_family == next_family and s.stage_phase == StagePhase.STUB:
-                return s
-        # Fallback: next stage in schedule
+        next_f = chr(ord(current.stage_family) + 1)
+        if next_f <= "Z":
+            nxt = _first_stage_in_family_ordered(schedule, next_f)
+            if nxt is not None:
+                return nxt
         idx = _stage_index_by_id(schedule, current.stage_id)
         if idx >= 0 and idx + 1 < len(schedule):
             return schedule[idx + 1]
         return None
 
-    # Non-widening: simple next in list
     idx = _stage_index_by_id(schedule, current.stage_id)
     if idx >= 0 and idx + 1 < len(schedule):
         return schedule[idx + 1]
@@ -1077,7 +1144,7 @@ def next_curriculum_state_after_tick(
             # Roll back to the clean stage of the previous family, or first clean stage
             prev_family = chr(ord(current_stage.stage_family) - 1) if current_stage.stage_family > "A" else "A"
             for s in reversed(schedule):
-                if s.stage_family == prev_family and s.stage_phase == StagePhase.CLEAN:
+                if s.stage_family == prev_family and _is_promotion_eval_phase(s.stage_phase):
                     return CurriculumState(
                         current_stage_name=s.stage_id,
                         games_observed_in_stage=delta,
@@ -1088,7 +1155,7 @@ def next_curriculum_state_after_tick(
                     )
             # Fallback: go to stage A
             for s in schedule:
-                if s.stage_phase == StagePhase.CLEAN and s.stage_family == "A":
+                if _is_promotion_eval_phase(s.stage_phase) and s.stage_family == "A":
                     return CurriculumState(
                         current_stage_name=s.stage_id,
                         games_observed_in_stage=delta,
@@ -1098,7 +1165,7 @@ def next_curriculum_state_after_tick(
                         decay_phase=0,
                     )
 
-    elif current_stage.stage_phase == StagePhase.CLEAN:
+    elif _is_promotion_eval_phase(current_stage.stage_phase):
         stage_dec = decide_stage_transition(metrics, s_metrics, current_stage)
         decision = stage_dec.name
         if stage_dec == StageDecision.PROMOTE:
@@ -1161,7 +1228,7 @@ def compute_proposal_stable(
             reason = f"rollback from {current_stage.stage_id}"
         else:
             reason = f"holding {current_stage.stage_id}: criteria not met"
-    elif current_stage.stage_phase == StagePhase.CLEAN:
+    elif _is_promotion_eval_phase(current_stage.stage_phase):
         stage_dec = decide_stage_transition(metrics, s_metrics, current_stage)
         decision_str = stage_dec.name
         if stage_dec == StageDecision.PROMOTE:

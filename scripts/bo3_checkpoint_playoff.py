@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Bo3 playoff: challenger zip = P0, defender zip = P1; first to 2 wins; replace defender if challenger wins.
 
 With ``--parallel`` (default), runs up to three games in **separate processes**

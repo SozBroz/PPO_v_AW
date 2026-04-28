@@ -1,7 +1,7 @@
 import zipfile, gzip, io, sys, glob
 
 # Find the most recent generated replay
-replays = sorted(glob.glob(r"C:\Users\phili\AWBW\replays\*.zip"), key=lambda p: not "replay_1630459" in p)
+replays = sorted(glob.glob(r"D:\AWBW\replays\*.zip"), key=lambda p: not "replay_1630459" in p)
 # Skip the real AWBW replay, use our generated ones
 gen_replays = [r for r in replays if "1630459" not in r]
 if not gen_replays:

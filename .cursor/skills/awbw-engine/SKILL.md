@@ -1,6 +1,6 @@
 ---
 name: awbw-engine
-description: Navigate the AWBW (Advance Wars by Web) Python engine, replay export pipeline, and viewer-compatible zip format. Use when working in c:\Users\phili\AWBW, touching files under engine/, tools/, rl/, replays/, or data/, debugging replays, generating AWBW replay zips, modifying the GameState/Action/Unit model, working with maps/predeployed units, or anything that mentions COs, tiers, snapshots, p: stream, full_trace, or unit_id stability.
+description: Navigate the AWBW (Advance Wars by Web) Python engine, replay export pipeline, and viewer-compatible zip format. Use when working in D:\AWBW, touching files under engine/, tools/, rl/, replays/, or data/, debugging replays, generating AWBW replay zips, modifying the GameState/Action/Unit model, working with maps/predeployed units, or anything that mentions COs, tiers, snapshots, p: stream, full_trace, or unit_id stability.
 ---
 
 # AWBW Engine — Orientation Map

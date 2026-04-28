@@ -99,7 +99,7 @@ The capture-day flip diagnosed in `phase11j_final_build_no_op_residuals.md` §3.
 
 `tools/oracle_zip_replay.py::_oracle_fire_indirect_defender_from_attack_ring` — added an early return preferring the **recorded defender tile** when it is itself a foe in the indirect's strike ring. Falls through to the existing `hint_hp` heuristic only when `record` is unreachable (the original GL 1609533 case the helper was written for, where AWBW's `combatInfoVision` named a Chebyshev neighbour the indirect cannot strike).
 
-```1688:1706:c:\Users\phili\AWBW\tools\oracle_zip_replay.py
+```1688:1706:D:\AWBW\tools\oracle_zip_replay.py
     # Phase 11J-CLOSE-1617442 — when the recorded defender tile (``record``) is
     # itself in the indirect's strike ring AND holds a foe, prefer it. The
     # ``hint_hp`` heuristic below compares engine PRE-strike ``display_hp`` to

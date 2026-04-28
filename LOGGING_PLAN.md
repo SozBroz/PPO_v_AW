@@ -152,13 +152,13 @@ at `from server.routes.watch import ...` inside `create_app()`.
 1. **Preferred — run as a module from repo root** (same as `AWBW`):
 
    ```bash
-   cd C:\Users\phili\AWBW
+   cd D:\AWBW
    python -m server.app
    ```
 
    This keeps `sys.path[0]` as the project root so `server` resolves as a package.
 
-2. **Alternative:** Set **`PYTHONPATH`** to the project root before `python server/app.py` (e.g. `$env:PYTHONPATH="C:\Users\phili\AWBW"` in PowerShell).
+2. **Alternative:** Set **`PYTHONPATH`** to the project root before `python server/app.py` (e.g. `$env:PYTHONPATH="D:\AWBW"` in PowerShell).
 
 3. **Code change (optional):** At the very top of `server/app.py`, insert the repo root into `sys.path` if missing (guards `python server/app.py`), *or* switch blueprints to relative imports — less clean than (1).
 

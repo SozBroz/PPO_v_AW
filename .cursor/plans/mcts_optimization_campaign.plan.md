@@ -75,23 +75,23 @@ todos:
 
 ## Goal
 
-Make **turn-level PUCT** in this repo ([`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py)) as **useful per wall-clock** as possible when you move from “prototype eval” to **800–1600+ simulations per P0 root decision** for **reproducible training/eval**, and toward **time-budgeted anytime search** for **production AWBW** (competitive / live), while keeping **promotion metrics** trustworthy.
+Make **turn-level PUCT** in this repo ([`rl/mcts.py`](D:\AWBW\rl\mcts.py)) as **useful per wall-clock** as possible when you move from “prototype eval” to **800–1600+ simulations per P0 root decision** for **reproducible training/eval**, and toward **time-budgeted anytime search** for **production AWBW** (competitive / live), while keeping **promotion metrics** trustworthy.
 
 **Non-goals for this campaign (unless explicitly reopened):**
 
-- `train_advisor` / in-rollout MCTS inside PPO (`model.learn`) — wrong off-policy geometry; MASTERPLAN and [`train.py`](c:\Users\phili\AWBW\train.py) keep **`eval_only`** for search.
+- `train_advisor` / in-rollout MCTS inside PPO (`model.learn`) — wrong off-policy geometry; MASTERPLAN and [`train.py`](D:\AWBW\train.py) keep **`eval_only`** for search.
 - Fog / information-set MCTS — needs belief-state search; out of scope until MASTERPLAN fog lane.
 
 ## Current architecture (truth on disk)
 
 | Piece | Role |
 |--------|------|
-| [`engine/game.py`](c:\Users\phili\AWBW\engine\game.py) `apply_full_turn` | Rollout primitive: one **full player turn** from SELECT. Optional **`return_trace=True`** → 5-tuple with per-step MCTS trace; default 4-tuple unchanged. |
-| [`rl/mcts.py`](c:\Users\phili\AWBW\rl\mcts.py) | PUCT at **turn nodes**; **`root_plans`** children; Dirichlet / `min_depth`; `make_callables_from_sb3_policy`. **Root risk layer:** `luck_resamples`, `risk_mode`, `EdgeStats`, optional JSONL decision log; default selection remains visit-based. |
-| [`scripts/symmetric_checkpoint_eval.py`](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py) | **`eval_only`** MCTS; telemetry JSON; CLI for luck/risk; **`mcts_root_entropy`**, **`mcts_chosen_risk`**. |
-| [`tools/mcts_health.py`](c:\Users\phili\AWBW\tools\mcts_health.py) | Competence gate for turning MCTS on per machine. |
-| [`tools/mcts_escalator.py`](c:\Users\phili\AWBW\tools\mcts_escalator.py) | Sim budget escalator; pair with eval summaries. |
-| [`MASTERPLAN.md`](c:\Users\phili\AWBW\MASTERPLAN.md) §4, **§14** | Phase 2 narrative; **staged MCTS-0…4** rollout ladder + risk-layer implementation table. |
+| [`engine/game.py`](D:\AWBW\engine\game.py) `apply_full_turn` | Rollout primitive: one **full player turn** from SELECT. Optional **`return_trace=True`** → 5-tuple with per-step MCTS trace; default 4-tuple unchanged. |
+| [`rl/mcts.py`](D:\AWBW\rl\mcts.py) | PUCT at **turn nodes**; **`root_plans`** children; Dirichlet / `min_depth`; `make_callables_from_sb3_policy`. **Root risk layer:** `luck_resamples`, `risk_mode`, `EdgeStats`, optional JSONL decision log; default selection remains visit-based. |
+| [`scripts/symmetric_checkpoint_eval.py`](D:\AWBW\scripts\symmetric_checkpoint_eval.py) | **`eval_only`** MCTS; telemetry JSON; CLI for luck/risk; **`mcts_root_entropy`**, **`mcts_chosen_risk`**. |
+| [`tools/mcts_health.py`](D:\AWBW\tools\mcts_health.py) | Competence gate for turning MCTS on per machine. |
+| [`tools/mcts_escalator.py`](D:\AWBW\tools\mcts_escalator.py) | Sim budget escalator; pair with eval summaries. |
+| [`MASTERPLAN.md`](D:\AWBW\MASTERPLAN.md) §4, **§14** | Phase 2 narrative; **staged MCTS-0…4** rollout ladder + risk-layer implementation table. |
 
 **Rollout stages** are in **MASTERPLAN §14** (MCTS-0 … MCTS-4). This campaign file is **scale-up / perf / tuning**, not a separate stage ladder.
 
@@ -145,7 +145,7 @@ Make **turn-level PUCT** in this repo ([`rl/mcts.py`](c:\Users\phili\AWBW\rl\mct
 ### 3. Exploration / “DeepMind-style” stochasticism
 
 - **PUCT:** grid-tune **`c_puct`** against fixed eval matrix and wall budget.
-- **Dirichlet:** root-only; **ε > 0** for exploratory runs; **ε = 0** for strict promotion (see [`docs/mcts_review_composer_o.md`](c:\Users\phili\AWBW\docs\mcts_review_composer_o.md)).
+- **Dirichlet:** root-only; **ε > 0** for exploratory runs; **ε = 0** for strict promotion (see [`docs/mcts_review_composer_o.md`](D:\AWBW\docs\mcts_review_composer_o.md)).
 - **Final selection temperature:** `0` = argmax visits for eval; `> 0` only if generating training targets or intentional stochastic play.
 - **Plan diversity:** `_sample_plans` relies on **stochastic** policy rollouts — if diversity collapses, fix **policy entropy / rollout temperature** before raising sim count.
 
@@ -217,12 +217,12 @@ When you dig into papers, skim for **(a)** branching assumptions, **(b)** determ
 
 ## Related reading
 
-- [`docs/mcts_review_composer_o.md`](c:\Users\phili\AWBW\docs\mcts_review_composer_o.md) — Phase 11b audit.
-- [`.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`](c:\Users\phili\AWBW\.cursor\plans\train.py_fps_campaign_c26ce6d4.plan.md) — Phase 11 MCTS spine (historical).
-- [`docs/SOLO_TRAINING.md`](c:\Users\phili\AWBW\docs\SOLO_TRAINING.md) — fleet MCTS gate behavior.
+- [`docs/mcts_review_composer_o.md`](D:\AWBW\docs\mcts_review_composer_o.md) — Phase 11b audit.
+- [`.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`](D:\AWBW\.cursor\plans\train.py_fps_campaign_c26ce6d4.plan.md) — Phase 11 MCTS spine (historical).
+- [`docs/SOLO_TRAINING.md`](D:\AWBW\docs\SOLO_TRAINING.md) — fleet MCTS gate behavior.
 
 ---
 
 ## Plan file
 
-`c:\Users\phili\AWBW\.cursor\plans\mcts_optimization_campaign.plan.md`
+`D:\AWBW\.cursor\plans\mcts_optimization_campaign.plan.md`

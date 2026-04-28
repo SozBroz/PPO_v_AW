@@ -25,7 +25,7 @@ gating. **One fix shipped, one rolled back on PHP-oracle evidence.**
   evidence on game `1628546`. Future agents reading the docstring will
   understand exactly why the obvious bonus is intentionally absent.
 
-```440:482:c:\Users\phili\AWBW\engine\game.py
+```440:482:D:\AWBW\engine\game.py
     def _grant_income(self, player: int) -> None:
         """
         Apply per-turn income to ``player``'s treasury using AWBW rules:
@@ -50,7 +50,7 @@ gating. **One fix shipped, one rolled back on PHP-oracle evidence.**
   imported for other callers).
 - Docstring cites the AWBW CO Chart and 10T section 3.
 
-```697:718:c:\Users\phili\AWBW\engine\action.py
+```697:718:D:\AWBW\engine\action.py
 def _build_cost(ut: UnitType, state: GameState, player: int, pos: tuple[int, int]) -> int:
     """Adjusted build cost after CO modifiers.
 

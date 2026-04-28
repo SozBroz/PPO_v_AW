@@ -1,7 +1,7 @@
 # Phase 11Z — Post-merge integration gate
 
 **Date:** 2026-04-21  
-**Workspace:** `C:\Users\phili\AWBW`  
+**Workspace:** `D:\AWBW`  
 **Scope:** READ + TEST only — validates combined **11A + 11B + 11C** state (no edits to engine, tests, or tools in this phase).
 
 ---

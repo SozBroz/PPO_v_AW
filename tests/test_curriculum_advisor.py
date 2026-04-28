@@ -8,11 +8,9 @@ from typing import Any
 from tools.curriculum_advisor import (
     DEFAULT_SCHEDULE,
     CompetenceMetrics,
-    CurriculumStage,
     CurriculumState,
     FLAG_PRESENT,
     PROBE_OWNED_KEYS,
-    classify_stage,
     compute_metrics,
     compute_proposal,
     compute_proposal_stable,
@@ -32,10 +30,12 @@ def _row(
     turns: int = 40,
     p1_hp_loss: float = 10.0,
     p0_hp_loss: float = 2.0,
+    done: bool = True,
 ) -> dict:
     d: dict[str, Any] = {
         "machine_id": mid,
         "turns": turns,
+        "done": done,
         "captures_completed_p0": cap_p0,
         "terrain_usage_p0": terrain,
         "winner": winner,
@@ -54,21 +54,17 @@ def _write_log(p: Path, rows: list[dict]) -> None:
 
 
 def test_normalize_stage_d_shorthand() -> None:
-    assert (
-        normalize_curriculum_stage_name("stage_d")
-        == "stage_d_gl_std_map_pool_t4"
-    )
+    assert normalize_curriculum_stage_name("stage_a") == "stage_a0_capture_decay"
+    assert normalize_curriculum_stage_name("stage_b") == "stage_b0_capture_decay"
+    assert normalize_curriculum_stage_name("stage_d") == "stage_d0_gl_std_map_pool_stub"
     assert (
         normalize_curriculum_stage_name("stage_d_gl_std_map_pool_t3")
-        == "stage_d_gl_std_map_pool_t4"
+        == "stage_d0_gl_std_map_pool_stub"
     )
     assert normalize_curriculum_stage_name("stage_d_self_play_pure") == (
-        "stage_f_self_play_pure"
+        "stage_f0_full_random_stub"
     )
-    assert (
-        normalize_curriculum_stage_name("stage_g")
-        == "stage_g_mcts_eval_ready"
-    )
+    assert normalize_curriculum_stage_name("stage_g") == "stage_g_mcts_eval_ready"
 
 
 def test_read_state_accepts_stage_d_shorthand(tmp_path: Path) -> None:
@@ -86,42 +82,22 @@ def test_read_state_accepts_stage_d_shorthand(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     st = read_state(p)
-    assert st.current_stage_name == "stage_d_gl_std_map_pool_t4"
-
-
-def test_classify_respects_stage_d_shorthand() -> None:
-    st = CurriculumState(
-        current_stage_name="stage_d",
-        games_observed_in_stage=0,
-        entered_stage_at_ts=0.0,
-        last_proposal_ts=0.0,
-        last_seen_finished_games=0,
-    )
-    m = CompetenceMetrics(
-        games_in_window=0,
-        capture_sense_score=0.0,
-        terrain_usage_score=0.0,
-        army_value_lead=0.0,
-        win_rate=0.0,
-        episode_quality=0.0,
-    )
-    name, reason = classify_stage(m, st, DEFAULT_SCHEDULE)
-    assert name == "stage_d_gl_std_map_pool_t4"
-    assert "stage_d_gl_std_map_pool_t4" in reason or "holding" in reason
+    assert st.current_stage_name == "stage_d0_gl_std_map_pool_stub"
 
 
 def test_cold_start_stage_a(tmp_path: Path) -> None:
+    """First schedule row is family A decay (scaffolded)."""
     log = tmp_path / "game_log.jsonl"
     _write_log(log, [])
     st = CurriculumState(
-        current_stage_name=DEFAULT_SCHEDULE[0].name,
+        current_stage_name=DEFAULT_SCHEDULE[0].stage_id,
         games_observed_in_stage=0,
         entered_stage_at_ts=0.0,
         last_proposal_ts=0.0,
         last_seen_finished_games=0,
     )
     prop = compute_proposal(log, st, machine_id="m1")
-    assert prop.stage_name == DEFAULT_SCHEDULE[0].name
+    assert prop.stage_name == DEFAULT_SCHEDULE[0].stage_id
     assert prop.args_overrides["--cold-opponent"] == "greedy_capture"
     assert prop.args_overrides.get("--capture-move-gate") == FLAG_PRESENT
 
@@ -131,18 +107,19 @@ def test_metrics_insufficient_no_advance(tmp_path: Path) -> None:
     rows = [_row(mid="m1", cap_p0=0.0, terrain=0.0, winner=1, turns=10)] * 250
     _write_log(log, rows)
     st = CurriculumState(
-        current_stage_name=DEFAULT_SCHEDULE[0].name,
+        current_stage_name=DEFAULT_SCHEDULE[0].stage_id,
         games_observed_in_stage=250,
         entered_stage_at_ts=0.0,
         last_proposal_ts=0.0,
         last_seen_finished_games=0,
     )
     prop, st2 = compute_proposal_stable(log, st, machine_id="m1", window_games=100)
-    assert prop.stage_name == DEFAULT_SCHEDULE[0].name
-    assert st2.current_stage_name == DEFAULT_SCHEDULE[0].name
+    assert prop.stage_name == DEFAULT_SCHEDULE[0].stage_id
+    assert st2.current_stage_name == DEFAULT_SCHEDULE[0].stage_id
 
 
 def test_advance_when_gates_met(tmp_path: Path) -> None:
+    """PROMOTE from stage_a1_capture_clean uses decide_stage_transition (zeros on row)."""
     log = tmp_path / "game_log.jsonl"
     good = _row(
         mid="m1",
@@ -154,23 +131,23 @@ def test_advance_when_gates_met(tmp_path: Path) -> None:
     )
     _write_log(log, [good] * 220)
     st = CurriculumState(
-        current_stage_name=DEFAULT_SCHEDULE[0].name,
+        current_stage_name="stage_a1_capture_clean",
         games_observed_in_stage=200,
         entered_stage_at_ts=0.0,
         last_proposal_ts=0.0,
-        last_seen_finished_games=0,
+        last_seen_finished_games=220,
     )
     prop, st2 = compute_proposal_stable(log, st, machine_id="m1", window_games=100)
-    assert prop.stage_name == DEFAULT_SCHEDULE[1].name
-    assert prop.args_overrides["--cold-opponent"] == "greedy_mix"
-    assert st2.current_stage_name == DEFAULT_SCHEDULE[1].name
+    assert prop.stage_name == "stage_a1_capture_clean"
+    assert prop.args_overrides["--cold-opponent"] == "greedy_capture"
+    assert st2.current_stage_name == "stage_b0_capture_decay"
 
 
 def test_idempotent_proposal_same_state(tmp_path: Path) -> None:
     log = tmp_path / "game_log.jsonl"
     _write_log(log, [_row(mid="m1")] * 80)
     st = CurriculumState(
-        current_stage_name=DEFAULT_SCHEDULE[0].name,
+        current_stage_name=DEFAULT_SCHEDULE[0].stage_id,
         games_observed_in_stage=50,
         entered_stage_at_ts=0.0,
         last_proposal_ts=0.0,
@@ -183,15 +160,9 @@ def test_idempotent_proposal_same_state(tmp_path: Path) -> None:
     assert p1.reason == p2.reason
 
 
-def test_never_regresses_below_stage_a(tmp_path: Path) -> None:
-    metrics = CompetenceMetrics(
-        games_in_window=10,
-        capture_sense_score=0.0,
-        terrain_usage_score=0.0,
-        army_value_lead=0.0,
-        win_rate=0.0,
-        episode_quality=0.0,
-    )
+def test_unknown_stage_id_resolves_to_first_schedule_row(tmp_path: Path) -> None:
+    log = tmp_path / "game_log.jsonl"
+    _write_log(log, [_row(mid="m1")] * 80)
     st = CurriculumState(
         current_stage_name="bogus_unknown",
         games_observed_in_stage=999,
@@ -199,75 +170,41 @@ def test_never_regresses_below_stage_a(tmp_path: Path) -> None:
         last_proposal_ts=0.0,
         last_seen_finished_games=0,
     )
-    name, _reason = classify_stage(metrics, st, DEFAULT_SCHEDULE)
-    assert name == DEFAULT_SCHEDULE[0].name
+    prop = compute_proposal(log, st, machine_id="m1")
+    assert prop.stage_name == DEFAULT_SCHEDULE[0].stage_id
 
 
-def test_terminal_stage_g_never_advances(tmp_path: Path) -> None:
+def test_terminal_stage_f2_has_no_scheduled_successor(tmp_path: Path) -> None:
+    """Last YAML row is stage_f2_full_random_clean; PROMOTE leaves state on f2 if _find_next_stage is None."""
     log = tmp_path / "game_log.jsonl"
     _write_log(log, [_row(mid="m1")] * 50)
     st = CurriculumState(
-        current_stage_name=DEFAULT_SCHEDULE[-1].name,
+        current_stage_name=DEFAULT_SCHEDULE[-1].stage_id,
         games_observed_in_stage=10,
         entered_stage_at_ts=0.0,
         last_proposal_ts=0.0,
         last_seen_finished_games=0,
     )
     prop = compute_proposal(log, st, machine_id="m1")
-    assert prop.stage_name == DEFAULT_SCHEDULE[-1].name
+    assert DEFAULT_SCHEDULE[-1].stage_id == "stage_f2_full_random_clean"
+    assert prop.stage_name == DEFAULT_SCHEDULE[-1].stage_id
 
 
-def test_stage_a_blocked_median_captures(tmp_path: Path) -> None:
-    """§10g: median captures must reach 4 before leaving stage A."""
+def test_stage_a1_blocked_median_captures(tmp_path: Path) -> None:
+    """Promotion from a1_clean requires min_captures_by_day5_p50 (4): cap_p0 3 stays on a1."""
     log = tmp_path / "game_log.jsonl"
     borderline = _row(mid="m1", cap_p0=3.0, first_p0_capture_p0_step=8.0)
     _write_log(log, [borderline] * 220)
     st = CurriculumState(
-        current_stage_name=DEFAULT_SCHEDULE[0].name,
+        current_stage_name="stage_a1_capture_clean",
         games_observed_in_stage=200,
         entered_stage_at_ts=0.0,
         last_proposal_ts=0.0,
-        last_seen_finished_games=0,
+        last_seen_finished_games=220,
     )
     prop, st2 = compute_proposal_stable(log, st, machine_id="m1", window_games=100)
-    assert prop.stage_name == DEFAULT_SCHEDULE[0].name
-    assert st2.current_stage_name == DEFAULT_SCHEDULE[0].name
-
-
-def test_advance_f_to_g_includes_mcts_eval_only(tmp_path: Path) -> None:
-    log = tmp_path / "game_log.jsonl"
-    good = _row(mid="m1", cap_p0=3.0, terrain=0.55, winner=0, turns=35)
-    _write_log(log, [good] * 450)
-    st = CurriculumState(
-        current_stage_name="stage_f_self_play_pure",
-        games_observed_in_stage=400,
-        entered_stage_at_ts=0.0,
-        last_proposal_ts=0.0,
-        last_seen_finished_games=0,
-    )
-    prop, st2 = compute_proposal_stable(
-        log, st, machine_id="m1", window_games=100
-    )
-    assert prop.stage_name == "stage_g_mcts_eval_ready"
-    assert prop.args_overrides.get("--mcts-mode") == "eval_only"
-    assert prop.args_overrides.get("--mcts-sims") == 16
-    assert st2.current_stage_name == "stage_g_mcts_eval_ready"
-
-
-def test_strips_probe_owned_keys_from_custom_schedule(tmp_path: Path) -> None:
-    bad = CurriculumStage(
-        name="x",
-        args_overrides={"--n-envs": 99, "--learner-greedy-mix": 0.1},
-        advance_when=lambda m: False,
-        min_games_in_stage=1,
-        description="test",
-    )
-    log = tmp_path / "game_log.jsonl"
-    _write_log(log, [_row(mid="m1")])
-    st = read_state(tmp_path / "missing.json")
-    prop, _ = compute_proposal_stable(log, st, schedule=[bad], machine_id="m1")
-    assert "--n-envs" not in prop.args_overrides
-    assert prop.args_overrides.get("--learner-greedy-mix") == 0.1
+    assert prop.stage_name == "stage_a1_capture_clean"
+    assert st2.current_stage_name == "stage_a1_capture_clean"
 
 
 def test_state_json_roundtrip_bytes_identical(tmp_path: Path) -> None:
@@ -289,8 +226,8 @@ def test_compute_metrics_respects_machine_filter(tmp_path: Path) -> None:
             _row(mid="b", cap_p0=0.0),
         ],
     )
-    ma = compute_metrics(log, window_games=10, machine_id="a")
-    mb = compute_metrics(log, window_games=10, machine_id="b")
+    ma, _ = compute_metrics(log, window_games=10, machine_id="a")
+    mb, _ = compute_metrics(log, window_games=10, machine_id="b")
     assert ma.capture_sense_score >= 0.9
     assert mb.capture_sense_score < 0.1
 

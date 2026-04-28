@@ -119,7 +119,7 @@ For every distinct extras `map_id`:
 
 Default `desync_audit` uses `data/amarriner_gl_std_catalog.json`. In `_iter_zip_targets`, a zip is skipped when there is **no catalog row** for its `games_id`:
 
-```263:268:c:\Users\phili\AWBW\tools\desync_audit.py
+```263:268:D:\AWBW\tools\desync_audit.py
         meta = by_id.get(gid)
         if meta is None:
             continue  # zip without catalog metadata — cannot pick map_id/COs

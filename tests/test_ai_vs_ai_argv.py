@@ -21,7 +21,7 @@ def test_argv_u_then_script_path_strips_script(ai_vs_ai_mod) -> None:
         [
             r"C:\Python\python.exe",
             "-u",
-            r"C:\Users\me\AWBW\rl\ai_vs_ai.py",
+            r"D:\AWBW\rl\ai_vs_ai.py",
             "--random",
             "--no-follow-train",
         ],

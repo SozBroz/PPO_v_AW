@@ -2,7 +2,7 @@
 import zipfile, gzip, json
 from pathlib import Path
 
-Z = Path(r"C:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Replays\1630459.zip")
+Z = Path(r"D:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Replays\1630459.zip")
 
 with zipfile.ZipFile(Z) as zf:
     blob = zf.read("a1630459")

@@ -2,7 +2,7 @@
 import gzip, io, zipfile
 from pathlib import Path
 
-path = Path(r"C:\Users\phili\AWBW\replays\126694.zip")
+path = Path(r"D:\AWBW\replays\126694.zip")
 with zipfile.ZipFile(path) as z:
     raw = z.read(z.namelist()[0])
 with gzip.open(io.BytesIO(raw)) as gz:

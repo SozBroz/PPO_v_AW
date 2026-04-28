@@ -7,7 +7,7 @@ overview: >-
 todos:
   - id: paste-masterplan-105
     content: >-
-      Insert [Draft §10.5] below into [MASTERPLAN.md](c:\Users\phili\AWBW\MASTERPLAN.md) after §10.4;
+      Insert [Draft §10.5] below into [MASTERPLAN.md](D:\AWBW\MASTERPLAN.md) after §10.4;
       add optional one-liner in §2 stack + optional §7 row; bump Last updated
     status: pending
   - id: read-through-105
@@ -26,9 +26,9 @@ Document **league-style ratings** (Elo or Glicko-2) as a **strategic backlog** f
 
 | Artifact | Role |
 |----------|------|
-| [scripts/symmetric_checkpoint_eval.py](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py) | Seat-symmetric H2H |
-| [scripts/promote.py](c:\Users\phili\AWBW\scripts\promote.py) / fleet verdicts | `best.zip` gate |
-| [rl/fleet_env.py](c:\Users\phili\AWBW\rl\fleet_env.py) `prune_checkpoint_zip_curated` | Pool quality/diversity |
+| [scripts/symmetric_checkpoint_eval.py](D:\AWBW\scripts\symmetric_checkpoint_eval.py) | Seat-symmetric H2H |
+| [scripts/promote.py](D:\AWBW\scripts\promote.py) / fleet verdicts | `best.zip` gate |
+| [rl/fleet_env.py](D:\AWBW\rl\fleet_env.py) `prune_checkpoint_zip_curated` | Pool quality/diversity |
 | **Gap** | No global rating table over checkpoint identities |
 
 Belongs in the same **eval ladder** family as MASTERPLAN §10.3 (BoN / Bo11, `best.zip` thresholding).
@@ -87,5 +87,5 @@ flowchart LR
 ## Plan file
 
 ```text
-c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md
+D:\AWBW\.cursor\plans\elo_league_masterplan.plan.md
 ```

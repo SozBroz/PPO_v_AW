@@ -37,7 +37,7 @@ Treat the following as **mandatory** pre-read before you draft or change plan te
 1. **Title** — First line of plan body: level-1 heading with a clear name.
 2. **Overview** — One or two sentences: goal, scope, non-goals if needed.
 3. **Todos** — Frontmatter `todos` array: short `id`, actionable `content`, `status: pending` until executed. Merge duplicates; avoid vague todos.
-4. **Repository truth** — Cite real paths as **markdown links with full absolute paths** on Windows, e.g. `[train.py](c:\Users\phili\AWBW\train.py)`. Prefer “where to find X” tables for large efforts.
+4. **Repository truth** — Cite real paths as **markdown links with full absolute paths** on Windows, e.g. `[train.py](D:\AWBW\train.py)`. Prefer “where to find X” tables for large efforts.
 5. **Critical section** — Explicit risks, wrong assumptions, and “what not to do” beats polite vagueness.
 6. **Diagrams** — Mermaid only when it clarifies; follow plan-tool rules (no spaces in node IDs, quote edge labels with special chars).
 7. **Proportionality** — Small change = short plan. Do not paste the whole codebase.
@@ -47,13 +47,13 @@ Treat the following as **mandatory** pre-read before you draft or change plan te
 **Every time you present a plan to the user** (chat reply after `CreatePlan` or after saving/editing the plan file), the **last substantive line** of your message must be the **absolute path** to that plan file on disk, on its own line, plain text (no markdown link required), for example:
 
 ```text
-c:\Users\phili\.cursor\plans\human_vs_bot_ui_and_learning_1b156a53.plan.md
+D:\Users\phili\.cursor\plans\human_vs_bot_ui_and_learning_1b156a53.plan.md
 ```
 
 Rules:
 
 - Use the **actual** path returned by the tool or shown in the workspace / `~/.cursor/plans/` listing — do not shorten, do not use `~`, do not make up a name.
-- If the plan was created under the **project** tree (e.g. `c:\Users\phili\AWBW\.cursor\plans\...`), use that absolute path instead.
+- If the plan was created under the **project** tree (e.g. `D:\AWBW\.cursor\plans\...`), use that absolute path instead.
 - Optional but good: add the same line as a final footer **inside** the plan markdown under a `---` and heading `## Plan file` so the document is self-locating when copied.
 
 ## After confirmation
@@ -64,7 +64,7 @@ When the user **approves** the plan, switch to execution mode and work todos in 
 
 Cursor matches skills partly via `description`; for **every chat** that might only *reference* a plan without opening `*.plan.md`, add a project rule so the agent always sees the hook.
 
-Create file **`c:\Users\phili\AWBW\.cursor\rules\create-plan.mdc`** (same folder as `persona.mdc`). If the environment blocks creating `.mdc` files, paste the template from the repo or switch to Agent mode and add it.
+Create file **`D:\AWBW\.cursor\rules\create-plan.mdc`** (same folder as `persona.mdc`). If the environment blocks creating `.mdc` files, paste the template from the repo or switch to Agent mode and add it.
 
 Template (full file body — copy verbatim):
 
@@ -81,7 +81,7 @@ alwaysApply: true
 
 If the user’s message involves **any** of: creating a plan; updating, editing, or merging into a plan; referencing a plan file or its contents; iterating plan-mode deliverables; critiquing or extending written plan sections; or discussing `.plan.md` / `.cursor/plans` artifacts — **read and follow**:
 
-`.cursor/skills/create-plan/SKILL.md` (project root: c:\Users\phili\AWBW)
+`.cursor/skills/create-plan/SKILL.md` (project root: D:\AWBW)
 
 **When to skip this as primary work:** the user is **only** ordering execution of an already-fixed plan (e.g. “go implement the plan”) with **no** request to change plan text — then implement; the skill’s “mandatory close” (absolute plan path) still applies when you surface a plan to the user.
 
@@ -92,5 +92,5 @@ Until that file exists, rely on the **skill `description`** above for discovery.
 
 ## Related
 
-- Cursor skill authoring: [create-skill](C:\Users\phili\.cursor\skills-cursor\create-skill\SKILL.md) (personal; do not write new skills into `skills-cursor`).
-- This repo’s engine/replay context: [awbw-engine](c:\Users\phili\AWBW\.cursor\skills\awbw-engine\SKILL.md), [awbw-replay-system](c:\Users\phili\AWBW\.cursor\skills\awbw-replay-system\SKILL.md).
+- Cursor skill authoring: [create-skill](D:\Users\phili\.cursor\skills-cursor\create-skill\SKILL.md) (personal; do not write new skills into `skills-cursor`).
+- This repo’s engine/replay context: [awbw-engine](D:\AWBW\.cursor\skills\awbw-engine\SKILL.md), [awbw-replay-system](D:\AWBW\.cursor\skills\awbw-replay-system\SKILL.md).

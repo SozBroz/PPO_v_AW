@@ -27,26 +27,28 @@
 # Widening rule:
 #   When distribution_change is non-null (co_pool, map_pool, both),
 #   the stage MUST have sub-stages (stub -> decay -> clean).
-#   A stage without widening (distribution_change: none) is inherently "clean".
+#   A stage without widening (distribution_change: none) may still use explicit
+#   decay → clean substages (families A, B, C, …) when scaffolds must taper before promotion.
 #
 
 stages:
 
   # ──────────────────────────────────────────────────────────
   # Stage A — Cold capture bootstrap
-  # Widening: none (single CO, single map)
-  # Sub-stages: N/A — treated as implicit "clean" w/ scaffolds
+  # Widening: none
+  # Sub-stages: A0_decay (capture gate + scaffolding taper) → A1_clean (promotion eval, zeros)
+  # Legacy stage_a_capture_bootstrap maps to stage_a1_capture_clean (hands-off migration).
   # ──────────────────────────────────────────────────────────
-  - stage_id: stage_a_capture_bootstrap
+  - stage_id: stage_a0_capture_decay
     stage_family: A
-    stage_phase: clean          # scaffold-present but promotion allowed (bootstrap only)
+    stage_phase: decay
     distribution_change: none
-    promotion_allowed: true
+    promotion_allowed: false
 
     map_pool_mode: fixed
-    map_pool: [123858]          # Misery
+    map_pool: [123858]
     co_pool_mode: fixed
-    co_pool: [14]               # Jess
+    co_pool: [14]
 
     scaffolds:
       learner_greedy_mix: 0.30
@@ -54,12 +56,61 @@ stages:
       opening_book_prob: 1.0
 
     cold_opponent: greedy_capture
+    learner_greedy_mix_schedule: [0.30, 0.15, 0.00]
+    capture_move_gate_schedule: [true, true, false]
+    opening_book_prob_schedule: [1.0, 0.50, 0.00]
+
+    min_episodes: 600
+    stub_to_decay: null
+    decay_to_clean:
+      min_episodes: 600
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_invalid_action_rate: 0.005
+      max_first_capture_step_p50: 15
+      min_captures_by_day5_p50: 4
+    rollback_criteria:
+      after_episodes: 2400
+      max_invalid_action_rate_above: 0.02
+      first_capture_step_p50_above: 22
+      captures_by_day5_p50_below: 2
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 600
+      min_terminal_rate: 0.20
+      max_invalid_action_rate: 0.005
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 4
+
+    description: >
+      Bootstrap scaffold decay (greedy_capture). Three-phase schedule to zero scaffolds;
+      advance to A1 clean when decay_to_clean criteria pass.
+
+  - stage_id: stage_a1_capture_clean
+    stage_family: A
+    stage_phase: clean
+    distribution_change: none
+    promotion_allowed: true
+
+    map_pool_mode: fixed
+    map_pool: [123858]
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.0
+      capture_move_gate: false
+      opening_book_prob: 0.0
+
+    cold_opponent: greedy_capture
     learner_greedy_mix_schedule: null
     capture_move_gate_schedule: null
     opening_book_prob_schedule: null
 
     min_episodes: 200
-    stub_to_decay: null         # no widening → no stub
+    stub_to_decay: null
     decay_to_clean: null
     rollback_criteria: null
 
@@ -80,16 +131,63 @@ stages:
       min_captures_by_day5_p50: 4
 
     description: >
-      Cold start: greedy_capture opponent, capture-move gate, Jess mirror
-      (no Andy free repair). All scaffolds active. This is the bootstrap — it
-      has promotion_allowed because there is no prior distribution to widen from,
-      but metrics bars are deliberately low.
+      Capture bootstrap eval — scaffolds off. PROMOTE to family B when criteria pass.
 
   # ──────────────────────────────────────────────────────────
   # Stage B — Capture competent
-  # Widening: none
+  # Sub-stages: B0_decay (greedy_mix + gate taper) → B1_clean (promotion eval)
+  # Legacy stage_b_capture_competent maps to stage_b1_capture_clean.
   # ──────────────────────────────────────────────────────────
-  - stage_id: stage_b_capture_competent
+  - stage_id: stage_b0_capture_decay
+    stage_family: B
+    stage_phase: decay
+    distribution_change: none
+    promotion_allowed: false
+
+    map_pool_mode: fixed
+    map_pool: [123858]
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.15
+      capture_move_gate: true
+      opening_book_prob: 1.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: [0.15, 0.05, 0.00]
+    capture_move_gate_schedule: [true, true, false]
+    opening_book_prob_schedule: [1.0, 0.5, 0.0]
+
+    min_episodes: 900
+    stub_to_decay: null
+    decay_to_clean:
+      min_episodes: 900
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+    rollback_criteria:
+      after_episodes: 4000
+      max_invalid_action_rate_above: 0.015
+      first_capture_step_p50_above: 18
+      captures_by_day5_p50_below: 2
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 900
+      min_terminal_rate: 0.30
+      max_invalid_action_rate: 0.003
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+
+    description: >
+      Capture competent scaffold decay (greedy_mix opponent). Three-phase schedule;
+      advance to B1 clean when decay_to_clean criteria pass.
+
+  - stage_id: stage_b1_capture_clean
     stage_family: B
     stage_phase: clean
     distribution_change: none
@@ -101,9 +199,9 @@ stages:
     co_pool: [14]
 
     scaffolds:
-      learner_greedy_mix: 0.15
-      capture_move_gate: true
-      opening_book_prob: 1.0
+      learner_greedy_mix: 0.0
+      capture_move_gate: false
+      opening_book_prob: 0.0
 
     cold_opponent: greedy_mix
     learner_greedy_mix_schedule: null
@@ -132,14 +230,64 @@ stages:
       min_captures_by_day5_p50: 3
 
     description: >
-      Capture solid; broaden cold opponent to greedy_mix.
-      Reduce greedy_mix from 0.30 to 0.15. Keep capture gate.
+      Capture competent eval — scaffolds off. PROMOTE to stage_c0 when criteria pass.
 
   # ──────────────────────────────────────────────────────────
-  # Stage C — Terrain competent
-  # Widening: none (same map, same CO)
+  # Stage C — Terrain competent (narrow distribution; scaffold decay then promotion eval)
+  # Sub-stages: C0_decay (schedules taper) → C1_clean (no scaffolds; promotion_allowed)
+  # Legacy id stage_c_terrain_competent normalizes to stage_c1_terrain_competent.
   # ──────────────────────────────────────────────────────────
-  - stage_id: stage_c_terrain_competent
+  - stage_id: stage_c0_terrain_decay
+    stage_family: C
+    stage_phase: decay
+    distribution_change: none
+    promotion_allowed: false
+
+    map_pool_mode: fixed
+    map_pool: [123858]
+    co_pool_mode: fixed
+    co_pool: [14]
+
+    scaffolds:
+      learner_greedy_mix: 0.05
+      capture_move_gate: false
+      opening_book_prob: 1.0
+
+    cold_opponent: greedy_mix
+    learner_greedy_mix_schedule: [0.05, 0.00]
+    capture_move_gate_schedule: [false]
+    opening_book_prob_schedule: [1.0, 0.0]
+
+    min_episodes: 500
+    stub_to_decay: null
+    decay_to_clean:
+      # Satisfied when games_observed_in_stage >= min_episodes (decay row), not rolling window.
+      min_episodes: 500
+      learner_greedy_mix_at_end: 0.0
+      capture_move_gate_at_end: false
+      opening_book_prob_at_end: 0.0
+      max_invalid_action_rate: 0.002
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+    rollback_criteria:
+      after_episodes: 1500
+      max_invalid_action_rate_above: 0.01
+      first_capture_step_p50_above: 18
+      captures_by_day5_p50_below: 2
+
+    promotion_criteria: null
+    move_forward_criteria:
+      min_episodes: 500
+      min_terminal_rate: 0.40
+      max_invalid_action_rate: 0.002
+      max_first_capture_step_p50: 12
+      min_captures_by_day5_p50: 3
+
+    description: >
+      Terrain phase with greedy_mix and human opening book; schedules taper to zero.
+      No promotion from this row — advance to C1 clean when decay_to_clean criteria pass.
+
+  - stage_id: stage_c1_terrain_competent
     stage_family: C
     stage_phase: clean
     distribution_change: none
@@ -151,9 +299,9 @@ stages:
     co_pool: [14]
 
     scaffolds:
-      learner_greedy_mix: 0.05
+      learner_greedy_mix: 0.0
       capture_move_gate: false
-      opening_book_prob: 1.0
+      opening_book_prob: 0.0
 
     cold_opponent: greedy_mix
     learner_greedy_mix_schedule: null
@@ -182,8 +330,8 @@ stages:
       min_captures_by_day5_p50: 3
 
     description: >
-      Terrain competent; drop capture-move gate; minimal greedy mix.
-      All scaffolds reduced. Winrate bar 0.62.
+      Terrain competent eval — all scaffolds off. Promotion to stage D when
+      promotion_criteria pass (including min_winrate 0.62).
 
   # ══════════════════════════════════════════════════════════
   # Stage D — GL Std map pool widening (single Jess CO)

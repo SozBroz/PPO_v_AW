@@ -26,7 +26,7 @@ READ-ONLY recon for Phase 11. **No engine edits** in this phase.
 
 **Source:** `engine/game.py` lines **440–470** (see citation block below).
 
-```440:470:c:\Users\phili\AWBW\engine\game.py
+```440:470:D:\AWBW\engine\game.py
     def _grant_income(self, player: int) -> None:
         """
         Apply per-turn income to ``player``'s treasury using AWBW rules:

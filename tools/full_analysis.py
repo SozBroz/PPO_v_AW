@@ -6,13 +6,13 @@ import gzip, io, re, zipfile, json, sys
 from pathlib import Path
 from collections import defaultdict
 
-sys.path.insert(0, r"C:\Users\phili\AWBW")
+sys.path.insert(0, r"D:\AWBW")
 
-TERRAIN_133665 = Path(r"C:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\133665.json")
-TERRAIN_173170 = Path(r"C:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\173170.json")
-REF_ZIP  = Path(r"C:\Users\phili\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip")
+TERRAIN_133665 = Path(r"D:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\133665.json")
+TERRAIN_173170 = Path(r"D:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\173170.json")
+REF_ZIP  = Path(r"D:\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip")
 import glob
-gen = sorted(glob.glob(r"C:\Users\phili\AWBW\replays\1?????.zip"))
+gen = sorted(glob.glob(r"D:\AWBW\replays\1?????.zip"))
 CAND_ZIP = Path(gen[-1]) if gen else None
 
 

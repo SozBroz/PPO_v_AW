@@ -27,7 +27,7 @@ from typing import Any
 
 
 DEFAULT_ORACLE = Path(
-    r"C:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Replays\1630459.zip"
+    r"D:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Replays\1630459.zip"
 )
 
 

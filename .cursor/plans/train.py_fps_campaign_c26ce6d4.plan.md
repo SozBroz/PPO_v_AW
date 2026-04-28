@@ -416,14 +416,14 @@ A read-only audit of `logs/` and `fleet/` against the orchestrator's data needs 
 
 ### What's already in place (good news)
 
-- **Phase 0a logging shipped** (todo flipped to `completed`). 215 rows of `log_schema_version: "1.6"` in current [`logs/game_log.jsonl`](c:\Users\phili\AWBW\logs\game_log.jsonl) include `wall_p0_s`, `wall_p1_s`, `worker_rss_mb`. Diagnostics callback at [`rl/self_play.py:485`](c:\Users\phili\AWBW\rl\self_play.py) publishes `diag/env_collect_s`, `diag/env_steps_per_s_collect`, `diag/ppo_update_s`, `diag/env_steps_per_s_total`. TensorBoard event files exist at `logs/MaskablePPO_0/` (31 files, 471 KB).
+- **Phase 0a logging shipped** (todo flipped to `completed`). 215 rows of `log_schema_version: "1.6"` in current [`logs/game_log.jsonl`](D:\AWBW\logs\game_log.jsonl) include `wall_p0_s`, `wall_p1_s`, `worker_rss_mb`. Diagnostics callback at [`rl/self_play.py:485`](D:\AWBW\rl\self_play.py) publishes `diag/env_collect_s`, `diag/env_steps_per_s_collect`, `diag/ppo_update_s`, `diag/env_steps_per_s_total`. TensorBoard event files exist at `logs/MaskablePPO_0/` (31 files, 471 KB).
 - **All Phase 10 game_log fields** already present except `machine_id` (blocker, see below) and `terrain_usage_p0` (Phase 11e, scheduled).
-- **Fleet eval verdict shape** already covers everything 10b's curated pool and 10e's promotion need: `schema_version`, `candidate_wins`, `baseline_wins`, `games_decided`, `winrate`, `promotion_threshold_met`, `promoted_candidate_zip`, AND `machine_id` of origin ([`scripts/fleet_eval_daemon.py:166-184`](c:\Users\phili\AWBW\scripts\fleet_eval_daemon.py), [`rl/fleet_env.py:249-270`](c:\Users\phili\AWBW\rl\fleet_env.py)).
+- **Fleet eval verdict shape** already covers everything 10b's curated pool and 10e's promotion need: `schema_version`, `candidate_wins`, `baseline_wins`, `games_decided`, `winrate`, `promotion_threshold_met`, `promoted_candidate_zip`, AND `machine_id` of origin ([`scripts/fleet_eval_daemon.py:166-184`](D:\AWBW\scripts\fleet_eval_daemon.py), [`rl/fleet_env.py:249-270`](D:\AWBW\rl\fleet_env.py)).
 - **All Phase 10/11 sentinel files** confirmed missing (as expected): `fleet_orchestrator.jsonl`, `curriculum_state.json`, `restart_request.json`, `reload_request.json`, `proposed_args.json`, `diagnosis.json`, `mcts_health.json`, `machine_caps.json`, `mcts_escalator.jsonl`. Implementation surface is clean.
 
 ### The one blocker — `machine_id` not in `game_log.jsonl`
 
-[`rl/env.py:_log_finished_game`](c:\Users\phili\AWBW\rl\env.py) (lines 1140–1252) and [`rl/env.py:_append_game_log_line`](c:\Users\phili\AWBW\rl\env.py) (lines 98–142) never set `machine_id` on the row. Every per-machine median, every rolling-200-game gate in 10g / 10h / 11d depends on this field.
+[`rl/env.py:_log_finished_game`](D:\AWBW\rl\env.py) (lines 1140–1252) and [`rl/env.py:_append_game_log_line`](D:\AWBW\rl\env.py) (lines 98–142) never set `machine_id` on the row. Every per-machine median, every rolling-200-game gate in 10g / 10h / 11d depends on this field.
 
 Fix is ~3 lines in `_append_game_log_line` — read `os.environ.get("AWBW_MACHINE_ID")` at write time, merge into the dict alongside `game_id`. Combine the schema bump with Phase 11e's `terrain_usage_p0` field so we move 1.6 → 1.7 once, not twice.
 
@@ -431,18 +431,18 @@ Fix is ~3 lines in `_append_game_log_line` — read `os.environ.get("AWBW_MACHIN
 
 ### Three smaller logging fixes (PREREQ for cleanliness, not blockers)
 
-- **Trainer process never writes `status.json`.** Only [`scripts/fleet_eval_daemon.py:102-108`](c:\Users\phili\AWBW\scripts\fleet_eval_daemon.py) calls `write_status_json`. The orchestrator's stuck-worker detection in 10e has no trainer heartbeat to read. Fix: call [`rl/fleet_env.py:write_status_json`](c:\Users\phili\AWBW\rl\fleet_env.py) (already exists, line 200) once per outer training cycle in [`rl/self_play.py`](c:\Users\phili\AWBW\rl\self_play.py) around line 993, with `task="train"`, `current_target=str(self.checkpoint_dir / "latest.zip")`, `extra={"steps_done": steps_done, "n_envs": ...}`.
+- **Trainer process never writes `status.json`.** Only [`scripts/fleet_eval_daemon.py:102-108`](D:\AWBW\scripts\fleet_eval_daemon.py) calls `write_status_json`. The orchestrator's stuck-worker detection in 10e has no trainer heartbeat to read. Fix: call [`rl/fleet_env.py:write_status_json`](D:\AWBW\rl\fleet_env.py) (already exists, line 200) once per outer training cycle in [`rl/self_play.py`](D:\AWBW\rl\self_play.py) around line 993, with `task="train"`, `current_target=str(self.checkpoint_dir / "latest.zip")`, `extra={"steps_done": steps_done, "n_envs": ...}`.
 - **Verdict JSON has no checkpoint zip mtime.** Verdict has `timestamp` (when verdict was written) and `ckpt` (filename) but not the zip's actual `st_mtime`. 10b's diversity-bucket rule wants real zip age. **Decision: orchestrator `stat()`s the zip itself when curating** — already reading shared disk, no producer change needed. Document in the orchestrator code, not a new field.
-- **`slow_games.jsonl` is currently noise.** 214 of 215 episodes flagged "slow" because the 60 s threshold ([`rl/env.py:1258-1263`](c:\Users\phili\AWBW\rl\env.py)) is meaningless at current 26 fps × n_envs=6. **Do not raise the threshold to mute it** — the threshold's signal is exactly what Phases 1–6 of the FPS campaign restore. Document as known false-positive; revisit after Phase 6.
+- **`slow_games.jsonl` is currently noise.** 214 of 215 episodes flagged "slow" because the 60 s threshold ([`rl/env.py:1258-1263`](D:\AWBW\rl\env.py)) is meaningless at current 26 fps × n_envs=6. **Do not raise the threshold to mute it** — the threshold's signal is exactly what Phases 1–6 of the FPS campaign restore. Document as known false-positive; revisit after Phase 6.
 
 ### Two housekeeping items
 
-- **`logs/logs/` is Main's manual mirror — canonical, not a shadow.** Operator (you) copies Main's `D:/awbw/logs/` content into `c:\Users\phili\AWBW\logs\logs\` during/after Main's offline windows so the orchestrator reads from local NVMe instead of Samba HDD. The audit's earlier "delete it" recommendation is **withdrawn**. Convention going forward:
+- **`logs/logs/` is Main's manual mirror — canonical, not a shadow.** Operator (you) copies Main's `D:/awbw/logs/` content into `D:\AWBW\logs\logs\` during/after Main's offline windows so the orchestrator reads from local NVMe instead of Samba HDD. The audit's earlier "delete it" recommendation is **withdrawn**. Convention going forward:
   - `logs/<file>.jsonl` = this machine (`pc-b`)
   - `logs/logs/<file>.jsonl` = Main's mirror (operator-managed; refresh cadence operator-driven)
   - Future aux machines, when added, get sibling sub-paths: `logs/<machine_id>/<file>.jsonl`. Reserves a clean namespace; the orchestrator's `fleet_logs.py` helper (new, see todo `formalize-fleet-logs-layout`) maps `machine_id → log root`. Single source of truth for both readers and the mirror script.
   - The startup assert still ships, but it guards the **writer** path only: assert `LOGS_DIR == REPO_ROOT / "logs"` exactly (no sub-path), so a process launched from `tools/` or wherever fails fast instead of polluting the mirror tree.
-- **Two log-writer paths exist.** Production [`rl/env.py:_log_finished_game`](c:\Users\phili\AWBW\rl\env.py) writes schema 1.6; legacy [`rl/self_play.py:log_game`](c:\Users\phili\AWBW\rl\self_play.py) (lines 54–82) writes schema 1.5 (no `game_id`). Currently only [`watch_game`](c:\Users\phili\AWBW\rl\self_play.py) (line 1089) calls the legacy writer. Risk: anyone who points `watch_game` at the live `game_log.jsonl` mixes schemas and breaks the orchestrator's parser. Cheap fix: write watch output to a separate `logs/watch_log.jsonl` or retire the legacy writer entirely.
+- **Two log-writer paths exist.** Production [`rl/env.py:_log_finished_game`](D:\AWBW\rl\env.py) writes schema 1.6; legacy [`rl/self_play.py:log_game`](D:\AWBW\rl\self_play.py) (lines 54–82) writes schema 1.5 (no `game_id`). Currently only [`watch_game`](D:\AWBW\rl\self_play.py) (line 1089) calls the legacy writer. Risk: anyone who points `watch_game` at the live `game_log.jsonl` mixes schemas and breaks the orchestrator's parser. Cheap fix: write watch output to a separate `logs/watch_log.jsonl` or retire the legacy writer entirely.
 
 ### Solo-machine working mode (Main upgrade window, indefinite)
 
@@ -463,7 +463,7 @@ Main (`sshuser@192.168.0.160`, `D:/awbw`) is offline for OS upgrades. The `awbw-
 
 Multi-host orchestrator logic (10c hot-reload signaling, 10d weight reload protocol, 10e symmetric eval pairing, 10f autotune for non-pc-b hosts) needs at least two distinct fleet identities to exercise its branches. Solo-machine substitute:
 
-- Spawn a second `train.py` process on `pc-b` with `AWBW_MACHINE_ID=fake-aux-1`, `--n-envs 1`, `--checkpoint-dir checkpoints_fake_aux_1/`, `--shared-root c:\Users\phili\AWBW`. Cheap; ~1 GB RAM; doesn't have to be productive — it just has to **be a fleet member** so orchestrator code paths fire.
+- Spawn a second `train.py` process on `pc-b` with `AWBW_MACHINE_ID=fake-aux-1`, `--n-envs 1`, `--checkpoint-dir checkpoints_fake_aux_1/`, `--shared-root D:\AWBW`. Cheap; ~1 GB RAM; doesn't have to be productive — it just has to **be a fleet member** so orchestrator code paths fire.
 - Orchestrator reads `fleet/pc-b/status.json` and `fleet/fake-aux-1/status.json`, runs symmetric eval between their pool latests, exercises the promotion / reload / autotune rails.
 - Real fleet validation (3+ machines, real Samba) waits for Main + an actual third aux. Document expected delta and revisit when Main returns.
 
@@ -494,15 +494,15 @@ Adjacent to the FPS campaign. Different lever: throughput at the **rollout bound
 
 ### Problem statement
 
-1. **Samba writes to a spinning disk on Main are brutal.** Each `save_every=50k` chunk writes `checkpoint_<ts>.zip` *and* `latest.zip` (hundreds of MB for the ResNet) over SMB to HDD. Stop-the-world cost per save is dozens of seconds. With aux pool exports added, the share thrashes. Receipt: `[tools/_disk_io_bench.py](c:\Users\phili\AWBW\tools\_disk_io_bench.py)` exists precisely because this is a known wound.
-2. **Aux machines cannot contribute usefully without restart loops.** Each `train.py` opens its opponent pool once at worker init via `_make_env_factory` (`[rl/self_play.py](c:\Users\phili\AWBW\rl\self_play.py)`); new aux exports landing in `<shared>/checkpoints/pool/*/` never enter the running mix. Promotion of a stronger model to root `latest.zip` does not propagate into running learners — they keep training off stale weights until someone Ctrl-C's and relaunches.
-3. `**checkpoint_zip_cap=100` (default in `[train.py:133](c:\Users\phili\AWBW\train.py)`) is FIFO by mtime.** Drops oldest regardless of strength — anti-curation. The pool drowns in mediocrity.
+1. **Samba writes to a spinning disk on Main are brutal.** Each `save_every=50k` chunk writes `checkpoint_<ts>.zip` *and* `latest.zip` (hundreds of MB for the ResNet) over SMB to HDD. Stop-the-world cost per save is dozens of seconds. With aux pool exports added, the share thrashes. Receipt: `[tools/_disk_io_bench.py](D:\AWBW\tools\_disk_io_bench.py)` exists precisely because this is a known wound.
+2. **Aux machines cannot contribute usefully without restart loops.** Each `train.py` opens its opponent pool once at worker init via `_make_env_factory` (`[rl/self_play.py](D:\AWBW\rl\self_play.py)`); new aux exports landing in `<shared>/checkpoints/pool/*/` never enter the running mix. Promotion of a stronger model to root `latest.zip` does not propagate into running learners — they keep training off stale weights until someone Ctrl-C's and relaunches.
+3. `**checkpoint_zip_cap=100` (default in `[train.py:133](D:\AWBW\train.py)`) is FIFO by mtime.** Drops oldest regardless of strength — anti-curation. The pool drowns in mediocrity.
 
 ### 10a. Local-disk checkpoint writes + async publish
 
-`_atomic_model_save` in `[rl/self_play.py:1000-1003](c:\Users\phili\AWBW\rl\self_play.py)` currently writes both zips directly into `self.checkpoint_dir`. On Main with `D:/awbw` local that's fast; on aux pool trainers writing to `Z:\checkpoints\pool\<id>\` (Samba over HDD) that's the bottleneck.
+`_atomic_model_save` in `[rl/self_play.py:1000-1003](D:\AWBW\rl\self_play.py)` currently writes both zips directly into `self.checkpoint_dir`. On Main with `D:/awbw` local that's fast; on aux pool trainers writing to `Z:\checkpoints\pool\<id>\` (Samba over HDD) that's the bottleneck.
 
-- Add `--local-checkpoint-mirror <PATH>` (default off; recommended `C:\Users\phili\.awbw_local_ckpt\<id>` on Windows aux, `~/.awbw_local_ckpt/<id>` on Linux aux). When set:
+- Add `--local-checkpoint-mirror <PATH>` (default off; recommended `D:\Users\phili\.awbw_local_ckpt\<id>` on Windows aux, `~/.awbw_local_ckpt/<id>` on Linux aux). When set:
   - `_atomic_model_save` writes to the local mirror first (one fsync), returns immediately.
   - Background daemon thread on the train process drains a bounded queue, copies `<stem>.zip` → `<shared>/<stem>.zip.tmp` → `os.replace` final, then publishes `latest.zip` last.
   - Training never blocks on the shared write. `KeyboardInterrupt` path drains the queue with a hard timeout (default 60 s).
@@ -515,13 +515,13 @@ Adjacent to the FPS campaign. Different lever: throughput at the **rollout bound
 Replace pure-mtime cap with a curator that keeps the union of:
 
 - **K newest** (default `K=8`) — preserves recency for short-horizon RL stability.
-- **Top-M by verdict winrate** (default `M=12`) — the *good* opponents the pool actually wants. Source: existing `fleet/<MACHINE_ID>/eval/*.json` written by `[scripts/fleet_eval_daemon.py](c:\Users\phili\AWBW\scripts\fleet_eval_daemon.py)`; shape already lifted by `verdict_summary_from_symmetric_json` (`[rl/fleet_env.py:249](c:\Users\phili\AWBW\rl\fleet_env.py)`).
+- **Top-M by verdict winrate** (default `M=12`) — the *good* opponents the pool actually wants. Source: existing `fleet/<MACHINE_ID>/eval/*.json` written by `[scripts/fleet_eval_daemon.py](D:\AWBW\scripts\fleet_eval_daemon.py)`; shape already lifted by `verdict_summary_from_symmetric_json` (`[rl/fleet_env.py:249](D:\AWBW\rl\fleet_env.py)`).
 - **D diversity slots** (default `D=4`) — bucket checkpoints by training-step decile, keep one per bucket so distinct old policies don't all evict at once.
 
 Concretely:
 
-- New `prune_checkpoint_zip_curated(checkpoint_dir, *, k_newest, m_top_winrate, d_diversity, verdicts_root, min_age_minutes=5)` in `[rl/fleet_env.py](c:\Users\phili\AWBW\rl\fleet_env.py)`. Falls back to existing `prune_checkpoint_zip_snapshots` when no verdicts available (cold-start safety).
-- Wire into the train loop where the FIFO call lives today (`[rl/self_play.py:1005-1013](c:\Users\phili\AWBW\rl\self_play.py)`) behind `--checkpoint-curate` flag (default off for the landing PR; flip after one week of dry-run logs from the orchestrator).
+- New `prune_checkpoint_zip_curated(checkpoint_dir, *, k_newest, m_top_winrate, d_diversity, verdicts_root, min_age_minutes=5)` in `[rl/fleet_env.py](D:\AWBW\rl\fleet_env.py)`. Falls back to existing `prune_checkpoint_zip_snapshots` when no verdicts available (cold-start safety).
+- Wire into the train loop where the FIFO call lives today (`[rl/self_play.py:1005-1013](D:\AWBW\rl\self_play.py)`) behind `--checkpoint-curate` flag (default off for the landing PR; flip after one week of dry-run logs from the orchestrator).
 - Default cap target: ~24 zips per pool dir (8 + 12 + 4), not 100. Storage and Samba traffic both win.
 - `min_age_minutes=5` protects freshly-published zips from being evicted before any verdict has a chance to land.
 
@@ -529,7 +529,7 @@ Concretely:
 
 Today `_make_env_factory` builds each worker's opponent once. New checkpoints in `<shared>/checkpoints/` or `<shared>/checkpoints/pool/*/` are invisible until restart.
 
-- Add `--opponent-refresh-rollouts <N>` (default 4) to `[train.py](c:\Users\phili\AWBW\train.py)`. At each rollout boundary in `[rl/self_play.py](c:\Users\phili\AWBW\rl\self_play.py)` (right after `model.learn` completes), if N rollouts have elapsed:
+- Add `--opponent-refresh-rollouts <N>` (default 4) to `[train.py](D:\AWBW\train.py)`. At each rollout boundary in `[rl/self_play.py](D:\AWBW\rl\self_play.py)` (right after `model.learn` completes), if N rollouts have elapsed:
   - Send a refresh signal to SubprocVecEnv workers via `vec_env.env_method("reload_opponent_pool")`.
   - Each worker re-globs `iter_fleet_opponent_checkpoint_zips(...)` from `rl.fleet_env`, drops its current opponent if the zip was evicted, and re-samples from the new candidate set on the next episode.
 - Worker-side: extend `_CheckpointOpponent` with `reload_pool(zip_paths)`. Safe — opponent has no rollout-buffer state.
@@ -547,7 +547,7 @@ The orchestrator (10e) decides when a different machine's model is clearly stron
 
 ### 10e. `scripts/fleet_orchestrator.py` (passwordless-SSH driver from this dev box)
 
-One Python script that runs on this dev aux (`C:\Users\phili\AWBW`) — already passwordless-SSH to Main and the Linux aux per [awbw-auxiliary-main-machines](c:\Users\phili\AWBW.cursor\skills\awbw-auxiliary-main-machines\SKILL.md). Default tick interval: 30 minutes.
+One Python script that runs on this dev aux (`D:\AWBW`) — already passwordless-SSH to Main and the Linux aux per [awbw-auxiliary-main-machines](D:\AWBW\.cursor\skills\awbw-auxiliary-main-machines\SKILL.md). Default tick interval: 30 minutes.
 
 ```mermaid
 flowchart TB
@@ -568,9 +568,9 @@ flowchart TB
 
 Building blocks already in repo:
 
-- **Heartbeats:** `write_status_json` in `[rl/fleet_env.py:200](c:\Users\phili\AWBW\rl\fleet_env.py)`; add a tick to the train loop too (currently only the eval daemon writes them — train side is the gap).
-- **Symmetric eval:** `[scripts/symmetric_checkpoint_eval.py](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py)` with snapshot freezing — exactly what we need per tick (`--max-env-steps 0 --max-turns 150` per [awbw-pool-latest-vs-shared-latest](c:\Users\phili\AWBW.cursor\skills\awbw-pool-latest-vs-shared-latest\SKILL.md)).
-- **Promotion atomicity:** `<shared>/checkpoints/latest.zip.tmp` → `os.replace`. Backup the displaced root `latest.zip` to `<shared>/checkpoints/promoted/candidate_<ts>.zip` first so `[scripts/promote.py](c:\Users\phili\AWBW\scripts\promote.py)` keeps its paper trail.
+- **Heartbeats:** `write_status_json` in `[rl/fleet_env.py:200](D:\AWBW\rl\fleet_env.py)`; add a tick to the train loop too (currently only the eval daemon writes them — train side is the gap).
+- **Symmetric eval:** `[scripts/symmetric_checkpoint_eval.py](D:\AWBW\scripts\symmetric_checkpoint_eval.py)` with snapshot freezing — exactly what we need per tick (`--max-env-steps 0 --max-turns 150` per [awbw-pool-latest-vs-shared-latest](D:\AWBW\.cursor\skills\awbw-pool-latest-vs-shared-latest\SKILL.md)).
+- **Promotion atomicity:** `<shared>/checkpoints/latest.zip.tmp` → `os.replace`. Backup the displaced root `latest.zip` to `<shared>/checkpoints/promoted/candidate_<ts>.zip` first so `[scripts/promote.py](D:\AWBW\scripts\promote.py)` keeps its paper trail.
 - **SSH to Main:** `ssh sshuser@192.168.0.160 'powershell -c "..."'` for any "run on Main" step (e.g. force-flush a checkpoint before publish, query free disk).
 - **Logging:** append-only `logs/fleet_orchestrator.jsonl` for every tick; one row per decision (no decision is also a row).
 
@@ -601,7 +601,7 @@ python scripts/fleet_orchestrator.py \
 ### Critical risks (Phase 10)
 
 - `**os.replace` atomicity on CIFS / Samba** is mount-config dependent. Verify on Main's share with a controlled test before live promotion; fallback is two-phase publish (`.publishing` then rename in destination).
-- **Hot reload mid-rollout would corrupt PPO.** Reload check sits in the same outer loop as the prune call (`[rl/self_play.py:1014-1016](c:\Users\phili\AWBW\rl\self_play.py)`) — only between `model.learn` calls, never inside.
+- **Hot reload mid-rollout would corrupt PPO.** Reload check sits in the same outer loop as the prune call (`[rl/self_play.py:1014-1016](D:\AWBW\rl\self_play.py)`) — only between `model.learn` calls, never inside.
 - **Curator deletes a zip a worker is still loading.** Mitigations: workers re-glob lazily on next episode (so a deleted zip is just dropped from the candidate set), and the curator skips files newer than `--min-age-minutes` (default 5).
 - **Mode-collapse from over-eager catch-up.** Conservative reload thresholds + `--dry-run` first week. Fleet diversity is the moat — frequent forced sync turns N machines into one slow trainer.
 - **Verdict file gaming.** Only consume verdicts written by `scripts/fleet_eval_daemon.py` (`schema_version == 1`) and against a known baseline. Any unknown file is ignored by the curator.
@@ -626,7 +626,7 @@ Each machine has different CPU / RAM / GPU. Today the operator hand-picks `--n-e
   - `n_steps = 512` if `n_envs >= 8` else `1024` (keeps rollout buffer ~5–10k transitions).
   - `batch_size = max(64, n_envs * n_steps // 32)` (PPO 32 minibatches/epoch heuristic).
   - GPU host → `--device cuda`; otherwise `--device cpu` with `OMP_NUM_THREADS=1` (covered by Phase 1c).
-  - Linux aux at 192.168.0.122 (no `nvidia-smi`) → forced `--device cpu`, `n_envs <= 2` until perf telemetry says otherwise (per [awbw-auxiliary-main-machines](c:\Users\phili\AWBW.cursor\skills\awbw-auxiliary-main-machines\SKILL.md)).
+  - Linux aux at 192.168.0.122 (no `nvidia-smi`) → forced `--device cpu`, `n_envs <= 2` until perf telemetry says otherwise (per [awbw-auxiliary-main-machines](D:\AWBW\.cursor\skills\awbw-auxiliary-main-machines\SKILL.md)).
 - **Apply discipline:** orchestrator writes `<shared>/fleet/<MACHINE_ID>/proposed_args.json` and prints a diff against the running config (read from `fleet/<id>/status.json`). Two modes:
   - **Default:** propose-only — operator runs `scripts/fleet_orchestrator.py --apply-proposed <ID>` to confirm and trigger a guided restart on that host.
   - `**--auto-apply` opt-in flag (per-host whitelist):** orchestrator may restart aux trainers automatically when proposal differs from running config and machine has been idle ≥ 1 cycle. Never enabled for the dev box without explicit per-tick `--apply-here`.
@@ -664,8 +664,8 @@ For machines already classified `competent`, `stuck`, or `regressing` see 10h �
 | `--cold-opponent`               | `end_turn`                                                | Punching bag — opponent always picks END_TURN. Lets the learner build any policy at all. Promote to `random`, then to checkpoint, on competence.         |
 | `--tier T1 --co-p0 1 --co-p1 1` | Andy mirror, Tier 1                                       | Narrowest curriculum. Fold in `--curriculum-broad-prob 0.0` to disable broad sampling.                                                                   |
 | `--ent-coef 0.05`               | High exploration                                          | Decay to 0.02 once policy entropy plateaus (TensorBoard `train/entropy_loss`).                                                                           |
-| `--bc-init <bc_warmstart>.zip`  | If `checkpoints/bc/bc_warmstart_*.zip` exists             | Cheap policy prior. Already supported via `[train.py:172](c:\Users\phili\AWBW\train.py)`; orchestrator just picks the newest.                            |
-| Reward shaping                  | `AWBW_REWARD_SHAPING=phi` with `AWBW_PHI_PROFILE=capture` | Already wired in `[rl/env.py:84-89](c:\Users\phili\AWBW\rl\env.py)`; the `capture` profile skews potential-based shaping toward the capture coefficient. |
+| `--bc-init <bc_warmstart>.zip`  | If `checkpoints/bc/bc_warmstart_*.zip` exists             | Cheap policy prior. Already supported via `[train.py:172](D:\AWBW\train.py)`; orchestrator just picks the newest.                            |
+| Reward shaping                  | `AWBW_REWARD_SHAPING=phi` with `AWBW_PHI_PROFILE=capture` | Already wired in `[rl/env.py:84-89](D:\AWBW\rl\env.py)`; the `capture` profile skews potential-based shaping toward the capture coefficient. |
 
 
 Apply all of this via `proposed_args.json` (10f). Once a machine starts producing `game_log.jsonl` rows, the orchestrator gates each knob:
@@ -693,7 +693,7 @@ Apply all of this via `proposed_args.json` (10f). Once a machine starts producin
 
 #### Other ideas worth exploring (lower priority — call out and defer)
 
-- **Cold-opponent escalator beyond the three built-ins:** add `greedy_capture_v2` once the policy beats `greedy_capture` at 60%+ — easy to bolt onto `[rl/self_play.py](c:\Users\phili\AWBW\rl\self_play.py)`'s `pick_capture_greedy_flat`.
+- **Cold-opponent escalator beyond the three built-ins:** add `greedy_capture_v2` once the policy beats `greedy_capture` at 60%+ — easy to bolt onto `[rl/self_play.py](D:\AWBW\rl\self_play.py)`'s `pick_capture_greedy_flat`.
 
 ### 10h. Continuous diagnosis & guidance for non-fresh machines (the coach layer)
 
@@ -737,7 +737,7 @@ Order matters more here — rollback is reversible, weight reload is destructive
 
 #### Strength assessment (the "how good is this machine actually" question)
 
-For any non-fresh machine the orchestrator runs an **on-demand symmetric eval** when classifier output is uncertain (e.g. `stuck` vs `competent` borderline). Reuses `[scripts/symmetric_checkpoint_eval.py](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py)` — same script the promotion gate (10e) already uses. Result is cached for 6 hours so the orchestrator doesn't burn compute re-evaluating a stable machine.
+For any non-fresh machine the orchestrator runs an **on-demand symmetric eval** when classifier output is uncertain (e.g. `stuck` vs `competent` borderline). Reuses `[scripts/symmetric_checkpoint_eval.py](D:\AWBW\scripts\symmetric_checkpoint_eval.py)` — same script the promotion gate (10e) already uses. Result is cached for 6 hours so the orchestrator doesn't burn compute re-evaluating a stable machine.
 
 Strength tier is bucketed for human-readable status:
 
@@ -788,7 +788,7 @@ Masterplan §4.2 prereq. `apply_full_turn(state, *, plan: list[Action] | None = 
 - If `rollout_policy` is provided, call it with `(state, mask)` each microstep until END_TURN.
 - Returns a *new* `GameState` (or mutates a copy — choose one and document; copy is safer for tree search but doubles memory churn).
 - Hard perf budget: **< 5 ms median per turn** on the narrow Misery Andy curriculum, measured in `tests/test_engine_turn_rollout_perf.py`. If we miss this, the whole MCTS direction is sand and we revisit.
-- Test: feed the function the action sequence from a known game in `[logs/game_log.jsonl](c:\Users\phili\AWBW\logs\game_log.jsonl)`; assert end-of-turn `GameState` matches the live engine to byte-identical `funds`, `properties`, `units`. If `[tools/desync_audit.py](c:\Users\phili\AWBW\tools\desync_audit.py)` coverage exists, reuse the fixture pattern.
+- Test: feed the function the action sequence from a known game in `[logs/game_log.jsonl](D:\AWBW\logs\game_log.jsonl)`; assert end-of-turn `GameState` matches the live engine to byte-identical `funds`, `properties`, `units`. If `[tools/desync_audit.py](D:\AWBW\tools\desync_audit.py)` coverage exists, reuse the fixture pattern.
 
 This is the single most consequential piece of new engine code in the campaign. It must satisfy the same 1200-desync-survivor discipline as Phase 2 of the FPS plan: feature flag (`AWBW_TURN_ROLLOUT=1`) until oracle-cross-checked.
 
@@ -807,7 +807,7 @@ This is the single most consequential piece of new engine code in the campaign. 
 ### 11c. `train.py` and `rl/self_play.py` wiring
 
 - `--mcts-mode {off, eval_only, train_advisor}` (default `off`).
-- `eval_only`: MCTS wraps `model.predict` only inside `[scripts/symmetric_checkpoint_eval.py](c:\Users\phili\AWBW\scripts\symmetric_checkpoint_eval.py)` and `[scripts/bo3_checkpoint_playoff.py](c:\Users\phili\AWBW\scripts\bo3_checkpoint_playoff.py)`. Cheap, low risk, no impact on PPO data distribution.
+- `eval_only`: MCTS wraps `model.predict` only inside `[scripts/symmetric_checkpoint_eval.py](D:\AWBW\scripts\symmetric_checkpoint_eval.py)` and `[scripts/bo3_checkpoint_playoff.py](D:\AWBW\scripts\bo3_checkpoint_playoff.py)`. Cheap, low risk, no impact on PPO data distribution.
 - `train_advisor`: MCTS wraps action selection in `_run_policy_opponent` and (separately gated) in the learner step. **Off-policy data risk** — PPO collects against the MCTS-improved policy, so PPO's importance ratio is wrong. Mitigations exist (replay-correction, KL clip widening) but they are research, not engineering. Treat `train_advisor` as **out of scope** for this plan; the orchestrator will refuse to set it.
 
 ### 11d. MCTS activation health gate
@@ -830,7 +830,7 @@ The masterplan-§4 production threshold (`Phase 1 Full Go` + EV>0.6 on Stage 3�
 
 ### 11e. `terrain_usage_p0` metric (lands BEFORE 11d)
 
-Small extension to per-episode logging in `[rl/env.py](c:\Users\phili\AWBW\rl\env.py)`'s `_log_finished_game`:
+Small extension to per-episode logging in `[rl/env.py](D:\AWBW\rl\env.py)`'s `_log_finished_game`:
 
 ```python
 defended_tile_ends = 0
@@ -845,7 +845,7 @@ log_record["terrain_usage_p0"] = (
 )
 ```
 
-Bump `log_schema_version` to `"1.7"`. Not a hot-path touch — fires once per game at episode end. Use `get_terrain(tid).defense` from `[engine/terrain.py](c:\Users\phili\AWBW\engine\terrain.py)` (there is no `get_defense_stars`; `defense` is the star count).
+Bump `log_schema_version` to `"1.7"`. Not a hot-path touch — fires once per game at episode end. Use `get_terrain(tid).defense` from `[engine/terrain.py](D:\AWBW\engine\terrain.py)` (there is no `get_defense_stars`; `defense` is the star count).
 
 ### Test gate for Phase 11
 

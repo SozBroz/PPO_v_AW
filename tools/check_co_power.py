@@ -2,11 +2,11 @@
 import gzip, io, re, zipfile
 from pathlib import Path
 import sys, os
-sys.path.insert(0, r"C:\Users\phili\AWBW")
+sys.path.insert(0, r"D:\AWBW")
 
 # Find latest generated replay
 import glob
-replays = sorted(glob.glob(r"C:\Users\phili\AWBW\replays\1?????.zip"))
+replays = sorted(glob.glob(r"D:\AWBW\replays\1?????.zip"))
 if not replays:
     print("No generated replays found"); sys.exit(1)
 path = Path(replays[-1])

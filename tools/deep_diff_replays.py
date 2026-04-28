@@ -6,8 +6,8 @@ Prints side-by-side for every scalar top-level and per-player field.
 import gzip, io, re, sys, zipfile
 from pathlib import Path
 
-REF  = Path(r"C:\Users\phili\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip")
-CAND = Path(r"C:\Users\phili\AWBW\replays\127254.zip")
+REF  = Path(r"D:\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip")
+CAND = Path(r"D:\AWBW\replays\127254.zip")
 
 def load_turn0(path: Path) -> str:
     with zipfile.ZipFile(path) as z:

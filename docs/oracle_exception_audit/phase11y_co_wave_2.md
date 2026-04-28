@@ -198,7 +198,7 @@ READ-ONLY recon: replay inventory, envelope drills, and fix lanes for three Phas
 
 `_grant_income` (Colin/Sasha D2D +100/prop; **no** Colin COP ×1.5 / no Sasha damage credit):
 
-```449:493:c:\Users\phili\AWBW\engine\game.py
+```449:493:D:\AWBW\engine\game.py
     def _grant_income(self, player: int) -> None:
         ...
         co = self.co_states[player]
@@ -212,7 +212,7 @@ READ-ONLY recon: replay inventory, envelope drills, and fix lanes for three Phas
 
 `_apply_power_effects` — Sasha **COP** drain present; **no** Colin Gold Rush branch:
 
-```611:615:c:\Users\phili\AWBW\engine\game.py
+```611:615:D:\AWBW\engine\game.py
         # Sasha COP: drain power bar of enemy CO
         elif co.co_id == 19 and cop:
             self.co_states[opponent].power_bar = max(
@@ -222,7 +222,7 @@ READ-ONLY recon: replay inventory, envelope drills, and fix lanes for three Phas
 
 `_apply_attack` — primary damage and `_charge_power`; **no** Sasha War Bonds funds increment:
 
-```708:723:c:\Users\phili\AWBW\engine\game.py
+```708:723:D:\AWBW\engine\game.py
         if override_dmg is not None:
             dmg = max(0, int(override_dmg))
         else:
@@ -241,7 +241,7 @@ READ-ONLY recon: replay inventory, envelope drills, and fix lanes for three Phas
 
 `_resupply_on_properties` — fixed `property_heal = 20`; **no** Rachel branch:
 
-```1540:1590:c:\Users\phili\AWBW\engine\game.py
+```1540:1590:D:\AWBW\engine\game.py
     def _resupply_on_properties(self, player: int) -> None:
         ...
         property_heal = 20  # +2 display HP
