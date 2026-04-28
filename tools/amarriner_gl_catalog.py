@@ -55,6 +55,11 @@ _RE_TITLE = re.compile(
     re.I,
 )
 _RE_LIST_NUM = re.compile(r"<b>(\d+)\.&nbsp;</b>")
+# Game length (final calendar day) in listing metadata: <b>Day N</b> … <b>||</b> … Ended on
+_RE_LISTING_FINAL_DAY = re.compile(
+    r"<b>\s*Day\s+(\d+)\s*</b>\s*</td>\s*<td[^>]*>\s*<b>\|\|</b>",
+    re.I | re.S,
+)
 
 
 def _fetch(url: str, timeout: float = 60.0) -> str:
@@ -93,6 +98,9 @@ def parse_gamescompleted_listing(html: str) -> list[dict[str, Any]]:
         list_m = _RE_LIST_NUM.search(chunk)
         list_index = int(list_m.group(1)) if list_m else None
 
+        fd_m = _RE_LISTING_FINAL_DAY.search(chunk)
+        listing_final_day = int(fd_m.group(1)) if fd_m else None
+
         out.append(
             {
                 "games_id": gid,
@@ -103,6 +111,7 @@ def parse_gamescompleted_listing(html: str) -> list[dict[str, Any]]:
                 "co_p0_id": co_p0,
                 "co_p1_id": co_p1,
                 "list_index": list_index,
+                "listing_final_day": listing_final_day,
             }
         )
     return out

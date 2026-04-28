@@ -34,7 +34,7 @@ manual_games:
     days: 5
 
 completed_game_queries:
-  - username: Po1and
+  - username: po1and
     league: true
     type: std
     limit: 50

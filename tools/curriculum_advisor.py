@@ -47,11 +47,11 @@ FLAG_PRESENT = "_FLAG_PRESENT"
 
 PROBE_OWNED_KEYS = frozenset({"--n-envs", "--n-steps", "--batch-size"})
 
-# Opening book: use ranked_std_human_openings.jsonl for P1 opponent seat by default.
+# Opening book: std_pool_precombat.jsonl (seat 0 + seat 1 lines per map/session).
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENING_BOOK_TRAIN_ARGS: dict[str, Any] = {
-    "--opening-book": str(_REPO_ROOT / "data" / "opening_books" / "ranked_std_human_openings.jsonl"),
-    "--opening-book-seat": 1,
+    "--opening-book": str(_REPO_ROOT / "data" / "opening_books" / "std_pool_precombat.jsonl"),
+    "--opening-book-seats": "both",
     "--opening-book-prob": 1.0,
 }
 
@@ -283,9 +283,9 @@ class StageConfig:
 
         # Opening book defaults
         overrides["--opening-book"] = str(
-            _REPO_ROOT / "data" / "opening_books" / "ranked_std_human_openings.jsonl"
+            _REPO_ROOT / "data" / "opening_books" / "std_pool_precombat.jsonl"
         )
-        overrides["--opening-book-seat"] = 1
+        overrides["--opening-book-seats"] = "both"
 
         return overrides
 

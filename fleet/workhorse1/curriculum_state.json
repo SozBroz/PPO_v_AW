@@ -1,7 +1,8 @@
 {
-  "current_stage_name": "stage_d_gl_std_map_pool_t4",
-  "entered_stage_at_ts": 1777131888.1031413,
-  "games_observed_in_stage": 0,
-  "last_proposal_ts": 1777131888.1031413,
-  "last_seen_finished_games": 0
+  "current_stage_name": "stage_b_capture_competent",
+  "decay_phase": 0,
+  "entered_stage_at_ts": 1745750760.0,
+  "games_observed_in_stage": 1432,
+  "last_proposal_ts": 1777366746.421215,
+  "last_seen_finished_games": 1432
 }

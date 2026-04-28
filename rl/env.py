@@ -704,6 +704,13 @@ class AWBWEnv(gym.Env):
         live_snapshot_path: str | Path | None = None,
         live_games_id: int | None = None,
         live_fallback_curriculum: bool = True,
+        opening_book_path: str | Path | None = None,
+        opening_book_seats: str = "both",
+        opening_book_prob: float = 0.0,
+        opening_book_strict_co: bool = False,
+        opening_book_max_day: int | None = None,
+        opening_book_seed: int = 0,
+        opening_book_force_mask_for_learner: bool = True,
     ) -> None:
         super().__init__()
 
@@ -714,6 +721,16 @@ class AWBWEnv(gym.Env):
         self.tier_name = tier_name
         self.curriculum_broad_prob = float(curriculum_broad_prob)
         self.curriculum_tag = curriculum_tag
+        self._opening_book_path = str(opening_book_path) if opening_book_path else None
+        self._opening_book_seats = str(opening_book_seats or "both")
+        self._opening_book_prob = max(0.0, min(1.0, float(opening_book_prob)))
+        self._opening_book_strict_co = bool(opening_book_strict_co)
+        self._opening_book_max_day = (
+            int(opening_book_max_day) if opening_book_max_day is not None else None
+        )
+        self._opening_book_seed = int(opening_book_seed)
+        self._opening_book_force_mask_for_learner = bool(opening_book_force_mask_for_learner)
+        self._opening_book_manager: Any | None = None
         self._max_env_steps: int | None = int(max_env_steps) if max_env_steps is not None else None
         if max_p1_microsteps is not None:
             self._max_p1_microsteps_cap: int | None = int(max_p1_microsteps)
@@ -789,6 +806,25 @@ class AWBWEnv(gym.Env):
         # get_legal_actions per P0 step (mask + strip + decode) and
         # the 2x per P1 policy microstep (mask + decode).
         self._legal_cache: list[Action] | None = None
+
+        if self._opening_book_path:
+            try:
+                from rl.opening_book import TwoSidedOpeningBookManager
+
+                self._opening_book_manager = TwoSidedOpeningBookManager(
+                    self._opening_book_path,
+                    seats=self._opening_book_seats,
+                    prob=self._opening_book_prob,
+                    strict_co=self._opening_book_strict_co,
+                    max_day=self._opening_book_max_day,
+                    seed=self._opening_book_seed,
+                )
+            except Exception as exc:
+                print(
+                    f"[AWBWEnv] opening book disabled: failed to load "
+                    f"{self._opening_book_path!r}: {exc!r}"
+                )
+                self._opening_book_manager = None
 
         self.state: Optional[GameState] = None
         self._episode_info: dict[str, Any] = {}
@@ -1206,6 +1242,8 @@ class AWBWEnv(gym.Env):
         )
         self._first_learner_capture_step: int | None = None
 
+        self._begin_opening_book_episode()
+
         # HP belief overlays — one per seat. Seeded with the initial board so
         # predeployed units start at their visible bucket (not exact HP) for the
         # opposing observer. Engine keeps the exact 0-100 integer; these mirror
@@ -1257,6 +1295,11 @@ class AWBWEnv(gym.Env):
         _p1_delta = 0.0
 
         self._p0_env_steps += 1
+
+        # Env-level opening book for the learner must be PPO-consistent: the
+        # action mask is forced to the book action in action_masks(), so here
+        # we only advance the cursor if PPO actually supplied that action.
+        self._maybe_commit_learner_opening_book_action(int(action_idx))
 
         # Tier 1 (plan p0-capture-architecture-fix): with probability
         # `learner_greedy_mix`, override the policy-sampled action with the
@@ -1486,7 +1529,92 @@ class AWBWEnv(gym.Env):
         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
         if flag in ("1", "true", "yes", "on"):
             _strip_non_infantry_builds(mask, self.state, legal=legal)
+        mask = self._maybe_force_learner_opening_book_mask(mask)
         return mask
+
+    def _begin_opening_book_episode(self) -> None:
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is None or self.state is None:
+            return
+        try:
+            co_ids = [
+                int(self.state.co_states[0].co_id),
+                int(self.state.co_states[1].co_id),
+            ]
+            mgr.on_episode_start(
+                episode_id=int(self._episode_id),
+                map_id=int(self.state.map_data.map_id),
+                co_ids=co_ids,
+            )
+            self._sync_opening_book_log()
+        except Exception as exc:
+            self._opening_book_log["opening_book_init_error"] = repr(exc)
+
+    def _sync_opening_book_log(self) -> None:
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is not None:
+            self._opening_book_log.update(mgr.log_fields())
+
+    def _maybe_force_learner_opening_book_mask(self, mask: np.ndarray) -> np.ndarray:
+        if (
+            not self._opening_book_force_mask_for_learner
+            or self.state is None
+            or int(self.state.active_player) != int(self._learner_seat)
+        ):
+            return mask
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is None:
+            return mask
+        a = mgr.peek_flat(
+            seat=int(self._learner_seat),
+            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+            action_mask=mask,
+        )
+        self._sync_opening_book_log()
+        if a is None:
+            return mask
+        forced = np.zeros_like(mask, dtype=bool)
+        forced[int(a)] = True
+        return forced
+
+    def _maybe_commit_learner_opening_book_action(self, action_idx: int) -> None:
+        if (
+            not self._opening_book_force_mask_for_learner
+            or self.state is None
+            or int(self.state.active_player) != int(self._learner_seat)
+        ):
+            return
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is None:
+            return
+        # Validate against the current legal mask before committing.  If the
+        # mask was not forced or the model did not return the forced action,
+        # commit_flat marks the selected book line desynced instead of silently
+        # replacing the learner action.
+        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+        mask = _get_action_mask(self.state, out=_mout, legal=self._get_legal())
+        expected = mgr.peek_flat(
+            seat=int(self._learner_seat),
+            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+            action_mask=mask,
+        )
+        if expected is not None:
+            mgr.commit_flat(seat=int(self._learner_seat), action_idx=int(action_idx))
+            self._sync_opening_book_log()
+
+    def _suggest_opening_book_for_active(self, mask: np.ndarray) -> int | None:
+        if self.state is None:
+            return None
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is None:
+            return None
+        a = mgr.suggest_flat(
+            seat=int(self.state.active_player),
+            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+            action_mask=mask,
+        )
+        self._sync_opening_book_log()
+        return int(a) if a is not None else None
 
     def render(self) -> str | None:
         if self.render_mode == "ansi" and self.state is not None:
@@ -2036,10 +2164,14 @@ class AWBWEnv(gym.Env):
             legal = self._get_legal()
             _mout = self._action_mask_buf if self._use_preallocated_buffers else None
             mask = _get_action_mask(self.state, out=_mout, legal=legal)
-            try:
-                opp_idx = int(self.opponent_policy(obs, mask))
-            except Exception:
-                opp_idx = -1
+            book_idx = self._suggest_opening_book_for_active(mask)
+            if book_idx is not None:
+                opp_idx = int(book_idx)
+            else:
+                try:
+                    opp_idx = int(self.opponent_policy(obs, mask))
+                except Exception:
+                    opp_idx = -1
 
             action = _flat_to_action(opp_idx, self.state, legal=legal)
             if action is None:

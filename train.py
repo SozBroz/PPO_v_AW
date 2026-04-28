@@ -446,12 +446,27 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--opening-book", type=Path, default=None,
-        help="JSONL from tools/build_opening_book.py; wraps checkpoint opponent (P1 book by default).",
+        help=(
+            "JSONL from tools/build_opening_book.py. Applied inside AWBWEnv so "
+            "P0 and/or P1 can use it during the opening."
+        ),
     )
-    parser.add_argument("--opening-book-seat", type=int, default=1, help="Engine seat the book encodes (1=P1).")
+    parser.add_argument(
+        "--opening-book-seat",
+        type=int,
+        default=1,
+        help="Deprecated compatibility alias; prefer --opening-book-seats.",
+    )
+    parser.add_argument(
+        "--opening-book-seats",
+        type=str,
+        default="both",
+        choices=("both", "p0", "p1", "0", "1", "none"),
+        help="Which engine seats may use opening books. Default: both.",
+    )
     parser.add_argument(
         "--opening-book-prob", type=float, default=1.0,
-        help="Per microstep: probability of using the book when entries exist (0-1).",
+        help="Per episode probability of enabling the selected opening book lines (0-1).",
     )
     parser.add_argument(
         "--opening-book-strict-co", action=argparse.BooleanOptionalAction, default=False,
@@ -888,6 +903,7 @@ def main() -> None:
         async_learner_forward_chunk=args.async_learner_forward_chunk,
         opening_book_path=args.opening_book,
         opening_book_seat=getattr(args, "opening_book_seat", 1),
+        opening_book_seats=getattr(args, "opening_book_seats", "both"),
         opening_book_prob=getattr(args, "opening_book_prob", 1.0),
         opening_book_strict_co=getattr(args, "opening_book_strict_co", False),
         opening_book_max_day=(

@@ -15,12 +15,43 @@ reboot) and re-run, or copy manually from ``build/lib.*/ engine/`` and ``rl/``.
 """
 from __future__ import annotations
 
+import errno
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Windows: ERROR_SHARING_VIOLATION when another process has the .pyd loaded.
+_LOCK_WINERROR = 32
+
+
+def _is_file_in_use_error(exc: BaseException) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    if isinstance(exc, OSError):
+        if getattr(exc, "winerror", None) == _LOCK_WINERROR:
+            return True
+        if exc.errno in (errno.EACCES, errno.EPERM, errno.ETXTBSY):
+            return True
+    return False
+
+
+def _copy_pyd_with_retries(src: Path, dest: Path, *, attempts: int = 6) -> None:
+    delays_s = (0.4, 0.8, 1.2, 2.0, 2.5, 3.0)
+    for attempt in range(attempts):
+        try:
+            shutil.copy2(src, dest)
+            return
+        except OSError as exc:
+            if not _is_file_in_use_error(exc):
+                raise
+            if attempt + 1 >= attempts:
+                raise
+            delay = delays_s[attempt] if attempt < len(delays_s) else delays_s[-1]
+            time.sleep(delay)
 
 
 def main() -> int:
@@ -50,14 +81,18 @@ def main() -> int:
         for pyd in src_dir.glob("*.pyd"):
             dest = dest_dir / pyd.name
             try:
-                shutil.copy2(pyd, dest)
+                _copy_pyd_with_retries(pyd, dest)
                 print(f"copied {pyd.name} -> {dest.relative_to(REPO_ROOT)}")
                 copied += 1
             except OSError as exc:
                 print(
                     f"ERROR: could not copy {pyd} -> {dest}:\n  {exc}\n"
                     "Stop any process that has imported the old extension (train.py, "
-                    "pytest, an IDE-embedded REPL) and re-run, or copy the file by hand while idle.",
+                    "pytest, an IDE-embedded REPL) and re-run, or copy the file by hand while idle.\n"
+                    "If Cython sources are unchanged, re-run the bootstrap with "
+                    "`--skip-cython-rebuild`.\n"
+                    "To list suspects (including SubprocVecEnv multiprocessing.spawn workers): "
+                    f"`{sys.executable} scripts/diagnose_cython_lock.py`.",
                     file=sys.stderr,
                 )
                 return 1

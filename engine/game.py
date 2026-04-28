@@ -489,7 +489,11 @@ class GameState:
             self._apply_dive_hide(action)
 
         elif action.action_type == ActionType.LOAD:
-            self._apply_load(action, oracle_strict=oracle_strict)
+            self._apply_load(
+                action,
+                oracle_strict=oracle_strict,
+                oracle_mode=oracle_mode,
+            )
 
         elif action.action_type == ActionType.JOIN:
             self._apply_join(action, oracle_strict=oracle_strict)
@@ -1609,7 +1613,8 @@ class GameState:
                         unit_pos=action.unit_pos,
                         move_pos=action.move_pos,
                         select_unit_id=action.select_unit_id,
-                    )
+                    ),
+                    oracle_mode=True,
                 )
                 return
             raise ValueError(
@@ -1937,7 +1942,13 @@ class GameState:
     # Load
     # ------------------------------------------------------------------
 
-    def _apply_load(self, action: Action, *, oracle_strict: bool = False):
+    def _apply_load(
+        self,
+        action: Action,
+        *,
+        oracle_strict: bool = False,
+        oracle_mode: bool = False,
+    ):
         unit      = self.get_unit_at(*action.unit_pos)
         transport = self.get_unit_at(*action.move_pos)
         if unit is None or transport is None:
@@ -1963,9 +1974,17 @@ class GameState:
                 f"{transport.pos} is full ({len(transport.loaded_units)}/{cap})."
             )
 
-        # Route through _move_unit so the standard reachability validation
-        # (and fuel deduction) applies.
-        self._move_unit(unit, transport.pos)
+        # Route through _move_unit so reachability validation and fuel deduction
+        # apply for normal play. Oracle zips can still encode LOAD after path /
+        # occupancy drift (e.g. GL 1629588: tank boards lander on shoal) where
+        # ``compute_reachable_costs`` no longer contains ``transport.pos`` even
+        # though AWBW committed the board — mirror JOIN/WAIT oracle routing.
+        try:
+            self._move_unit(unit, transport.pos)
+        except ValueError:
+            if not oracle_mode:
+                raise
+            self._move_unit_forced(unit, transport.pos)
         self.units[unit.player].remove(unit)
         transport.loaded_units.append(unit)
         unit.moved = True

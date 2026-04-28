@@ -4,9 +4,10 @@ Fetch replay zips and build a manifest for elite opening-book / BC pipelines.
 
 - **manual_games:** download ``replay_download.php?games_id=`` (requires
   ``secrets.txt`` login, same as ``tools/amarriner_download_replays.py``).
-- **completed_game_queries:** crawl ``gamescompleted.php?league=Y&type=std``
-  (see ``tools/amarriner_gl_catalog.py``), keep rows whose ``matchup`` contains
-  the requested username and whose ``map_id`` is in the GL **std** pool.
+- **completed_game_queries:** crawl per-user
+  ``gamescompleted.php?start=&league=Y&username=&type=std`` (see
+  :func:`gamescompleted_gl_std_url`), keeping rows whose ``map_id`` is in the GL
+  **std** pool.
 
 Outputs under ``--out-dir``::
 
@@ -50,7 +51,24 @@ from tools.amarriner_download_replays import (  # noqa: E402
 from tools.gl_std_maps import gl_std_map_ids  # noqa: E402
 
 SECRETS = ROOT / "secrets.txt"
-LIST_URL = BASE_URL + "/gamescompleted.php?league=Y&type=std&start={start}"
+
+
+def gamescompleted_gl_std_url(start: int, *, username: str | None = None) -> str:
+    """
+    Completed GL **Std** listing. With ``username``, matches the site filter, e.g.::
+
+        gamescompleted.php?start=1&league=Y&username=po1and&type=std
+    """
+    from urllib.parse import urlencode
+
+    parts: list[tuple[str, str]] = [
+        ("start", str(int(start))),
+        ("league", "Y"),
+        ("type", "std"),
+    ]
+    if username:
+        parts.append(("username", str(username).strip()))
+    return f"{BASE_URL}/gamescompleted.php?{urlencode(parts)}"
 
 
 def _login(session: requests.Session, username: str, password: str) -> bool:
@@ -71,10 +89,10 @@ def _login(session: requests.Session, username: str, password: str) -> bool:
     return "logout" in r2.text.lower() or username.lower() in r2.text.lower()
 
 
-def _fetch_list_page(start: int) -> str:
+def _fetch_list_page(start: int, *, username: str | None = None) -> str:
     import urllib.request
 
-    url = LIST_URL.format(start=start)
+    url = gamescompleted_gl_std_url(start, username=username)
     req = urllib.request.Request(
         url,
         headers={"User-Agent": HEADERS.get("User-Agent", "AWBW/1.0")},
@@ -221,7 +239,7 @@ def main() -> int:
         while len(collected) < limit and start < 50_000:
             if args.sleep_s > 0 and page > 0:
                 time.sleep(args.sleep_s)
-            html = _fetch_list_page(start)
+            html = _fetch_list_page(start, username=uname)
             page += 1
             if args.save_listing_html:
                 phtml = completed_dir / f"{uname}_page_{page}.html"
@@ -229,11 +247,7 @@ def main() -> int:
             rows = _parse_gamescompleted_rows(html)
             if not rows:
                 break
-            low = uname.lower()
             for r in rows:
-                mu = str(r.get("matchup") or "")
-                if low not in mu.lower():
-                    continue
                 mid = r.get("map_id")
                 if mid is None or int(mid) not in std_ids:
                     continue

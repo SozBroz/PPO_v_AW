@@ -47,6 +47,7 @@ from engine.map_loader import load_map  # noqa: E402
 
 from tools.amarriner_catalog_cos import catalog_row_has_both_cos, pair_catalog_cos_ids  # noqa: E402
 from tools.diff_replay_zips import load_replay  # noqa: E402
+from tools.human_demo_rows import infer_training_meta_from_awbw_zip  # noqa: E402
 from tools.oracle_zip_replay import (  # noqa: E402
     UnsupportedOracleAction,
     apply_oracle_action_json,
@@ -274,18 +275,27 @@ def main() -> int:
             "much drift survives once luck noise is removed."
         ),
     )
+    ap.add_argument(
+        "--infer-meta-from-zip",
+        action="store_true",
+        help=(
+            "If a zip's games_id is not in --catalog, infer map_id / CO ids / tier "
+            "from the zip's first PHP snapshot (``infer_training_meta_from_awbw_zip``). "
+            "Non-std maps are still skipped per --map-pool. Requires a readable zip."
+        ),
+    )
     args = ap.parse_args()
 
-    if not args.catalog.is_file():
+    by_id: dict[int, dict[str, Any]] = {}
+    if args.catalog.is_file():
+        cat = _load_catalog(args.catalog)
+        games = cat.get("games") or {}
+        for _k, g in games.items():
+            if isinstance(g, dict) and "games_id" in g:
+                by_id[int(g["games_id"])] = g
+    elif not args.infer_meta_from_zip:
         print(f"[replay_state_diff] missing catalog {args.catalog}", file=sys.stderr)
         return 1
-
-    cat = _load_catalog(args.catalog)
-    games = cat.get("games") or {}
-    by_id: dict[int, dict[str, Any]] = {}
-    for _k, g in games.items():
-        if isinstance(g, dict) and "games_id" in g:
-            by_id[int(g["games_id"])] = g
 
     std_maps = gl_std_map_ids(args.map_pool)
     gid_filter = set(args.games_id) if args.games_id else None
@@ -297,6 +307,31 @@ def main() -> int:
         if gid_filter is not None and gid not in gid_filter:
             continue
         meta = by_id.get(gid)
+        if meta is None and args.infer_meta_from_zip:
+            try:
+                inf = infer_training_meta_from_awbw_zip(p, map_pool=args.map_pool)
+            except Exception as e:
+                print(
+                    f"[replay_state_diff] skip games_id={gid}: infer meta: {e}",
+                    file=sys.stderr,
+                )
+                continue
+            mid_inf = int(inf.get("map_id", 0) or 0)
+            if mid_inf not in std_maps:
+                if gid_filter is not None:
+                    print(
+                        f"[replay_state_diff] skip games_id={gid}: map_id={mid_inf} "
+                        f"not in GL std pool",
+                        file=sys.stderr,
+                    )
+                continue
+            meta = {
+                "games_id": gid,
+                "map_id": mid_inf,
+                "co_p0_id": int(inf["co0"]),
+                "co_p1_id": int(inf["co1"]),
+                "tier": str(inf.get("tier") or "T2"),
+            }
         if meta is None:
             continue
         mid = _meta(meta, "map_id")

@@ -25,9 +25,8 @@ Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps 
   ``fleet/<id>/operator_train_args_override.json`` per-flag (same order as
   :mod:`scripts.fleet_orchestrator` on a tick). **Opening book:** if
   ``--opening-book*`` flags are **absent** from ``proposed['args']``, they are filled from
-  :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (currently empty; add a
-  validated JSONL in curriculum or ``proposed_args`` when ready). Pass
-  ``--no-default-opening-book`` to skip that injection (no-op while defaults are empty).
+  :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (``data/opening_books/std_pool_precombat.jsonl``,
+  both seats). Pass ``--no-default-opening-book`` to skip that injection.
   Remaining gaps: ``--train-extra-args``.
   ``n_envs<=4`` on pc-b is operator-validated
   (FPS plan 2026-04-22); propose_train_args enforces the cap from probe.
@@ -53,7 +52,8 @@ those from flags after parsing.
 Before ``train.py`` starts, Cython extensions are rebuilt (``build_ext``): on Windows
 ``scripts/rebuild_cython_extensions.py`` (avoids in-place ``.pyd`` lock issues), else
 ``setup.py build_ext --inplace``. Use ``--skip-cython-rebuild`` to skip when extensions
-are already current.
+are already current. If copy fails with WinError 32, check for **multiprocessing.spawn**
+workers (VecEnv children), not only ``train.py`` — run ``python scripts/diagnose_cython_lock.py``.
 
 When ``--auto-apply`` is enabled, ``fleet_orchestrator`` may **terminate and respawn** ``train.py``
 (rewriting ``fleet/<id>/train.pid``).  The first ``train`` Popen the bootstrap created then exits
@@ -669,8 +669,8 @@ def _merge_default_opening_book_train_args(
 ) -> None:
     """
     If ``proposed['args']`` does not set opening-book train flags, apply
-    :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (currently empty — opt-in
-    ``--opening-book*`` after validating a real JSONL). Keys already present are left unchanged.
+    :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (precombat std-pool book,
+    both seats). Keys already present are left unchanged.
     """
     if not enabled:
         return
@@ -974,6 +974,77 @@ def _find_cohort_conflicts(machine_id: str) -> list[tuple[int, list[str]]]:
                 out.append((int(pid), cmdline))
                 continue
             if _cmdline_orchestrator_for_pool(cmdline, machine_id):
+                out.append((int(pid), cmdline))
+        except (psutil.Error, TypeError, ValueError):
+            continue
+    return out
+
+
+def _cwd_under_repo(cwd: str, repo_root: Path) -> bool:
+    """True if *cwd* resolves to *repo_root* or a subdirectory."""
+    if not cwd:
+        return False
+    try:
+        cwd_r = Path(cwd).resolve()
+        repo_r = repo_root.resolve()
+    except OSError:
+        return False
+    if cwd_r == repo_r:
+        return True
+    try:
+        cwd_r.relative_to(repo_r)
+        return True
+    except ValueError:
+        return False
+
+
+def _find_cython_rebuild_blockers(repo_root: Path) -> list[tuple[int, list[str]]]:
+    """
+    Python processes that typically keep ``engine/*.pyd`` / ``rl/*.pyd`` mapped on Windows.
+
+    Includes ``train.py`` **and** ``multiprocessing.spawn`` workers (e.g. SubprocVecEnv):
+    those children run ``python -c from multiprocessing.spawn import spawn_main ...`` with
+    no ``train.py`` in argv, so a train-only grep misses them — a common WinError 32 cause.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return []
+    out: list[tuple[int, list[str]]] = []
+    self_pid = os.getpid()
+    repo_r = repo_root.resolve()
+    rps = str(repo_r).lower()
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        pid = proc.info.get("pid")
+        if pid is None or int(pid) == self_pid:
+            continue
+        raw = proc.info.get("cmdline")
+        if not raw:
+            continue
+        cmdline = list(raw)
+        name = (proc.info.get("name") or "").lower()
+        if not name.startswith("python"):
+            continue
+        try:
+            pobj = psutil.Process(int(pid))
+            try:
+                cwd = str(pobj.cwd())
+            except (psutil.Error, OSError):
+                cwd = ""
+            joined = " ".join(cmdline)
+            low = joined.lower()
+            blocked = False
+            if _cmdline_mentions_train_py(cmdline):
+                blocked = True
+            elif "multiprocessing.spawn" in low and (
+                _cwd_under_repo(cwd, repo_r) or rps in low
+            ):
+                blocked = True
+            elif "pytest" in low and _cwd_under_repo(cwd, repo_r):
+                blocked = True
+            elif "ipykernel" in low and _cwd_under_repo(cwd, repo_r):
+                blocked = True
+            if blocked:
                 out.append((int(pid), cmdline))
         except (psutil.Error, TypeError, ValueError):
             continue
@@ -1637,7 +1708,7 @@ def main() -> int:
         action="store_true",
         help=(
             "Do not fill missing --opening-book* keys from curriculum "
-            "DEFAULT_OPENING_BOOK_TRAIN_ARGS (no-op while that dict is empty)."
+            "DEFAULT_OPENING_BOOK_TRAIN_ARGS (std_pool_precombat.jsonl, both seats)."
         ),
     )
     ap.add_argument(
@@ -1882,8 +1953,25 @@ def main() -> int:
         return 1
 
     if not args.skip_cython_rebuild:
+        cy_blockers = _find_cython_rebuild_blockers(REPO_ROOT)
+        if cy_blockers:
+            lines = [
+                "Refusing Cython rebuild: a Python process still has *.pyd loaded (Windows WinError 32). "
+                "Often a stray train.py **or** a SubprocVecEnv multiprocessing.spawn worker "
+                "(no 'train.py' in argv). Stop those PIDs, or run "
+                "`python scripts/diagnose_cython_lock.py`, or use --skip-cython-rebuild if .pyx unchanged:"
+            ]
+            for pid, cmdline in cy_blockers:
+                lines.append(f"  pid={pid} cmdline={' '.join(cmdline)!r}")
+            msg = "\n".join(lines)
+            log.error("%s", msg)
+            print(msg, file=sys.stderr)
+            return 1
         rc = _rebuild_cython_extensions(log)
         if rc != 0:
+            log.error(
+                "Cython rebuild failed; if sources are unchanged retry with --skip-cython-rebuild"
+            )
             return rc
 
     proposed = _read_json(proposed_path)

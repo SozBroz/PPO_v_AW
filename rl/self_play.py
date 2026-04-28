@@ -1062,6 +1062,7 @@ class _PicklableEnvFactory:
         "opponent_force_cpu",
         "opening_book_path",
         "opening_book_seat",
+        "opening_book_seats",
         "opening_book_prob",
         "opening_book_strict_co",
         "opening_book_max_day",
@@ -1092,6 +1093,7 @@ class _PicklableEnvFactory:
         opponent_force_cpu: bool = False,
         opening_book_path: str | None = None,
         opening_book_seat: int = 1,
+        opening_book_seats: str | None = "both",
         opening_book_prob: float = 1.0,
         opening_book_strict_co: bool = False,
         opening_book_max_day: int | None = None,
@@ -1119,6 +1121,7 @@ class _PicklableEnvFactory:
         self.opponent_force_cpu = bool(opponent_force_cpu)
         self.opening_book_path = opening_book_path
         self.opening_book_seat = int(opening_book_seat)
+        self.opening_book_seats = str(opening_book_seats or opening_book_seat)
         self.opening_book_prob = float(opening_book_prob)
         self.opening_book_strict_co = bool(opening_book_strict_co)
         self.opening_book_max_day = opening_book_max_day
@@ -1150,18 +1153,6 @@ class _PicklableEnvFactory:
             inference_device=opp_dev,
             gpu_infer_semaphore=self.gpu_infer_semaphore,
         )
-        if self.opening_book_path:
-            from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
-
-            opponent = OpeningBookCheckpointOpponent(
-                opponent,
-                self.opening_book_path,
-                book_seat=self.opening_book_seat,
-                book_prob=self.opening_book_prob,
-                strict_co=self.opening_book_strict_co,
-                max_day=self.opening_book_max_day,
-                seed=self.opening_book_seed + int(self.worker_index),
-            )
         env = AWBWEnv(
             map_pool=self.map_pool,
             opponent_policy=opponent,
@@ -1176,6 +1167,13 @@ class _PicklableEnvFactory:
             live_snapshot_path=self.live_snapshot_path,
             live_games_id=self.live_games_id,
             live_fallback_curriculum=self.live_fallback_curriculum,
+            opening_book_path=self.opening_book_path,
+            opening_book_seats=self.opening_book_seats,
+            opening_book_prob=self.opening_book_prob,
+            opening_book_strict_co=self.opening_book_strict_co,
+            opening_book_max_day=self.opening_book_max_day,
+            opening_book_seed=self.opening_book_seed + int(self.worker_index),
+            opening_book_force_mask_for_learner=True,
         )
         opponent.attach_env(env)
         return ActionMasker(env, _mask_fn)
@@ -1204,6 +1202,7 @@ def _make_env_factory(
     opponent_force_cpu: bool = False,
     opening_book_path: str | None = None,
     opening_book_seat: int = 1,
+    opening_book_seats: str | None = "both",
     opening_book_prob: float = 1.0,
     opening_book_strict_co: bool = False,
     opening_book_max_day: int | None = None,
@@ -1233,6 +1232,7 @@ def _make_env_factory(
         opponent_force_cpu=opponent_force_cpu,
         opening_book_path=opening_book_path,
         opening_book_seat=opening_book_seat,
+        opening_book_seats=opening_book_seats,
         opening_book_prob=opening_book_prob,
         opening_book_strict_co=opening_book_strict_co,
         opening_book_max_day=opening_book_max_day,
@@ -1629,6 +1629,7 @@ class SelfPlayTrainer:
         async_log_rho_floor: float = -20.0,
         opening_book_path: Path | str | None = None,
         opening_book_seat: int = 1,
+        opening_book_seats: str | None = "both",
         opening_book_prob: float = 1.0,
         opening_book_strict_co: bool = False,
         opening_book_max_day: int | None = None,
@@ -1696,6 +1697,7 @@ class SelfPlayTrainer:
             )
             self.opening_book_path = None
         self.opening_book_seat = int(opening_book_seat)
+        self.opening_book_seats = str(opening_book_seats or opening_book_seat)
         self.opening_book_prob = float(max(0.0, min(1.0, float(opening_book_prob))))
         self.opening_book_strict_co = bool(opening_book_strict_co)
         self.opening_book_max_day = (
@@ -1924,6 +1926,7 @@ class SelfPlayTrainer:
             max_p1_microsteps=self.max_p1_microsteps,
             opening_book_path=self.opening_book_path,
             opening_book_seat=self.opening_book_seat,
+            opening_book_seats=self.opening_book_seats,
             opening_book_prob=self.opening_book_prob,
             opening_book_strict_co=self.opening_book_strict_co,
             opening_book_max_day=self.opening_book_max_day,
@@ -2037,18 +2040,6 @@ class SelfPlayTrainer:
                 fleet_opponent_root=self.fleet_opponent_root,
                 inference_device=opp_dev,
             )
-            if self.opening_book_path and n_live == 0:
-                from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
-
-                opponent = OpeningBookCheckpointOpponent(
-                    opponent,
-                    self.opening_book_path,
-                    book_seat=self.opening_book_seat,
-                    book_prob=self.opening_book_prob,
-                    strict_co=self.opening_book_strict_co,
-                    max_day=self.opening_book_max_day,
-                    seed=self.opening_book_seed,
-                )
             env = AWBWEnv(
                 map_pool=self.map_pool,
                 opponent_policy=opponent,
@@ -2062,6 +2053,13 @@ class SelfPlayTrainer:
                 max_p1_microsteps=self.max_p1_microsteps,
                 live_snapshot_path=lpath,
                 live_games_id=lgid,
+                opening_book_path=(self.opening_book_path if n_live == 0 else None),
+                opening_book_seats=self.opening_book_seats,
+                opening_book_prob=self.opening_book_prob,
+                opening_book_strict_co=self.opening_book_strict_co,
+                opening_book_max_day=self.opening_book_max_day,
+                opening_book_seed=self.opening_book_seed,
+                opening_book_force_mask_for_learner=True,
             )
             opponent.attach_env(env)
             return ActionMasker(env, _mask_fn)
