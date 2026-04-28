@@ -684,7 +684,10 @@ def _get_select_actions(
 
     # Direct factory BUILD actions (AWBW-correct: factories build without unit activation)
     # Generate BUILD actions for each owned empty factory/airport/port
-    if len(state.units[player]) < state.map_data.unit_limit:
+    # Match ``_apply_build``: only alive units count toward the cap (hp==0 placeholders
+    # must not suppress legal BUILDs or oracle replay diverges from AWBW).
+    _alive = sum(1 for u in state.units[player] if u.is_alive)
+    if _alive < state.map_data.unit_limit:
         for prop in state.properties:
             if prop.owner == player:
                 terrain = get_terrain(state.map_data.terrain[prop.row][prop.col])

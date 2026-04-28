@@ -130,7 +130,7 @@ class GameState:
     selected_move_pos: Optional[tuple[int, int]]
     done:              bool
     winner:            Optional[int]           # 0, 1, or -1 (draw)
-    win_reason:        Optional[str]           # e.g. hq_capture; max_turns_tie (|Δprops|≤1); max_turns_tiebreak
+    win_reason:        Optional[str]           # e.g. hq_capture; max_turns_draw; max_turns_tiebreak
     game_log:          list[dict]              # append-only action history (resolved actions only)
     tier_name:         str
     max_turns:         int = field(default=MAX_TURNS)  # calendar tiebreak after this day count (see _end_turn)
@@ -575,17 +575,15 @@ class GameState:
                 self.done = True
                 p0_props = self.count_properties(0)
                 p1_props = self.count_properties(1)
-                # Within 1 property → no winner; Φ uses −0.1 (see env). Diff ≥ 2
-                # is required for a calendar tiebreak winner (legacy: equal only).
-                if abs(int(p0_props) - int(p1_props)) <= 1:
-                    self.winner = -1
-                    self.win_reason = "max_turns_tie"
-                elif p0_props > p1_props:
+                if p0_props > p1_props:
                     self.winner = 0
                     self.win_reason = "max_turns_tiebreak"
-                else:
+                elif p1_props > p0_props:
                     self.winner = 1
                     self.win_reason = "max_turns_tiebreak"
+                else:
+                    self.winner = -1
+                    self.win_reason = "max_turns_draw"
                 return
 
         # Start of opponent's turn: reset moved flags, consume idle fuel, crash units.
@@ -807,8 +805,10 @@ class GameState:
 
         # Sensei COP: spawn Mech on every owned base without a unit
         elif co.co_id == 13 and cop:
+            # Count only alive units for unit limit check
+            alive_units = [u for u in self.units[player] if u.is_alive]
             for prop in self.properties:
-                if len(self.units[player]) >= self.map_data.unit_limit:
+                if len(alive_units) >= self.map_data.unit_limit:
                     break
                 if prop.owner == player and prop.is_base:
                     if self.get_unit_at(prop.row, prop.col) is None:
@@ -826,6 +826,7 @@ class GameState:
                             unit_id=self._allocate_unit_id(),
                         )
                         self.units[player].append(mech)
+                        alive_units.append(mech)
 
         # Drake: deal HP damage + fuel drain to enemy air units
         elif co.co_id == 5:
@@ -2240,7 +2241,9 @@ class GameState:
                 raise IllegalActionError("BUILD: factory tile occupied")
             return
 
-        if len(self.units[player]) >= self.map_data.unit_limit:
+        # Count only alive units for unit limit check
+        alive_units = [u for u in self.units[player] if u.is_alive]
+        if len(alive_units) >= self.map_data.unit_limit:
             if oracle_strict:
                 raise IllegalActionError("BUILD: unit limit reached")
             return

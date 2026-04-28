@@ -181,7 +181,7 @@ Lane M's drilled Capt case (gid 1616284) was the Andy SCOP +1 movement parity ga
 
 The legality contract lives in `engine/game.py::step`:
 
-```209:236:c:\Users\phili\AWBW\engine\game.py
+```209:236:D:\AWBW\engine\game.py
     def step(
         self, action: Action, *, oracle_mode: bool = False
     ) -> tuple[GameState, float, bool]:

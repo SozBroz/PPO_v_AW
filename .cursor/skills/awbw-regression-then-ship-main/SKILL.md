@@ -22,7 +22,7 @@ After **substantive code or test changes** in this repo, when the user (or the t
 **CI-equivalent** — matches [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
 ```powershell
-cd C:/Users/phili/AWBW   # or the active clone; use the workspace root
+cd D:/AWBW   # or the active clone; use the workspace root
 python -m pytest -q --tb=line
 ```
 

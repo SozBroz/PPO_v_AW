@@ -82,6 +82,7 @@ def _game_row(mid: str) -> dict:
     return {
         "machine_id": mid,
         "turns": 35,
+        "done": True,
         "captures_completed_p0": 3.0,
         "first_p0_capture_p0_step": 10.0,
         "terrain_usage_p0": 0.55,
@@ -103,6 +104,7 @@ def test_curriculum_stage_change_appends_fleet_curriculum_log(tmp_path: Path) ->
     row = {
         "machine_id": mid,
         "turns": 35,
+        "done": True,
         "captures_completed_p0": 4.0,
         "first_p0_capture_p0_step": 10.0,
         "terrain_usage_p0": 0.6,
@@ -133,8 +135,8 @@ def test_curriculum_stage_change_appends_fleet_curriculum_log(tmp_path: Path) ->
     lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["from_stage"] == "stage_a_capture_bootstrap"
-    assert doc["to_stage"] == "stage_b_capture_competent"
+    assert doc["from_stage"] == "stage_a1_capture_clean"
+    assert doc["to_stage"] == "stage_b0_capture_decay"
     assert doc["metrics"]["median_first_p0_capture_step"] == 10.0
     o.tick()
     lines2 = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln]

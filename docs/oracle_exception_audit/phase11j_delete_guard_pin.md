@@ -116,7 +116,7 @@ python -c "from engine.action import ActionType; print('SHOULD NOT PRINT')"
 ```
 Traceback (most recent call last):
   File "<string>", line 1, in <module>
-  File "C:\Users\phili\AWBW\engine\action.py", line 827, in <module>
+  File "D:\AWBW\engine\action.py", line 827, in <module>
     assert not _collision, (
            ^^^^^^^^^^^^^^
 AssertionError: ActionType contains forbidden RL action(s): {'DELETE'}.

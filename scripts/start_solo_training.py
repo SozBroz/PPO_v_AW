@@ -15,6 +15,8 @@ starts ``train.py`` and ``fleet_orchestrator.py``, and tears both down cleanly o
   Child ``train.py`` stdout/stderr are appended to ``logs/solo_train_train_py_<machine_id>.log``;
   ``fleet_orchestrator.py`` to ``logs/solo_train_fleet_orchestrator_<machine_id>.log`` (also when
   a console exists) so tracebacks and terminations are not lost.
+  Optional ``--orchestrator-curriculum-window-games N`` forwards ``--curriculum-window-games``
+  to the orchestrator (rolling game-log window for curriculum metrics; default if omitted: 200).
 
 Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps / batch_size):
   Misery Andy mirror ``--map-id 123858 --tier T3 --co-p0 1 --co-p1 1`` (matches fleet
@@ -1594,6 +1596,16 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--orchestrator-curriculum-window-games",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "When set, forwarded to fleet_orchestrator --curriculum-window-games (rolling "
+            "game-log window for curriculum metrics). Omit to use orchestrator default (200)."
+        ),
+    )
+    ap.add_argument(
         "--live-games-dir",
         type=Path,
         default=REPO_ROOT / "replays" / "amarinner_my_games",
@@ -1898,6 +1910,13 @@ def main() -> int:
                     str(args.train_bootstrap_grace_s),
                 ]
             )
+        if args.orchestrator_curriculum_window_games is not None:
+            orch_bits.extend(
+                [
+                    "--curriculum-window-games",
+                    str(args.orchestrator_curriculum_window_games),
+                ]
+            )
         print(f"[dry-run] orchestrator cmd: {orch_bits}")
         return 0
 
@@ -2149,6 +2168,13 @@ def main() -> int:
     if args.train_bootstrap_grace_s > 0:
         orch_argv.extend(
             ["--train-bootstrap-grace-s", str(args.train_bootstrap_grace_s)]
+        )
+    if args.orchestrator_curriculum_window_games is not None:
+        orch_argv.extend(
+            [
+                "--curriculum-window-games",
+                str(args.orchestrator_curriculum_window_games),
+            ]
         )
 
     orch_subproc_log_fh: Any = None

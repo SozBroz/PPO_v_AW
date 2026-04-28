@@ -14,7 +14,7 @@
 
 `_action_to_flat` — `SELECT_UNIT` uses `unit_pos` only:
 
-```191:194:c:\Users\phili\AWBW\rl\env.py
+```191:194:D:\AWBW\rl\env.py
     if at == ActionType.SELECT_UNIT:
         # SELECT: unit tile; MOVE stage also uses SELECT_UNIT with move_pos set (engine).
         r, c = action.unit_pos
@@ -23,7 +23,7 @@
 
 `_flat_to_action` — collision resolution is **first match in `legal` iteration order** (not a geometric inverse of `flat_idx`):
 
-```254:268:c:\Users\phili\AWBW\rl\env.py
+```254:268:D:\AWBW\rl\env.py
 def _flat_to_action(
     flat_idx: int,
     state: GameState,

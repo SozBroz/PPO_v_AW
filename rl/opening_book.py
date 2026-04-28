@@ -14,38 +14,12 @@ stored in the learner rollout buffer.
 from __future__ import annotations
 
 import json
-import os
 import random
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-
-# region agent log
-_AGENT_DEBUG_LOG_PATH = Path(__file__).parent.parent / "debug-a6d5a1.log"
-_AGENT_DEBUG_SESSION_ID = "a6d5a1"
-
-
-def _agent_debug_log(
-    hypothesis_id: str, location: str, message: str, data: dict[str, Any]
-) -> None:
-    try:
-        payload = {
-            "sessionId": _AGENT_DEBUG_SESSION_ID,
-            "runId": "opening-book-env-refactor",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": {**data, "pid": os.getpid()},
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-# endregion
 
 
 @dataclass(frozen=True)
@@ -104,6 +78,11 @@ def _book_from_obj(
     if map_id <= 0 or seat not in (0, 1) or not action_indices:
         return None
     co_id_raw = payload.get("co_id", root.get("co_id"))
+    if co_id_raw in (None, "", 0, "0"):
+        c0 = payload.get("co0", root.get("co0"))
+        c1 = payload.get("co1", root.get("co1"))
+        if c0 is not None and c1 is not None:
+            co_id_raw = int(c0) if seat == 0 else int(c1)
     co_id = int(co_id_raw) if co_id_raw not in (None, "", 0, "0") else None
     base_book_id = str(root.get("joint_book_id") or root.get("book_id") or f"line{line_no}")
     if "joint_book_id" in root or isinstance(root.get("seats"), dict):
@@ -181,20 +160,6 @@ class OpeningBookController:
         self.candidate_count = len(cands)
         if self._strict_co and co_id_for_seat is not None:
             cands = [b for b in cands if b.co_id is None or b.co_id == int(co_id_for_seat)]
-        _agent_debug_log(
-            "opening-book",
-            "rl/opening_book.py:OpeningBookController.on_episode_start",
-            "opening book episode lookup",
-            {
-                "episode_id": int(episode_id),
-                "map_id": int(map_id),
-                "seat": int(self._seat),
-                "enabled": bool(enabled),
-                "strict_co": bool(self._strict_co),
-                "co_id_for_seat": co_id_for_seat,
-                "candidate_count": len(cands),
-            },
-        )
         if not enabled or not cands:
             return
         self._book = self._rng.choice(cands)
@@ -413,6 +378,7 @@ class OpeningBookCheckpointOpponent:
 
     @property
     def _model(self) -> Any:
+        """Same checkpoint as P1 after book lines; used for spirit / heuristic value diag."""
         return getattr(self._inner, "_model", None)
 
     def needs_observation(self) -> bool:

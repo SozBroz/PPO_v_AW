@@ -17,7 +17,7 @@ This document summarizes the debugging fixes and new features implemented based 
 
 **Usage:**
 ```bash
-# From project root (C:\Users\phili\AWBW)
+# From project root (D:\AWBW)
 python -m server.app
 
 # Or directly (now works)

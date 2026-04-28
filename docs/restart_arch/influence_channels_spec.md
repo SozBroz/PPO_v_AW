@@ -205,7 +205,7 @@ Recommended **six** new spatial planes (omit optional `income_pressure` for the 
 
 ## 4. Insertion point in `encode_state` (`rl/encoder.py`)
 
-Current flow (line references from `c:\Users\phili\AWBW\rl\encoder.py` at time of writing):
+Current flow (line references from `D:\AWBW\rl\encoder.py` at time of writing):
 
 - **57–65:** `N_SPATIAL_CHANNELS` and block size constants.
 - **187–198:** `H`, `W`, spatial buffer allocation, `hp_lo_ch` / `hp_hi_ch` indices.

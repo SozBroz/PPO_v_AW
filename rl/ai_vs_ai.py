@@ -649,15 +649,16 @@ def _apply_max_turn_tiebreak(state: GameState) -> None:
     state.done = True
     p0_props = state.count_properties(0)
     p1_props = state.count_properties(1)
-    if abs(int(p0_props) - int(p1_props)) <= 1:
-        state.winner = -1
-        state.win_reason = "max_turns_tie"
-    elif p0_props > p1_props:
+    # Keep in lockstep with ``GameState._end_turn`` calendar cap (AWBW parity).
+    if p0_props > p1_props:
         state.winner = 0
         state.win_reason = "max_turns_tiebreak"
-    else:
+    elif p1_props > p0_props:
         state.winner = 1
         state.win_reason = "max_turns_tiebreak"
+    else:
+        state.winner = -1
+        state.win_reason = "max_turns_draw"
 
 
 def run_game(

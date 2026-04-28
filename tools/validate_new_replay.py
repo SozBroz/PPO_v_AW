@@ -1,8 +1,8 @@
 import gzip, io, re, zipfile, json
 from pathlib import Path
 
-NEW_ZIP = Path(r"C:\Users\phili\AWBW\replays\128692.zip")
-TERRAIN = Path(r"C:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\180298.json")
+NEW_ZIP = Path(r"D:\AWBW\replays\128692.zip")
+TERRAIN = Path(r"D:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\180298.json")
 
 
 def load_line0(path):

@@ -248,19 +248,19 @@ Counts are **occurrences triaged** (one row can combine adjacent related handler
 
 ## Appendix: `desync_audit.py` — harness behavior (reference)
 
-```144:146:c:\Users\phili\AWBW\tools\desync_audit.py
+```144:146:D:\AWBW\tools\desync_audit.py
             except Exception as exc:  # noqa: BLE001 — we classify upstream
                 return exc
 ```
 
-```440:446:c:\Users\phili\AWBW\tools\desync_audit.py
+```440:446:D:\AWBW\tools\desync_audit.py
     except Exception as exc:  # noqa: BLE001 — pre-replay setup failures
         base.status = "first_divergence"
         cls, et, msg = _classify(exc)
         base.cls = cls if cls != CLS_ENGINE_BUG else CLS_LOADER_ERROR
 ```
 
-```598:607:c:\Users\phili\AWBW\tools\desync_audit.py
+```598:607:D:\AWBW\tools\desync_audit.py
             except Exception as exc:  # safety net — never let one zip stop the batch
                 row = AuditRow(
                     games_id=gid, map_id=_meta_int(meta, "map_id"),

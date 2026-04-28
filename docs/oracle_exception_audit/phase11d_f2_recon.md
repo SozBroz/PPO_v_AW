@@ -81,7 +81,7 @@ Lane L comment in `tools/oracle_zip_replay.py::_apply_move_paths_then_terminator
 
 ```text
 "<repo>\third_party\AWBW-Replay-Player\AWBWApp.Desktop\bin\Release\net6.0\AWBW Replay Player.exe"
-  "C:\Users\phili\AWBW\replays\amarriner_gl\1630794.zip"
+  "D:\AWBW\replays\amarriner_gl\1630794.zip"
   --goto-envelope=37
 ```
 
@@ -90,7 +90,7 @@ Optional: `--goto-day=19 --goto-player=3768108` to align with envelope tuple. St
 **1605367 (same COP pattern):**
 
 ```text
-... "C:\Users\phili\AWBW\replays\amarriner_gl\1605367.zip" --goto-envelope=32
+... "D:\AWBW\replays\amarriner_gl\1605367.zip" --goto-envelope=32
 ```
 
 ---

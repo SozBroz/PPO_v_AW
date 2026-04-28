@@ -111,7 +111,7 @@ def _resupply_on_properties(self, player: int):
 
 ### After
 
-```1565:1597:c:\Users\phili\AWBW\engine\game.py
+```1565:1597:D:\AWBW\engine\game.py
     def _resupply_on_properties(self, player: int):
         """Units standing on owned properties are resupplied at start of turn.
 

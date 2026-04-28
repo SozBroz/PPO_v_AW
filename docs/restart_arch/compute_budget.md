@@ -34,7 +34,7 @@ The following matches **`AWBWNet`** and shared trunk pieces in **`rl/network.py`
 - `train.py` **defaults** (this repo): `--n-envs 6`, `--n-steps 512`, `--batch-size 256`. `rl.self_play.SelfPlayTrainer` matches **n_steps=512**, **batch_size=256**, **n_epochs=10**. Many fleet notes still cite **n_envs=4** as a stable long-run setting on pc-b (see perf doc recommendation).
 - The rows above are **end-to-end training** throughput; after the restart bundle, the learner forward path is the **shipped** **`AWBWNet`** (full-grid trunk + factored heads). Re-bench if comparing against pre-restart numbers.
 - **`checkpoints_fps_validate_n4/` / `checkpoints_fps_validate_n6/`:** In this workspace the directories are **empty or absent** — no `metadata.json` or FPS logs were available to read.
-- **Terminals:** A scan of `c:\Users\phili\.cursor\projects\c-Users-phili-AWBW\terminals\*.txt` showed no recent `env_steps_per_s_*` lines (e.g. active `ai_vs_ai` run only).
+- **Terminals:** A scan of `D:\Users\phili\.cursor\projects\c-Users-phili-AWBW\terminals\*.txt` showed no recent `env_steps_per_s_*` lines (e.g. active `ai_vs_ai` run only).
 
 **If no on-machine number is trusted:** Run a clean bench **before** committing to tower size:
 

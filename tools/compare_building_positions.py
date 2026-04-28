@@ -6,14 +6,14 @@ import gzip, io, re, zipfile, json
 from pathlib import Path
 
 # Reference replay
-REF_PATH  = Path(r"C:\Users\phili\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip")
+REF_PATH  = Path(r"D:\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip")
 # Latest homebrew replay
 import glob
-gen = sorted(glob.glob(r"C:\Users\phili\AWBW\replays\1?????.zip"))
+gen = sorted(glob.glob(r"D:\AWBW\replays\1?????.zip"))
 CAND_PATH = Path(gen[-1]) if gen else None
 
 # Terrain JSON for the homebrew map (133665)
-TERRAIN_PATH = Path(r"C:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\133665.json")
+TERRAIN_PATH = Path(r"D:\Users\phili\AppData\Roaming\AWBWReplayPlayer\ReplayData\Terrain\133665.json")
 
 
 def load_turn0(path: Path) -> str:

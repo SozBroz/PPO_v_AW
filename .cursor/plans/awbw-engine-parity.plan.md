@@ -48,7 +48,7 @@ Single plan merging former **Black Boat AWBW parity** and **Pipe seam verificati
 
 ### Self-repair
 
-[`_black_boat_repair`](c:\Users\phili\AWBW\engine\game.py) only scans orthogonal **neighbors**, so the boat is never `adj` in normal play. Still add **`if adj is boat: continue`** for defense-in-depth.
+[`_black_boat_repair`](D:\AWBW\engine\game.py) only scans orthogonal **neighbors**, so the boat is never `adj` in normal play. Still add **`if adj is boat: continue`** for defense-in-depth.
 
 ### Rules to implement
 
@@ -73,7 +73,7 @@ flowchart TB
 
 ### Files
 
-[`engine/game.py`](c:\Users\phili\AWBW\engine\game.py), [`engine/action.py`](c:\Users\phili\AWBW\engine\action.py), [`tools/export_awbw_replay_actions.py`](c:\Users\phili\AWBW\tools\export_awbw_replay_actions.py), new/extended `test_*.py`.
+[`engine/game.py`](D:\AWBW\engine\game.py), [`engine/action.py`](D:\AWBW\engine\action.py), [`tools/export_awbw_replay_actions.py`](D:\AWBW\tools\export_awbw_replay_actions.py), new/extended `test_*.py`.
 
 ---
 
@@ -82,22 +82,22 @@ flowchart TB
 ### AWBW reference
 
 - **99 HP** per seam; defense as **100/100 Neotank on 0★**; **no luck**; **CO + Comm Tower** bonuses apply.
-- Broken tile = **Broken Seam** — **115 / 116** in [`terrain.py`](c:\Users\phili\AWBW\engine\terrain.py) (`HPipe Rubble` / `VPipe Rubble`), Plains-like; **Piperunners** cannot traverse broken seam (per wiki).
+- Broken tile = **Broken Seam** — **115 / 116** in [`terrain.py`](D:\AWBW\engine\terrain.py) (`HPipe Rubble` / `VPipe Rubble`), Plains-like; **Piperunners** cannot traverse broken seam (per wiki).
 
 ### Gap
 
-[`_apply_attack`](c:\Users\phili\AWBW\engine\game.py) returns early when `get_unit_at(target_pos)` is **None**, so **empty seams cannot be struck**. No seam HP state; [`damage_table.json`](c:\Users\phili\AWBW\data\damage_table.json) has no seam column.
+[`_apply_attack`](D:\AWBW\engine\game.py) returns early when `get_unit_at(target_pos)` is **None**, so **empty seams cannot be struck**. No seam HP state; [`damage_table.json`](D:\AWBW\data\damage_table.json) has no seam column.
 
 ### Implementation direction
 
 - Store **remaining seam HP** (or damage tally) for tiles 113/114.
-- **Targetability (acceptance check):** Seams must be **selectable** like unit targets — the legal-action pipeline must not require `get_unit_at(target)` for seam tiles; today [`_apply_attack`](c:\Users\phili\AWBW\engine\game.py) bails when `defender is None` — fixing that is part of **seam-targetable-check** + **seam-attack-seam**.
+- **Targetability (acceptance check):** Seams must be **selectable** like unit targets — the legal-action pipeline must not require `get_unit_at(target)` for seam tiles; today [`_apply_attack`](D:\AWBW\engine\game.py) bails when `defender is None` — fixing that is part of **seam-targetable-check** + **seam-attack-seam**.
 - **Attack seam** path (or extend attack): apply seam damage formula, then if **≥ 99** damage accumulated, rewrite **`map_data.terrain[r][c]`** to **115** or **116** (preserve H vs V).
 - Encode or import **per-unit-type base damage vs seam** from [wiki table](https://awbw.fandom.com/wiki/Pipes_and_Pipeseams).
 
 ### Files
 
-Same core trio as Part A (`game.py`, `action.py`, export tools), plus [`engine/map_loader.py`](c:\Users\phili\AWBW\engine\map_loader.py) / `MapData` if seam state lives on the map, [`data/`](c:\Users\phili\AWBW\data) for seam damage data if not hardcoded.
+Same core trio as Part A (`game.py`, `action.py`, export tools), plus [`engine/map_loader.py`](D:\AWBW\engine\map_loader.py) / `MapData` if seam state lives on the map, [`data/`](D:\AWBW\data) for seam damage data if not hardcoded.
 
 ---
 
@@ -110,13 +110,13 @@ Symptoms reported:
 
 **Constraints:** Treat as **export / trace / action-stream** correctness unless proven viewer-only. Cross-check upstream AWBW Replay Player sources on GitHub; we do not keep a vendored C# tree in-repo.
 
-**Suggested workflow:** Locate `170901` artifact under [`replays/`](c:\Users\phili\AWBW\replays) or regenerate from trace; use [`tools/export_awbw_replay_actions.py`](c:\Users\phili\AWBW\tools\export_awbw_replay_actions.py) rebuild path and [`tools/compare_awbw_replays.py`](c:\Users\phili\AWBW\tools\compare_awbw_replays.py) / [`deep_diff_replays.py`](c:\Users\phili\AWBW\tools\deep_diff_replays.py) if a reference zip exists; bisect which turn’s envelope first fails deserialization or state rebuild.
+**Suggested workflow:** Locate `170901` artifact under [`replays/`](D:\AWBW\replays) or regenerate from trace; use [`tools/export_awbw_replay_actions.py`](D:\AWBW\tools\export_awbw_replay_actions.py) rebuild path and [`tools/compare_awbw_replays.py`](D:\AWBW\tools\compare_awbw_replays.py) / [`deep_diff_replays.py`](D:\AWBW\tools\deep_diff_replays.py) if a reference zip exists; bisect which turn’s envelope first fails deserialization or state rebuild.
 
 ---
 
 ## Shared concerns
 
-- **`full_trace` / replay:** Both features need correct action types and snapshot consistency ([`awbw-replay-system` skill](c:\Users\phili\AWBW\.cursor\skills\awbw-replay-system\SKILL.md)).
+- **`full_trace` / replay:** Both features need correct action types and snapshot consistency ([`awbw-replay-system` skill](D:\AWBW\.cursor\skills\awbw-replay-system\SKILL.md)).
 - **Execution order:** Either sub-feature can be implemented first; both touch **`game.py`** `step` / attack terminators — coordinate merges to avoid conflicting branches. **Replay 170901** can be debugged in parallel once artifacts are in-tree.
 
 When ready to **execute**, exit plan mode and implement against the **todos** in the YAML frontmatter above.

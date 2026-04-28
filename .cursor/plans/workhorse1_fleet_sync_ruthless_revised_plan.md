@@ -243,7 +243,7 @@ The original plan correctly calls for `scp`/`sftp` plus `sha256`. Add a manifest
 On pc-b:
 
 ```powershell
-$src = "C:\Users\phili\AWBW\checkpoints\latest.zip"
+$src = "D:\AWBW\checkpoints\latest.zip"
 Get-FileHash $src -Algorithm SHA256
 git rev-parse HEAD
 ```
@@ -457,7 +457,7 @@ README.md fleet section
 ### On pc-b
 
 ```powershell
-cd C:\Users\phili\AWBW
+cd D:\AWBW
 git rev-parse HEAD
 git status --short
 Get-FileHash checkpoints\latest.zip -Algorithm SHA256

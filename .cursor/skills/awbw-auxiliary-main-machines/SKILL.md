@@ -5,7 +5,7 @@ description: >-
   flat (no tiers). The same Main **awbw** tree is **Samba-mounted** on each
   aux: **Windows** → **`Z:`** (`.122` is now Windows + `C:\\Users\\sshuser\\AWBW`);
   **Linux** non-`.122` → **`/mnt/awbw`**. Set `AWBW_SHARED_ROOT` to
-  match. Local dev clone is often C:/Users/phili/AWBW. Use for fleet, Main, Z:,
+  match. Local dev clone is often D:/AWBW. Use for fleet, Main, Z:,
   /mnt/awbw, 192.168.0.160, 192.168.0.122, D:/awbw, pool IDs, or multi-host work.
 ---
 
@@ -16,7 +16,7 @@ description: >-
 | Role | What it is |
 |------|------------|
 | **Main** | One canonical host: `sshuser@192.168.0.160` — Windows. Repo on disk: **`D:/awbw`**. Use **SSH** for shell, git, and anything that must run *on* Main. |
-| **Auxiliary** | **Any number** of machines — **no tiers** among them. Each may have a local git clone, pool ID, and SSH identity. The **current session** is often a **Windows** aux with this repo at **`C:/Users/phili/AWBW`**. **`192.168.0.122`** is a **Windows** aux (`C:\Users\sshuser\AWBW` + **`Z:\`**). **Other Linux** auxes use **`/mnt/awbw`**, not a drive letter. |
+| **Auxiliary** | **Any number** of machines — **no tiers** among them. Each may have a local git clone, pool ID, and SSH identity. The **current session** is often a **Windows** aux with this repo at **`D:/AWBW`**. **`192.168.0.122`** is a **Windows** aux (`C:\Users\sshuser\AWBW` + **`Z:\`**). **Other Linux** auxes use **`/mnt/awbw`**, not a drive letter. |
 
 ## Main’s `awbw` on aux: one Samba tree, two mount styles
 
@@ -49,7 +49,7 @@ When the user says **"both machines"**, they often mean **this dev box and Main*
 
 ## Agent behavior
 
-1. **Edits** default to **this workspace** `C:/Users/phili/AWBW` unless the task targets Main, a named aux, read-only **shared** tree, or SSH.
+1. **Edits** default to **this workspace** `D:/AWBW` unless the task targets Main, a named aux, read-only **shared** tree, or SSH.
 2. For Main’s awbw **via the network share**: on **this Windows session** use **`Z:/`**. On **Linux** fleet hosts, use **`/mnt/awbw/`** and set / assume **`AWBW_SHARED_ROOT=/mnt/awbw`** for training and pool paths.
 3. **Do not** assume every aux uses `Z:`; **map OS → mount** before building paths.
 4. **No hierarchy** among aux machines; **disambiguate host** when needed.

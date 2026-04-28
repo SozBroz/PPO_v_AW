@@ -72,7 +72,7 @@ def test_read_state_migrates_old_terminal_name(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     st = read_state(p)
-    assert st.current_stage_name == "stage_f_self_play_pure"
+    assert st.current_stage_name == "stage_f0_full_random_stub"
     # round-trip with migrated name
     st2 = CurriculumState(
         current_stage_name=st.current_stage_name,
@@ -83,4 +83,4 @@ def test_read_state_migrates_old_terminal_name(tmp_path: Path) -> None:
     )
     write_state(p, st2)
     st3 = read_state(p)
-    assert st3.current_stage_name == "stage_f_self_play_pure"
+    assert st3.current_stage_name == "stage_f0_full_random_stub"

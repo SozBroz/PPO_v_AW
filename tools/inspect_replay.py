@@ -1,6 +1,6 @@
 import zipfile, gzip, io, re, sys
 
-path = r"C:\Users\phili\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip"
+path = r"D:\AWBW\replays\replay_1630459_GL_STD_[T1]__Gronktastic_vs_justbored_2026-04-16.zip"
 with zipfile.ZipFile(path) as z:
     print("Zip entries:", z.namelist())
     for name in z.namelist():

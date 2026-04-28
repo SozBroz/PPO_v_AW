@@ -24,7 +24,7 @@
 3. **Mechanism (oracle, not terminator)**  
    `_oracle_set_combat_damage_override_from_combat_info` in `tools/oracle_zip_replay.py` maps AWBW `combatInfo` **`units_hit_points`** as **integer display bars** → internal HP via **`int × 10`** (capped 0–100). PHP can carry **fractional display** / sub-bucket internal HP that still **rounds to the same integer bar** in logs. Pinning damage from **integer bar only** can **over- or under-shoot** true internal HP vs PHP; luck and cascaded **repair/income** then diverge. Relevant implementation (unchanged in this closeout — **T5-owned** non-terminator oracle path):
 
-```1247:1271:c:\Users\phili\AWBW\tools\oracle_zip_replay.py
+```1247:1271:D:\AWBW\tools\oracle_zip_replay.py
     def _to_internal(disp_raw: Any) -> Optional[int]:
         if disp_raw is None:
             return None

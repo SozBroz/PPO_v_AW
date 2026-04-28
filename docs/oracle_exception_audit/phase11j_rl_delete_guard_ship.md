@@ -121,4 +121,4 @@ Oracle Delete handler retains full replay fidelity for AWBW zip reconstruction (
 
 The bot will not learn to scrap its own units.
 
-— Centurion, *castra* `c:\Users\phili\AWBW`
+— Centurion, *castra* `D:\AWBW`

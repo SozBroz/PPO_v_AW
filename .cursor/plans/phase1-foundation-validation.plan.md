@@ -14,14 +14,14 @@ todos:
     status: pending
   - id: stage1-narrow-bootstrap
     content: >-
-      Configure Stage 1 narrow bootstrap — Misery ([data/gl_map_pool.json](c:\Users\phili\AWBW\data\gl_map_pool.json)) map_id 123858,
-      Andy vs Andy (CO id 1), fixed T3 — in [train.py](c:\Users\phili\AWBW\train.py) / env factory; verify no accidental tier drift.
+      Configure Stage 1 narrow bootstrap — Misery ([data/gl_map_pool.json](D:\AWBW\data\gl_map_pool.json)) map_id 123858,
+      Andy vs Andy (CO id 1), fixed T3 — in [train.py](D:\AWBW\train.py) / env factory; verify no accidental tier drift.
     status: pending
   - id: slice-metrics-scripts
     content: >-
       Add or tighten scripts/notebooks to compute slice-specific explained_variance
       proxy (from TB exports if needed), win rate, turns, property differential from
-      [data/game_log.jsonl](c:\Users\phili\AWBW\data\game_log.jsonl); label outputs as slice vs global.
+      [data/game_log.jsonl](D:\AWBW\data\game_log.jsonl); label outputs as slice vs global.
     status: pending
   - id: phase1-narrow-exit
     content: >-
@@ -50,31 +50,31 @@ todos:
     status: pending
   - id: masterplan-elo-league-backlog
     content: >-
-      When ready (post Phase 1 Full / Phase 2 eval), paste [elo league plan](c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md) draft
+      When ready (post Phase 1 Full / Phase 2 eval), paste [elo league plan](D:\AWBW\.cursor\plans\elo_league_masterplan.plan.md) draft
       into MASTERPLAN as §10.5 + optional §2/§7 cross-refs. Does not block Stages 0–4.
     status: pending
 ---
 
 # Phase 1 foundation validation
 
-Plan derived from [MASTERPLAN.md](c:\Users\phili\AWBW\MASTERPLAN.md) §3 (gates), curriculum ladder §3 “Curriculum and distribution”, and Phase 1 Narrow vs Full definitions. Small training changes and observability first; distribution expansion is sequential, not parallel guesswork.
+Plan derived from [MASTERPLAN.md](D:\AWBW\MASTERPLAN.md) §3 (gates), curriculum ladder §3 “Curriculum and distribution”, and Phase 1 Narrow vs Full definitions. Small training changes and observability first; distribution expansion is sequential, not parallel guesswork.
 
 ## Non-goals
 
 - Declaring Phase 1 complete on narrow-slice metrics alone.
 - Competitive MCTS or hierarchical RL scope — only prerequisites where explicitly parallel (turn-level API).
-- **Elo / league eval** — [draft + paste instructions for MASTERPLAN §10.5](c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md) are deferred; not part of Phase 1 gates (optional Phase 2 eval/promotion layer).
+- **Elo / league eval** — [draft + paste instructions for MASTERPLAN §10.5](D:\AWBW\.cursor\plans\elo_league_masterplan.plan.md) are deferred; not part of Phase 1 gates (optional Phase 2 eval/promotion layer).
 
 ## Repository truth
 
 | Topic | Where |
 |------|--------|
-| Strategic thresholds and phase stack | [MASTERPLAN.md](c:\Users\phili\AWBW\MASTERPLAN.md) §2–§3 |
-| Training entry / hyperparameters | [train.py](c:\Users\phili\AWBW\train.py) |
-| Matchup and outcome telemetry | [data/game_log.jsonl](c:\Users\phili\AWBW\data\game_log.jsonl) |
-| Map pool reference | [data/gl_map_pool.json](c:\Users\phili\AWBW\data\gl_map_pool.json) |
-| Engine / replay cross-cutting work (separate track) | [awbw-engine-parity.plan.md](c:\Users\phili\AWBW\.cursor\plans\awbw-engine-parity.plan.md) |
-| Elo league → MASTERPLAN doc (backlog) | [elo_league_masterplan.plan.md](c:\Users\phili\AWBW\.cursor\plans\elo_league_masterplan.plan.md) |
+| Strategic thresholds and phase stack | [MASTERPLAN.md](D:\AWBW\MASTERPLAN.md) §2–§3 |
+| Training entry / hyperparameters | [train.py](D:\AWBW\train.py) |
+| Matchup and outcome telemetry | [data/game_log.jsonl](D:\AWBW\data\game_log.jsonl) |
+| Map pool reference | [data/gl_map_pool.json](D:\AWBW\data\gl_map_pool.json) |
+| Engine / replay cross-cutting work (separate track) | [awbw-engine-parity.plan.md](D:\AWBW\.cursor\plans\awbw-engine-parity.plan.md) |
+| Elo league → MASTERPLAN doc (backlog) | [elo_league_masterplan.plan.md](D:\AWBW\.cursor\plans\elo_league_masterplan.plan.md) |
 
 ## Critical section — risks and wrong assumptions
 
@@ -104,5 +104,5 @@ Execute todos in dependency order; update `status` in this file’s frontmatter 
 ## Plan file
 
 ```text
-c:\Users\phili\AWBW\.cursor\plans\phase1-foundation-validation.plan.md
+D:\AWBW\.cursor\plans\phase1-foundation-validation.plan.md
 ```

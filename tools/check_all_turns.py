@@ -3,7 +3,7 @@ import gzip, io, re, zipfile
 from pathlib import Path
 import glob, sys
 
-replays = sorted(glob.glob(r"C:\Users\phili\AWBW\replays\1?????.zip"))
+replays = sorted(glob.glob(r"D:\AWBW\replays\1?????.zip"))
 path = Path(replays[-1])
 print(f"Checking: {path}\n")
 

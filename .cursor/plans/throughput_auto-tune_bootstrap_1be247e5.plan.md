@@ -21,13 +21,13 @@ isProject: false
 
 ## Goals and non-goals
 
-- **Goal:** Before long training, optionally **measure** steady-state `env_steps_per_s_total` (same metric as [`rl/self_play.py`](c:\Users\phili\AWBW\rl\self_play.py) / [`tools/bench_train_throughput.py`](c:\Users\phili\AWBW\tools\bench_train_throughput.py)) over a small grid of `--n-envs`, then **write the winner** into [`fleet/<id>/proposed_args.json`](c:\Users\phili\AWBW\fleet\pc-b\proposed_args.json) (same as today’s post-sync write) so the launched `train.py` matches.
+- **Goal:** Before long training, optionally **measure** steady-state `env_steps_per_s_total` (same metric as [`rl/self_play.py`](D:\AWBW\rl\self_play.py) / [`tools/bench_train_throughput.py`](D:\AWBW\tools\bench_train_throughput.py)) over a small grid of `--n-envs`, then **write the winner** into [`fleet/<id>/proposed_args.json`](D:\AWBW\fleet\pc-b\proposed_args.json) (same as today’s post-sync write) so the launched `train.py` matches.
 - **Non-goal (v1):** Auto-tune `--batch-size` / `--n-steps` (VRAM + sample-efficiency tradeoffs); auto-tune **only** `--n-envs` unless you explicitly expand later.
 - **Non-goal:** Run probes on every bootstrap. That would add minutes and surprise operators. **Default remains unchanged**; tuning is gated on a new flag (see below).
 
 ## Why not tie tuning to `--auto-apply` alone
 
-[`--auto-apply`](c:\Users\phili\AWBW\scripts\start_solo_training.py) only affects [`fleet_orchestrator.py`](c:\Users\phili\AWBW\scripts\fleet_orchestrator.py) restarts. Mixing “orchestrator may respawn train” with “always run 3–5 short trains first” conflates two concerns and makes fleet behavior hard to predict. **Recommendation:** document that **`--throughput-tune` pairs well with `pc-b --auto-apply`**, but keep tuning **opt-in**.
+[`--auto-apply`](D:\AWBW\scripts\start_solo_training.py) only affects [`fleet_orchestrator.py`](D:\AWBW\scripts\fleet_orchestrator.py) restarts. Mixing “orchestrator may respawn train” with “always run 3–5 short trains first” conflates two concerns and makes fleet behavior hard to predict. **Recommendation:** document that **`--throughput-tune` pairs well with `pc-b --auto-apply`**, but keep tuning **opt-in**.
 
 ## Design
 
@@ -36,7 +36,7 @@ isProject: false
 Add flags (names can be bikeshedded):
 
 - `--throughput-tune` — run the micro-sweep after `probe` + `propose` + Cython rebuild, **before** building the final `train_argv`.
-- `--throughput-tune-max-envs N` — hard ceiling for candidates (default: **reuse [`PC_B_MAX_ENVS = 4`](c:\Users\phili\AWBW\tools\propose_train_args.py) when `machine_id == pc-b`**, else a heuristic cap from probe RAM/cores, e.g. `min(12, max_safe)` aligned with `propose_from_probe`).
+- `--throughput-tune-max-envs N` — hard ceiling for candidates (default: **reuse [`PC_B_MAX_ENVS = 4`](D:\AWBW\tools\propose_train_args.py) when `machine_id == pc-b`**, else a heuristic cap from probe RAM/cores, e.g. `min(12, max_safe)` aligned with `propose_from_probe`).
 - `--throughput-tune-per-candidate-s` — wall timeout per candidate (default **90–120s**); treat timeout as failed sample for that `n`.
 - `--throughput-tune-min-iters` — total train timesteps per probe (default **~2–4 full rollouts**, e.g. `max(32_768, 2 * n_steps * n_envs)` computed per candidate so `fps_diag` gets several rows).
 - `--throughput-tune-max-host-ram-pct` / `--throughput-tune-max-host-cpu-pct` — defaults **90** each; tuning **must not** start or continue a probe while the **host** is already at or above these utilizations (see §Host headroom).
@@ -45,13 +45,13 @@ Add flags (names can be bikeshedded):
 
 ### 2) Refactor shared FPS parsing (avoid duplication / bugs)
 
-[`tools/bench_train_throughput.py`](c:\Users\phili\AWBW\tools\bench_train_throughput.py) already implements `parse_fps_diag_lines` + `summarize_fps`. **Extract** to a tiny module, e.g. [`tools/fps_diag_metrics.py`](c:\Users\phili\AWBW\tools\fps_diag_metrics.py), and import it from `bench_train_throughput.py` and the new tuner.
+[`tools/bench_train_throughput.py`](D:\AWBW\tools\bench_train_throughput.py) already implements `parse_fps_diag_lines` + `summarize_fps`. **Extract** to a tiny module, e.g. [`tools/fps_diag_metrics.py`](D:\AWBW\tools\fps_diag_metrics.py), and import it from `bench_train_throughput.py` and the new tuner.
 
-**Fix while touching this:** `bench_train_throughput.py` currently invokes `train.py` **without** `--machine-id`; [`train.py`](c:\Users\phili\AWBW\train.py) only auto-enables `AWBW_FPS_DIAG` when `AWBW_MACHINE_ID` is set (lines 585–590). Probes **must** pass `--machine-id <id>` (or set env) so `fps_diag.jsonl` is populated.
+**Fix while touching this:** `bench_train_throughput.py` currently invokes `train.py` **without** `--machine-id`; [`train.py`](D:\AWBW\train.py) only auto-enables `AWBW_FPS_DIAG` when `AWBW_MACHINE_ID` is set (lines 585–590). Probes **must** pass `--machine-id <id>` (or set env) so `fps_diag.jsonl` is populated.
 
 ### 3) Core algorithm (new module)
 
-Add [`tools/throughput_tune.py`](c:\Users\phili\AWBW\tools\throughput_tune.py) (or `scripts/` if you prefer no `tools` import from `scripts`; `start_solo_training` already runs `tools/*.py` via subprocess — **prefer importing** the module from `start_solo_training` to avoid nested subprocess complexity).
+Add [`tools/throughput_tune.py`](D:\AWBW\tools\throughput_tune.py) (or `scripts/` if you prefer no `tools` import from `scripts`; `start_solo_training` already runs `tools/*.py` via subprocess — **prefer importing** the module from `start_solo_training` to avoid nested subprocess complexity).
 
 Function sketch:
 
@@ -90,20 +90,20 @@ def choose_n_envs_throughput(
 
 **Candidate list:**
 
-- `floor = max(len(gids), int(proposed["args"].get("--n-envs", 4)))` after [`_bump_n_envs_in_proposed_for_live`](c:\Users\phili\AWBW\scripts\start_solo_training.py) (live PPO requires at least one worker per game).
+- `floor = max(len(gids), int(proposed["args"].get("--n-envs", 4)))` after [`_bump_n_envs_in_proposed_for_live`](D:\AWBW\scripts\start_solo_training.py) (live PPO requires at least one worker per game).
 - `ceiling = max_envs` further limited by **host headroom**: if memory or CPU is already at/above the configured max before trying a larger `n`, **do not** run that candidate (see above); never “force” a higher `n_envs` when the sweep was skipped.
 
 **Per candidate `n`:**
 
 1. `am = copy.deepcopy(proposed["args"]); am["--n-envs"] = n`
 2. Ensure `batch_size <= n_steps * n` (if not, clamp batch for probe only — log once).
-3. Build argv via existing [`_build_train_argv`](c:\Users\phili\AWBW\scripts\start_solo_training.py) / `fleet_orchestrator.build_train_argv_from_proposed_args` with `doc = {**proposed, "args": am}`, **same** `train_extra` as production (so live snapshot args match).
+3. Build argv via existing [`_build_train_argv`](D:\AWBW\scripts\start_solo_training.py) / `fleet_orchestrator.build_train_argv_from_proposed_args` with `doc = {**proposed, "args": am}`, **same** `train_extra` as production (so live snapshot args match).
 4. Replace / append `--iters` to `min_iters` (last `--iters` wins if helper merges).
 5. Record `fps_diag.jsonl` size offset; `subprocess.run(argv, cwd=repo_root, timeout=per_candidate_s, env=os.environ | AWBW_MACHINE_ID + DEFAULT_TRAIN_PERF_ENV as appropriate)`.
 6. Parse new lines; score **`median` of `env_steps_per_s_total`** (fallback: `env_steps_per_s_collect` if total missing).
 7. Pick **max median**; tie-break **lower `n`** (RAM / straggler friendliness).
 
-**Report artifact:** Write [`fleet/<id>/throughput_tune.json`](c:\Users\phili\AWBW\fleet\pc-b) (atomic JSON) with candidates, medians, winner, timestamps, git sha optional — helps debug “why did it pick 3?”.
+**Report artifact:** Write [`fleet/<id>/throughput_tune.json`](D:\AWBW\fleet\pc-b) (atomic JSON) with candidates, medians, winner, timestamps, git sha optional — helps debug “why did it pick 3?”.
 
 ### 4) Wire into `start_solo_training.main`
 
@@ -119,8 +119,8 @@ This preserves the existing invariant that **live games** force `n_envs >= len(g
 ### 5) Tests
 
 - **Unit:** `choose_n_envs_throughput` with **mocked** `subprocess.run` writing synthetic `fps_diag` fragments (or temp jsonl append).
-- **Integration-light:** Refactored `_compose_...` path still passes existing tests in [`tests/test_start_solo_training.py`](c:\Users\phili\AWBW\tests\test_start_solo_training.py); add one test that `--throughput-tune` with monkeypatched tuner sets `--n-envs` in proposed.
-- **Regression:** [`tests/test_propose_train_args.py`](c:\Users\phili\AWBW\tests\test_propose_train_args.py) unchanged unless you later feed tune results into `propose_train_args` (not planned).
+- **Integration-light:** Refactored `_compose_...` path still passes existing tests in [`tests/test_start_solo_training.py`](D:\AWBW\tests\test_start_solo_training.py); add one test that `--throughput-tune` with monkeypatched tuner sets `--n-envs` in proposed.
+- **Regression:** [`tests/test_propose_train_args.py`](D:\AWBW\tests\test_propose_train_args.py) unchanged unless you later feed tune results into `propose_train_args` (not planned).
 
 ## Risks and mitigations
 
