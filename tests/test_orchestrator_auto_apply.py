@@ -63,12 +63,19 @@ def _orch(tmp_path: Path, *, pools: list[str], **kw: object) -> object:
     return FleetOrchestrator(**defaults)  # type: ignore[misc]
 
 
-def _write_proposed(tmp: Path, mid: str, *, n_envs: int = 4) -> None:
+def _write_proposed(
+    tmp: Path, mid: str, *, n_envs: int = 4, opponent: str = "greedy_mix"
+) -> None:
     d = tmp / "fleet" / mid
     d.mkdir(parents=True, exist_ok=True)
     doc = {
         "machine_id": mid,
-        "args": {"--n-envs": n_envs, "--n-steps": 512, "--batch-size": 256},
+        "args": {
+            "--n-envs": n_envs,
+            "--n-steps": 512,
+            "--batch-size": 256,
+            "--cold-opponent": opponent,
+        },
     }
     (d / "proposed_args.json").write_text(json.dumps(doc) + "\n", encoding="utf-8")
 
@@ -79,6 +86,18 @@ def _write_applied(tmp: Path, mid: str, doc: dict) -> None:
     h = proposed_args_content_sha256(doc)
     payload = {**doc, "applied_at": 1_000_000.0, "args_content_sha256": h}
     (d / "applied_args.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
+# Shorthand: write applied that differs from proposed only on --cold-opponent.
+def _write_applied_diff_opponent(tmp: Path, mid: str, diff_opponent: str = "random") -> None:
+    _write_applied(
+        tmp,
+        mid,
+        {
+            "machine_id": mid,
+            "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256, "--cold-opponent": diff_opponent},
+        },
+    )
 
 
 def test_hash_equal_for_same_args_different_key_order() -> None:
@@ -104,11 +123,7 @@ def test_hash_differs_when_args_change() -> None:
 
 def test_auto_apply_false_logs_restart_not_applied(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     o = _orch(tmp_path, pools=["m1"], auto_apply=False)
     st = o.read_fleet_state()
     decs = o.maybe_restart_train_for_proposed_args(st)
@@ -126,11 +141,11 @@ def test_proposed_file_auto_apply_false_does_not_block_orchestrator_auto_apply(
     d.mkdir(parents=True)
     doc = {
         "machine_id": "m1",
-        "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256},
+        "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256, "--cold-opponent": "greedy_mix"},
         "auto_apply": False,
     }
     (d / "proposed_args.json").write_text(json.dumps(doc) + "\n", encoding="utf-8")
-    applied_doc = {**doc, "args": {"--n-envs": 1, "--n-steps": 512, "--batch-size": 256}}
+    applied_doc = {**doc, "args": {**doc["args"], "--cold-opponent": "random"}}
     ah = proposed_args_content_sha256(applied_doc)
     (d / "applied_args.json").write_text(
         json.dumps(
@@ -149,11 +164,7 @@ def test_proposed_file_auto_apply_false_does_not_block_orchestrator_auto_apply(
 
 def test_missing_pid_file_no_restart(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     o = _orch(tmp_path, pools=["m1"], auto_apply=True)
     st = o.read_fleet_state()
     decs = o.maybe_restart_train_for_proposed_args(st)
@@ -164,11 +175,7 @@ def test_missing_pid_file_no_restart(tmp_path: Path) -> None:
 
 def test_missing_pid_restarts_when_launch_cmd_present(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     d = tmp_path / "fleet" / "m1"
     (d / "train_launch_cmd.json").write_text(
         json.dumps(
@@ -202,11 +209,7 @@ def test_missing_pid_restarts_when_launch_cmd_present(tmp_path: Path) -> None:
 
 def test_missing_launch_cmd_no_restart(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     d = tmp_path / "fleet" / "m1"
     (d / "train.pid").write_text("12345\n", encoding="utf-8")
     o = _orch(tmp_path, pools=["m1"], auto_apply=True)
@@ -220,11 +223,7 @@ def test_missing_launch_cmd_no_restart(tmp_path: Path) -> None:
 
 def test_cooldown_blocks_apply(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     d = tmp_path / "fleet" / "m1"
     (d / "train.pid").write_text("12345\n", encoding="utf-8")
     (d / "train_launch_cmd.json").write_text(
@@ -258,11 +257,7 @@ def test_cooldown_blocks_apply(tmp_path: Path) -> None:
 
 def test_circuit_breaker_after_three_restarts(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     d = tmp_path / "fleet" / "m1"
     (d / "train.pid").write_text("12345\n", encoding="utf-8")
     (d / "train_launch_cmd.json").write_text(
@@ -287,11 +282,7 @@ def test_circuit_breaker_after_three_restarts(tmp_path: Path) -> None:
 
 def test_bootstrap_grace_suppresses_hash_drift_restart(tmp_path: Path) -> None:
     _write_proposed(tmp_path, "m1", n_envs=4)
-    _write_applied(
-        tmp_path,
-        "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256}},
-    )
+    _write_applied_diff_opponent(tmp_path, "m1")
     d = tmp_path / "fleet" / "m1"
     (d / "train_launch_cmd.json").write_text(
         json.dumps(
@@ -333,7 +324,7 @@ def test_zombie_heal_respawns_when_hashes_aligned_no_live_train(tmp_path: Path) 
     _write_applied(
         tmp_path,
         "m1",
-        {"machine_id": "m1", "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256}},
+        {"machine_id": "m1", "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256, "--cold-opponent": "greedy_mix"}},
     )
     d = tmp_path / "fleet" / "m1"
     (d / "train_launch_cmd.json").write_text(

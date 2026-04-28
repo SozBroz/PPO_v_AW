@@ -1,8 +1,8 @@
 {
-  "current_stage_name": "stage_c_terrain_competent",
+  "current_stage_name": "stage_c1_terrain_competent",
   "decay_phase": 0,
   "entered_stage_at_ts": 1745750760.0,
-  "games_observed_in_stage": 2637,
-  "last_proposal_ts": 1777364678.9283617,
-  "last_seen_finished_games": 8328
+  "games_observed_in_stage": 2669,
+  "last_proposal_ts": 1777384495.93876,
+  "last_seen_finished_games": 8360
 }

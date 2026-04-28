@@ -223,9 +223,15 @@ OPERATOR_TRAIN_ARGS_OVERRIDE_NAME = "operator_train_args_override.json"
 
 # ``refresh_proposed_train_args_documents`` rebuilds ``args`` from ``propose_from_probe`` +
 # curriculum; these keys are copied from the *previous* ``proposed_args.json`` when present
-# so ``start_solo_training`` injects (live PPO, async backend, …) survive orchestrator ticks.
+# so ``start_solo_training`` injects (live PPO, async backend, rollout geometry…) survive orchestrator ticks.
+#
+# ``--n-envs`` / ``--max-env-steps``: after probe heuristic + curriculum merges, overlay from the
+# last proposed (or fallback applied_args) unless ``operator_train_args_override.json`` pins the key
+# — override wins via ``applied_overrides`` above.
 _PRESERVE_TRAIN_ARGS_FROM_PREVIOUS_PROPOSED: frozenset[str] = frozenset(
     {
+        "--n-envs",
+        "--max-env-steps",
         "--live-games-id",
         "--live-snapshot-dir",
         "--live-learner-seats",
@@ -254,6 +260,89 @@ def _merge_train_launch_env(existing: Any) -> dict[str, str]:
         for k, v in existing.items():
             out[str(k)] = str(v)
     return out
+
+
+# Keys that curriculum ``args_overrides()`` or MCTS health gate emits.  Only a
+# change in *these* keys triggers a ``maybe_restart_train_for_proposed_args`` hard
+# restart; every other key in ``applied_args`` is preserved as-is.  This keeps
+# ``--n-envs``, ``--max-env-steps``, ``--n-steps``, ``--batch-size``,
+# ``--training-backend``, live-game knobs, etc. frozen to whatever
+# ``start_solo_training`` originally wrote — exactly one bootstrap, no probe churn.
+RESTART_SIGNIFICANT_KEYS: frozenset[str] = frozenset(
+    {
+        # Curriculum stage keys
+        "--learner-greedy-mix",
+        "--capture-move-gate",
+        "--opening-book-prob",
+        "--cold-opponent",
+        "--curriculum-tag",
+        "--map-id",
+        "--co-p0",
+        "--co-p1",
+        "--tier",
+        "--curriculum-broad-prob",
+        "--opening-book",
+        "--opening-book-seats",
+        # MCTS health-gate keys
+        "--mcts-mode",
+        "--mcts-sims",
+    }
+)
+
+
+def _restart_significant_args_hash(doc: dict[str, Any]) -> Optional[str]:
+    """SHA-256 of only the non-None restart-significant keys from ``args``."""
+    args = doc.get("args") if isinstance(doc.get("args"), dict) else None
+    if args is None:
+        return None
+    significant = {
+        k: args[k]
+        for k in RESTART_SIGNIFICANT_KEYS
+        if k in args and args[k] is not None
+    }
+    blob = json.dumps(significant, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _restart_significant_args_match(
+    proposed_doc: dict[str, Any], applied_doc: dict[str, Any]
+) -> bool:
+    """True when both sides agree on all non-None restart-significant keys."""
+    p_args = (
+        proposed_doc.get("args")
+        if isinstance(proposed_doc.get("args"), dict)
+        else {}
+    )
+    a_args = (
+        applied_doc.get("args")
+        if isinstance(applied_doc.get("args"), dict)
+        else {}
+    )
+    # Treat None the same as absent: skip the key if either side doesn't assert a
+    # specific value.  Only compare when both sides carry an explicit non-None
+    # setting for that key.
+    for k in RESTART_SIGNIFICANT_KEYS:
+        pv = p_args.get(k)
+        av = a_args.get(k)
+        if pv is None or av is None:
+            continue
+        if pv != av:
+            return False
+    return True
+
+
+def _merge_restart_args(
+    proposed: dict[str, Any], applied: dict[str, Any]
+) -> dict[str, Any]:
+    """Build args dict for a curriculum-driven restart: start from ``applied`` args,
+    overlay only restart-significant keys from ``proposed``."""
+    pargs = proposed.get("args") if isinstance(proposed.get("args"), dict) else {}
+    aargs = applied.get("args") if isinstance(applied.get("args"), dict) else {}
+    merged: dict[str, Any] = {**aargs}
+    for k in RESTART_SIGNIFICANT_KEYS:
+        if k in pargs and pargs[k] is not None:
+            merged[k] = pargs[k]
+    return merged
 
 
 def _arg_diff_keys(
@@ -1343,12 +1432,19 @@ class FleetOrchestrator:
 
     def maybe_restart_train_for_proposed_args(self, _state: FleetState) -> list[TickDecision]:
         """
-        When ``proposed_args.json`` ``args`` hash differs from ``applied_args.json``,
-        optionally terminate and respawn ``train.py`` (Tier 1: machine-probe-driven only).
+        When **restart-significant** keys (``RESTART_SIGNIFICANT_KEYS``) in ``proposed_args.json``
+        drift from ``applied_args.json``, optionally terminate and respawn ``train.py``.
 
-        Restarts are gated by the orchestrator's ``--auto-apply`` (``self.auto_apply``) plus
-        cooldown / circuit-breaker. The ``auto_apply`` field inside ``proposed_args.json`` is
-        not consulted here (it is preserved for audit/refresh and operator visibility).
+        Only the keys defined in ``RESTART_SIGNIFICANT_KEYS`` are compared for the
+        restart decision.  All other keys (``--n-envs``, ``--max-env-steps``,
+        ``--n-steps``, ``--batch-size``, ``--training-backend``, live-game knobs,
+        etc.) are **frozen** to the last ``applied_args.json`` on respawn — they
+        are never mutated by probe churn or curriculum ticks.
+
+        Gated by the orchestrator's ``--auto-apply`` (``self.auto_apply``) plus
+        cooldown / circuit-breaker. The ``auto_apply`` field inside
+        ``proposed_args.json`` is not consulted here (it is preserved for
+        audit/refresh and operator visibility).
         """
         out: list[TickDecision] = []
         now = time.time()
@@ -1356,8 +1452,11 @@ class FleetOrchestrator:
             proposed = read_proposed_args(mid, self.shared_root)
             if proposed is None:
                 continue
-            prop_h = proposed_args_content_sha256(proposed)
-            if prop_h is None:
+            # Curriculum-only hash: a restart is triggered *only* when curriculum keys change.
+            # All other keys (--n-envs, --max-env-steps, --n-steps, --batch-size,
+            # --training-backend, live games, etc.) are frozen to the last applied_args.
+            prop_ch = _restart_significant_args_hash(proposed)
+            if prop_ch is None:
                 continue
             applied_path = (self.shared_root / "fleet" / mid / "applied_args.json").resolve()
             applied = _read_json_path(applied_path) if applied_path.is_file() else None
@@ -1366,7 +1465,7 @@ class FleetOrchestrator:
                     TickDecision(
                         kind="restart_train",
                         machine_id=mid,
-                        details={"proposed_hash": prop_h},
+                        details={"curriculum_hash": prop_ch},
                         applied=False,
                         reason=(
                             "applied_args.json missing; bootstrap must seed applied_args.json"
@@ -1374,11 +1473,21 @@ class FleetOrchestrator:
                     )
                 )
                 continue
+            # Full hash retained for audit; restart-significant-key comparison governs drift.
+            # None in either side means "use default" — not a real disagreement.
+            if _restart_significant_args_match(proposed, applied):
+                continue
+            full_prop_h = proposed_args_content_sha256(proposed)
+            prev_ch = _restart_significant_args_hash(applied)
+            if prev_ch is None:
+                prev_ch = _restart_significant_args_hash({"args": applied.get("args")})
             prev_h = applied.get("args_content_sha256")
             if not isinstance(prev_h, str):
                 prev_h = proposed_args_content_sha256({"args": applied.get("args")})
-            if prev_h == prop_h:
-                continue
+
+            # Alias for downstream references (suppressed decisions, applied doc,
+            # lifecycle log): the full hash still appears in audit fields.
+            prop_h = full_prop_h
 
             pid_path = self._resolve_train_sidecar_path(mid, self.train_pid_file_template)
             launch_path = self._resolve_train_sidecar_path(
@@ -1662,8 +1771,16 @@ class FleetOrchestrator:
                 launch_payload = {**raw_launch}
             else:
                 launch_payload = {}
+            # Build restart doc from applied_args + curriculum overlay: all non-curriculum
+            # keys (--n-envs, --max-env-steps, --batch-size, --training-backend, live games,
+            # etc.) come from the last applied state — they survive probe churn.
+            restart_args = _merge_restart_args(proposed, applied)
+            restart_doc: dict[str, Any] = {
+                **proposed,
+                "args": restart_args,
+            }
             launch_payload["cmd"] = build_train_argv_from_proposed_args(
-                proposed, repo_root=self.repo_root
+                restart_doc, repo_root=self.repo_root
             )
             launch_payload["env"] = _merge_train_launch_env(launch_payload.get("env"))
             if "cwd" not in launch_payload:
@@ -1686,6 +1803,7 @@ class FleetOrchestrator:
             _atomic_write_text(pid_path, str(new_pid) + "\n")
             applied_doc = {
                 **proposed,
+                "args": restart_args,
                 "applied_at": time.time(),
                 "args_content_sha256": prop_h,
             }
@@ -1778,11 +1896,16 @@ class FleetOrchestrator:
             applied = _read_json_path(applied_path) if applied_path.is_file() else None
             if applied is None:
                 continue
+            # For the heal path, heal only when restart-significant keys agree
+            # (proposed == applied on the restart-significant set).  If
+            # they differ, drift restart handles it (not zombie heal).
+            # None in either side means "use default" — agreement check
+            # uses _restart_significant_args_match for consistency.
+            if not _restart_significant_args_match(proposed, applied):
+                continue
             prev_h = applied.get("args_content_sha256")
             if not isinstance(prev_h, str):
                 prev_h = proposed_args_content_sha256({"args": applied.get("args")})
-            if prev_h != prop_h:
-                continue
 
             launch_path = self._resolve_train_sidecar_path(
                 mid, self.train_launch_cmd_file_template
@@ -1871,8 +1994,12 @@ class FleetOrchestrator:
                 launch_payload = {**raw_launch}
             else:
                 launch_payload = {}
+            # Heal respawn: build args from applied + curriculum overlay
+            # (same freeze semantics as drift restart).
+            heal_args = _merge_restart_args(proposed, applied)
+            heal_doc: dict[str, Any] = {**proposed, "args": heal_args}
             launch_payload["cmd"] = build_train_argv_from_proposed_args(
-                proposed, repo_root=self.repo_root
+                heal_doc, repo_root=self.repo_root
             )
             launch_payload["env"] = _merge_train_launch_env(launch_payload.get("env"))
             if "cwd" not in launch_payload:

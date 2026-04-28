@@ -2,13 +2,43 @@
 """
 Tier 1 walk-away bootstrap for a single fleet machine (e.g. pc-b).
 
-Async IMPALA uses one OS process per env worker; size ``--n-envs`` to host RAM. Default
-``propose_train_args`` may still suggest a low ``--n-envs`` for pc-b (``PC_B_MAX_ENVS``);
-override with ``--train-extra-args`` when you mean a larger rollout.
+Async IMPALA uses one OS process per env worker; size ``--n-envs`` to host RAM.
+``tools/propose_train_args`` guesses ``--n-envs`` / steps / batch from ``probe.json``.
+Pass ``--train-extra-args`` with explicit ``--n-envs`` / ``--max-env-steps`` when you
+mean a fixed rollout footprint.
 
-Async example with extra envs::
+**Curriculum stages:** each stage merges map / CO / tier / scaffolding / opening-book
+knobs into ``proposed_args.json``.  Those are **not** the small PPO-geometry set handled
+by ``train_reconfig_request.json`` in ``rl.self_play``.
 
-    python scripts/start_solo_training.py --machine-id <id> --auto-apply --train-extra-args "--n-envs 8" --training-backend async
+To advance the live ``train.py`` onto a new stage **without stopping it yourself**, the
+orchestrator needs ``--auto-apply`` (controlled SIGTERM and respawn of ``train.py`` with
+updated argv from merged ``proposed``).
+
+**Freeze semantics:** the orchestrator compares **only** the curriculum-relevant keys
+(``CURRICULUM_RESTART_KEYS`` in ``fleet_orchestrator.py``) when deciding whether to
+restart.  When it **does** restart, it builds the new process from ``applied_args.json``
+(the last running set) and overlays **only** the curriculum keys from ``proposed_args.json``.
+All non-curriculum keys — ``--n-envs``, ``--max-env-steps``, ``--n-steps``,
+``--batch-size``, ``--training-backend``, live-game knobs, etc. — are **frozen**
+permanently from whatever this bootstrap first wrote.  Probe churn (e.g. ``--n-envs``
+flipping from 18 to 11 because the RAM heuristic says 11) **never** triggers a restart
+and **never** changes the running process arguments.
+
+This means one explicit invocation (e.g. ``--train-extra-args "--n-envs 18 --max-env-steps 8000"``)
+is the **last word** on rollout geometry; it survives all future curriculum ticks.
+
+Soft in-process reload without any process recycle would require extending the learner to
+rebuild env/policy from arbitrary curriculum deltas; that pipeline does **not** exist
+beyond ``--n-envs/--n-steps/--batch-size``.
+
+**Default bootstrap:** ``fleet_orchestrator`` is launched **with** ``--auto-apply`` unless
+you pass ``--no-orchestrator-auto-apply`` (e.g. only want disk-side ``proposed_args.json``
+churn or debugging).
+
+Async example::
+
+    python scripts/start_solo_training.py --machine-id <id> --train-extra-args "--n-envs 18 --max-env-steps 8000" --training-backend async
 
 One command probes the box, proposes PPO args (Phase 10f), writes launch metadata,
 starts ``train.py`` and ``fleet_orchestrator.py``, and tears both down cleanly on Ctrl-C.
@@ -35,12 +65,13 @@ Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps 
 
 Does not enable MCTS (implicit ``--mcts-mode off``). Does not auto-respawn crashed children.
 
-**Why PowerShell “closes” ~10 minutes in:** with ``--auto-apply``, ``fleet_orchestrator`` may
-SIGTERM ``train.py`` after ``apply_cooldown_s`` (default **600s**) when ``proposed_args.json``
-differs from ``applied_args.json`` (curriculum/orchestrator geometry). Exit code **15** on
-Windows is often that stop — the bootstrap must adopt the replacement PID from
-``fleet/<id>/train.pid`` (a short race wait is implemented). Durable state:
-``logs/solo_bootstrap_watch_<id>.log`` (30s heartbeat) and ``logs/start_solo_training.log``.
+**Why PowerShell "closes" ~10 minutes in:** ``fleet_orchestrator`` only restarts
+``train.py`` when **curriculum keys** differ between ``proposed_args.json`` and
+``applied_args.json``, and only after ``apply_cooldown_s`` (default **600s**) has
+elapsed since the last apply.  Exit code **15** is the normal SIGTERM-style stop;
+the bootstrap adopts the replacement PID from ``fleet/<id>/train.pid`` (a short race
+wait is implemented).  Durable state: ``logs/solo_bootstrap_watch_<id>.log``
+(30s heartbeat) and ``logs/start_solo_training.log``.
 
 **Monitor without losing the window:** use ``Tee-Object`` or
 ``Start-Process python -ArgumentList '...' -NoNewWindow -Wait -RedirectStandardOutput ...``;
@@ -57,16 +88,19 @@ Before ``train.py`` starts, Cython extensions are rebuilt (``build_ext``): on Wi
 are already current. If copy fails with WinError 32, check for **multiprocessing.spawn**
 workers (VecEnv children), not only ``train.py`` — run ``python scripts/diagnose_cython_lock.py``.
 
-When ``--auto-apply`` is enabled, ``fleet_orchestrator`` may **terminate and respawn** ``train.py``
-(rewriting ``fleet/<id>/train.pid``).  The first ``train`` Popen the bootstrap created then exits
-with a small non-zero code.  The main loop **detects a replacement** PID in ``train.pid`` that
-is still a live ``train.py`` for this machine and **adopts** it instead of treating the event as
-fatal or tearing the orchestrator down.  (Without this, the bootstrap would stop both children
-and leave a surviving respawned ``train`` orphaned.)
+When ``--auto-apply`` is enabled, ``fleet_orchestrator`` may **terminate and respawn**
+``train.py`` (rewriting ``fleet/<id>/train.pid``) **only when curriculum keys change**
+(see ``CURRICULUM_RESTART_KEYS``).  The replacement process is built from the last
+``applied_args.json`` with **only** the curriculum keys overlaid from the merged
+``proposed_args.json`` — all other arguments (``--n-envs``, ``--max-env-steps``,
+``--batch-size``, ``--training-backend``, live-game knobs, etc.) are **frozen** from
+the first bootstrap invocation.  The main loop **detects a replacement** PID in
+``train.pid`` that is still a live ``train.py`` for this machine and **adopts** it
+instead of treating the event as fatal or tearing the orchestrator down.
 
-Pass ``--no-orchestrator-auto-apply`` to **omit** ``--auto-apply`` on ``fleet_orchestrator`` so it
-does **not** terminate/respawn ``train.py`` for proposed-args drift (diagnostics; wins over
-``--auto-apply`` for the orchestrator only).
+Pass ``--no-orchestrator-auto-apply`` so ``fleet_orchestrator`` omits ``--auto-apply`` — no
+terminate/respawn for curriculum or proposed-args drift (**live** ``train`` stays on prior argv until
+you restart it yourself).
 
 ``--torch-compile`` sets ``AWBW_TORCH_COMPILE=1`` in the child ``train.py`` process environment
 (see ``rl/self_play.py`` policy Inductor path). On Windows you still need MSVC C++ and a working
@@ -1506,7 +1540,10 @@ def main() -> int:
         "--auto-apply",
         action="store_true",
         default=False,
-        help="Pass --auto-apply to fleet_orchestrator.py",
+        help=(
+            "Ignored (compatibility shim). Fleet orchestrator is started with curriculum respawn enabled "
+            "by default unless you pass --no-orchestrator-auto-apply."
+        ),
     )
     ap.add_argument(
         "--no-orchestrator-auto-apply",
@@ -1734,9 +1771,9 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
-    orchestrator_auto_apply = bool(args.auto_apply) and not bool(
-        args.no_orchestrator_auto_apply
-    )
+    # Curriculum stage progress needs proposed vs applied reconciliation; orchestrator defaults to
+    # --auto-apply so train.py respawns when merged proposed drifts (--no-orchestrator-auto-apply off).
+    orchestrator_auto_apply = not bool(args.no_orchestrator_auto_apply)
     _configure_logging(args.log_dir)
     log = logging.getLogger("start_solo_training")
     machine_id = str(args.machine_id).strip()
@@ -1751,12 +1788,11 @@ def main() -> int:
     applied_path = fleet_dir / "applied_args.json"
 
     log.info(
-        "start_solo_training pid=%d machine_id=%s auto_apply=%s "
-        "orchestrator_auto_apply=%s (no_orch_auto_apply=%s) torch_compile=%s "
+        "start_solo_training pid=%d machine_id=%s orchestrator_auto_apply=%s "
+        "(no_orch_auto_apply=%s) torch_compile=%s "
         "training_backend=%s hybrid_gpu_cpu_opponents=%s (min_envs=%s hybrid_gpu_opp_workers_arg=%s)",
         os.getpid(),
         machine_id,
-        args.auto_apply,
         orchestrator_auto_apply,
         args.no_orchestrator_auto_apply,
         args.torch_compile,

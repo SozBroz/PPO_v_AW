@@ -184,6 +184,8 @@ def run_episode(env, mode: str, max_steps: int, p0_policy: str) -> EpisodeRow:
         if len(legal_idx) == 0:
             break
         if p0_policy == "greedy":
+            from rl.self_play import pick_capture_greedy_flat
+
             action_idx = int(pick_capture_greedy_flat(env.state, mask))
         else:
             action_idx = int(rng.choice(legal_idx.tolist()))

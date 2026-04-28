@@ -30,6 +30,7 @@ fo = _fo()
 FleetOrchestrator = fo.FleetOrchestrator
 proposed_args_content_sha256 = fo.proposed_args_content_sha256
 proposed_document_body_sha256 = fo.proposed_document_body_sha256
+_restart_significant_args_hash = fo._restart_significant_args_hash
 
 
 def _orch(tmp_path: Path, *, pools: list[str], **kw: object) -> object:
@@ -254,6 +255,7 @@ def test_refresh_proposed_preserves_live_ppo_and_backend(tmp_path: Path) -> None
         "machine_id": mid,
         "args": {
             "--n-envs": 14,
+            "--max-env-steps": 8000,
             "--live-games-id": [1638496, 1638514],
             "--live-snapshot-dir": snap,
             "--training-backend": "async",
@@ -269,6 +271,9 @@ def test_refresh_proposed_preserves_live_ppo_and_backend(tmp_path: Path) -> None
     doc = json.loads(
         (tmp_path / "fleet" / mid / "proposed_args.json").read_text(encoding="utf-8")
     )
+    # Probe heuristic would pick a lower ``--n-envs``; pins must survive curriculum tick.
+    assert doc["args"]["--n-envs"] == 14
+    assert doc["args"]["--max-env-steps"] == 8000
     assert doc["args"]["--live-games-id"] == [1638496, 1638514]
     assert doc["args"]["--live-snapshot-dir"] == snap
     assert doc["args"]["--training-backend"] == "async"
@@ -327,10 +332,10 @@ def test_auto_apply_proposed_hash_triggers_restart_mock(tmp_path: Path) -> None:
     prop_h = proposed_args_content_sha256(prop)
     applied_doc = {
         **prop,
-        "args": {**prop["args"], "--n-envs": 1},
+        "args": {**prop["args"], "--cold-opponent": "random"},
         "applied_at": 1.0,
         "args_content_sha256": proposed_args_content_sha256(
-            {**prop, "args": {**prop["args"], "--n-envs": 1}}
+            {**prop, "args": {**prop["args"], "--cold-opponent": "random"}}
         ),
     }
     (d_train / "applied_args.json").write_text(
@@ -353,7 +358,14 @@ def test_auto_apply_proposed_hash_triggers_restart_mock(tmp_path: Path) -> None:
 
     assert any(d.applied for d in decs)
     applied2 = json.loads((d_train / "applied_args.json").read_text(encoding="utf-8"))
-    assert applied2.get("args_content_sha256") == prop_h
+    # After restart, applied_args.json stores the merged restart args
+    # (old applied + curriculum overlay).  Curriculum keys should match
+    # the new proposed; non-curriculum keys are frozen from old applied.
+    assert _restart_significant_args_hash(applied2) == _restart_significant_args_hash(prop)
+    assert applied2["args"].get("--cold-opponent") == prop["args"].get("--cold-opponent")
+    # Frozen key: --n-envs comes from the old applied (probe value), not mutated by restart.
+    assert applied2["args"].get("--n-envs") == prop["args"].get("--n-envs")
+    assert applied2["args"].get("--n-envs") == 6  # 8 cores + 32 GB in this probe
 
 
 def _orch_with_probe_and_log(tmp_path: Path) -> str:
@@ -430,7 +442,8 @@ def test_override_file_sparse_wins_for_listed_keys(tmp_path: Path) -> None:
     assert "override:" in (doc.get("reasoning") or "")
 
 
-def test_override_file_deleted_reverts_to_probe_default(tmp_path: Path) -> None:
+def test_override_file_deleted_pins_keep_prior_n_envs(tmp_path: Path) -> None:
+    """Removing ``operator_train_args_override.json`` does not revert ``--n-envs`` to probe when the last ``proposed_args`` still carries that key (pin overlay)."""
     mid = _orch_with_probe_and_log(tmp_path)
     p_ovr = tmp_path / "fleet" / mid / "operator_train_args_override.json"
     p_ovr.write_text(json.dumps({"args": {"--n-envs": 12}}) + "\n", encoding="utf-8")
@@ -449,7 +462,7 @@ def test_override_file_deleted_reverts_to_probe_default(tmp_path: Path) -> None:
     doc = json.loads(
         (tmp_path / "fleet" / mid / "proposed_args.json").read_text(encoding="utf-8")
     )
-    assert doc["args"]["--n-envs"] < 12
+    assert doc["args"]["--n-envs"] == 12
 
 
 def test_override_file_unknown_key_ignored_with_log(
