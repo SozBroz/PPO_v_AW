@@ -1,8 +1,9 @@
 """
 Environment hygiene for ``train.py`` subprocesses.
 
-``train.py`` mirrors ``--learner-greedy-mix`` and ``--capture-move-gate`` into
-``os.environ`` so worker processes see the same knobs.  Those variables must not
+``train.py`` mirrors ``--learner-greedy-mix``, ``--egocentric-episode-prob``,
+``--capture-move-gate``, and ``--pairwise-zero-sum-reward`` into ``os.environ``
+so worker processes see the same knobs.  Those variables must not
 be injected from PowerShell, repo ``.env``, or an orchestrator
 ``{**os.environ, **launch_overlay}`` merge ahead of argv — **CLI is canonical**.
 """
@@ -15,7 +16,12 @@ from collections.abc import Mapping
 TRAIN_CLI_OWNED_ENV_KEYS: frozenset[str] = frozenset(
     {
         "AWBW_LEARNER_GREEDY_MIX",
+        "AWBW_EGOCENTRIC_EPISODE_PROB",
         "AWBW_CAPTURE_MOVE_GATE",
+        # Deprecated: strip stale shells/overlays so the extra property-loss
+        # punishment stays off unless a developer intentionally wires a new path.
+        "AWBW_PHI_ENEMY_PROPERTY_CAPTURE_PENALTY",
+        "AWBW_PAIRWISE_ZERO_SUM_REWARD",
     }
 )
 

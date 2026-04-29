@@ -17,7 +17,7 @@ The current network's policy head is `Linear(256, 35_000)` after `AdaptiveAvgPoo
 1. Deeper/wider residual tower (10 blocks × 128 channels, no global pooling)
 2. Factored spatial policy head (per-tile logits scattered into the existing 35,000-flat)
 3. **MOVE-action encoding redesign** (newly added post wave-1; without it, change #2 cannot drive MOVE destinations)
-4. New encoder channels: 6 influence + 1 defense_stars → `N_SPATIAL_CHANNELS = 70`
+4. New encoder channels: 6 influence + 1 defense_stars + 7 unit modifier planes → `N_SPATIAL_CHANNELS = 77`
 5. Ego-centric encoder reframe ("me" / "enemy" instead of P0/P1 fixed blocks)
 6. `AWBW_REWARD_SHAPING=phi` as default, with Φ computed in the **learner frame**
 7. Seat-balanced PPO actor (both engine seats roll out under the same policy)
@@ -37,8 +37,8 @@ The current network's policy head is `Linear(256, 35_000)` after `AdaptiveAvgPoo
 
 | Quantity | Value | Source |
 |---|---|---|
-| `N_SPATIAL_CHANNELS` | **70** | `influence_channels_spec.md` (63 baseline + 6 influence + 1 defense_stars) |
-| `N_SCALARS` | unchanged at 17 | `rl/encoder.py` |
+| `N_SPATIAL_CHANNELS` | **77** | `rl/encoder.py` (63 baseline + 6 influence + 1 defense_stars + 7 unit modifier planes) |
+| `N_SCALARS` | **16** | `rl/encoder.py` (tier scalar removed) |
 | Spatial grid | 30 × 30 (padded) | `rl/encoder.py` `GRID_SIZE` |
 | Residual tower | **D=10, W=128** | `compute_budget.md` |
 | Pooling before head | **none** (drop `AdaptiveAvgPool2d`) | `spatial_head_spec.md` §2 |
@@ -69,12 +69,12 @@ These numbers are frozen for wave 2. Any deviation requires a coordinator sign-o
 **Trunk** (replaces `AWBWFeaturesExtractor` + `AWBWNet` trunk in `rl/network.py`):
 
 ```
-stem:   Conv2d(70 → 128, 3×3, pad 1) → ReLU
+stem:   Conv2d(77 → 128, 3×3, pad 1) → ReLU
 trunk:  10 × ResBlock(128 → 128, 3×3, pad 1, BN, ReLU, residual add)
 out:    keep spatial 30×30, channel 128 (NO AdaptiveAvgPool)
 ```
 
-**Scalar fusion:** project the 17 scalars to a 30×30 broadcast plane (small MLP → `Linear(17 → 16)` → tile to `(B, 16, 30, 30)`) and concat onto the trunk output → `(B, 144, 30, 30)` for the heads. (See `spatial_head_spec.md` §3 for the exact broadcast — implement as that spec describes; this paragraph is just the contract.)
+**Scalar fusion:** project the 16 scalars to a 30×30 broadcast plane (small MLP → `Linear(16 → 16)` → tile to `(B, 16, 30, 30)`) and concat onto the trunk output → `(B, 144, 30, 30)` for the heads. (See `spatial_head_spec.md` §3 for the exact broadcast — implement as that spec describes; this paragraph is just the contract.)
 
 **Policy head:** factored, per `spatial_head_spec.md`:
 - Per-tile spatial actions (SELECT, MOVE, ATTACK, CAPTURE/WAIT/LOAD/JOIN/DIVE_HIDE, REPAIR, BUILD-tile-of-build) emit `Conv2d(144 → K_type, 1×1)` → reshape & scatter into the flat 35,000-vector at the correct offsets.
@@ -100,7 +100,7 @@ The full layout is in `move_encoding_redesign.md` §3.3. The two changes from to
 
 ## 6. Encoder channels (consolidated)
 
-Total: **70 spatial channels** in this fixed order. The first 63 indices match today's encoder. Indices 63–69 are new.
+Total: **77 spatial channels** in this fixed order. The first 70 indices match the influence/defense-star encoder; indices 70–76 are unit modifier planes.
 
 | Idx range | Channels | Source |
 |---|---|---|

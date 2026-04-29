@@ -168,6 +168,36 @@ class OpeningBookController:
     def peek_flat(self, *, calendar_turn: int, action_mask: np.ndarray) -> int | None:
         return self._next_flat(calendar_turn=calendar_turn, action_mask=action_mask, advance=False)
 
+    def peek_next_flat_safe(
+        self, *, calendar_turn: int, action_mask: np.ndarray
+    ) -> int | None:
+        """Return the booked flat index **only if** it is legal under *action_mask*.
+
+        Does **not** advance the cursor, increment counters, or call
+        :meth:`_mark_desync`. Used by the env to decide whether capture-greedy
+        teacher overrides must be suppressed while a joint opening book line is
+        still active — applying the teacher after a book-aligned commit would
+        execute a different move than the book cursor assumes and surfaces as
+        ``action_not_legal`` on the next peek.
+        """
+        b = self._book
+        if b is None or not b.action_indices or not self.episode_enabled:
+            return None
+        if self._max_calendar_turn is not None and int(calendar_turn) > int(
+            self._max_calendar_turn
+        ):
+            return None
+        if b.horizon_days and int(calendar_turn) > int(b.horizon_days):
+            return None
+        if self._cursor >= len(b.action_indices):
+            return None
+        ai = int(b.action_indices[self._cursor])
+        if ai < 0 or ai >= int(action_mask.shape[0]):
+            return None
+        if not bool(action_mask[ai]):
+            return None
+        return ai
+
     def suggest_flat(self, *, calendar_turn: int, action_mask: np.ndarray) -> int | None:
         return self._next_flat(calendar_turn=calendar_turn, action_mask=action_mask, advance=True)
 
@@ -283,6 +313,14 @@ class TwoSidedOpeningBookManager:
         if ctl is None:
             return None
         return ctl.peek_flat(calendar_turn=calendar_turn, action_mask=action_mask)
+
+    def peek_book_candidate_flat_safe(
+        self, *, seat: int, calendar_turn: int, action_mask: np.ndarray
+    ) -> int | None:
+        ctl = self.controllers.get(int(seat))
+        if ctl is None:
+            return None
+        return ctl.peek_next_flat_safe(calendar_turn=calendar_turn, action_mask=action_mask)
 
     def suggest_flat(
         self, *, seat: int, calendar_turn: int, action_mask: np.ndarray

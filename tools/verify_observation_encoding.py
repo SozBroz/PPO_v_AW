@@ -1,7 +1,7 @@
 """
 Human-auditable bridge from GameState → encode_state() tensors.
 
-The policy never sees render_ascii() glyphs; it sees (H,W,59) float planes + 13 scalars
+The policy never sees render_ascii() glyphs; it sees the spatial planes + scalars
 documented in rl/encoder.py. This script:
 
   - Prints scalars with fixed labels (must stay in sync with encode_state).
@@ -30,6 +30,7 @@ from engine.game import make_initial_state
 from engine.map_loader import load_map
 from rl.encoder import (
     GRID_SIZE,
+    N_HP_CHANNELS,
     N_UNIT_CHANNELS,
     TERRAIN_CATEGORIES,
     encode_state,
@@ -49,7 +50,10 @@ SCALAR_LABELS: list[str] = [
     "active_player",
     "p0_co_id/30",
     "p1_co_id/30",
-    "tier_norm",
+    "weather_rain",
+    "weather_snow",
+    "co_weather_segments/2",
+    "income_share_p0",
 ]
 
 # One char per terrain category index 0..14 (same order as TERRAIN_CATEGORIES values).
@@ -77,7 +81,7 @@ _UNIT_BUCKET_CHAR = "0123456789ABCD"
 
 
 def _spatial_terrain_grid(spatial: np.ndarray, h: int, w: int) -> list[str]:
-    off = N_UNIT_CHANNELS + 1
+    off = N_UNIT_CHANNELS + N_HP_CHANNELS
     lines = []
     for r in range(h):
         row = []

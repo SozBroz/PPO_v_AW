@@ -22,7 +22,7 @@ Use `use_reloader=False` in `server/app.py` (or `flask run --no-reload`) so the 
 | Flat action index ↔ `Action` | `rl/env.py` — `_action_to_flat`, `_flat_to_action`, `_get_action_mask`, `ACTION_SPACE_SIZE` |
 | **Flat RL indices: END=0, COP=1, SCOP=2** (not `ActionType` enum ordinals) | `rl/env.py` |
 | MOVE destination collapse (BC limitation) | `rl/env.py` `_action_to_flat` `SELECT_UNIT` branch |
-| Observations | `rl/encoder.py` — `encode_state`, `N_SPATIAL_CHANNELS`=59, `N_SCALARS`=16 |
+| Observations | `rl/encoder.py` — `encode_state`, `N_SPATIAL_CHANNELS`=77, `N_SCALARS`=16 |
 | Board JSON | `server/write_watch_state.py` — `board_dict` |
 | Canvas | `server/static/board.js` — `renderBoard`: **16×16** logical tiles, **×3** scale; Replay Player PNGs via `manifest.json` (`tools/sync_awbw_textures.py`, includes `Map/AW2/…` buildings); procedural fallback |
 | Play client | `server/templates/play.html`, `server/static/play.js` |

@@ -29,7 +29,7 @@ def _reset_env_with_select_unit(
     env: AWBWEnv, monkeypatch, max_seed: int = 64
 ) -> list:
     """Pick (seed, map) so SELECT stage includes at least one SELECT_UNIT."""
-    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
     for seed in range(max_seed):
         env.reset(seed=seed, options={"map_id": MAP_WITH_P0_UNITS})
         legal = get_legal_actions(env.state)
@@ -180,7 +180,7 @@ def test_action_stage_runs_full_belief_diff(monkeypatch):
 def test_end_turn_runs_full_belief_diff(monkeypatch):
     env = AWBWEnv()
     env.reset(seed=0, options={"map_id": MAP_WITH_FACTORY})
-    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
     p = env.state.active_player
     for u in env.state.units[p]:
         u.moved = True
@@ -205,7 +205,7 @@ def test_end_turn_runs_full_belief_diff(monkeypatch):
 def test_activate_cop_runs_full_belief_diff(monkeypatch):
     env = AWBWEnv()
     env.reset(seed=0)
-    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
     p = env.state.active_player
     co = env.state.co_states[p]
     if not co.can_activate_cop():
@@ -266,7 +266,7 @@ def test_belief_parity_early_exit_flag_vs_disabled(monkeypatch):
             random.seed(12_345)
             monkeypatch.setenv("AWBW_BELIEF_EARLY_EXIT_FULL", flag)
             env = AWBWEnv(max_env_steps=120, max_p1_microsteps=50)
-            monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+            monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
             rng = np.random.default_rng(123)
             env.reset(seed=7, options={"map_id": MAP_WITH_P0_UNITS})
             seq = []
@@ -297,7 +297,7 @@ def test_belief_parity_early_exit_flag_vs_disabled(monkeypatch):
 
 def test_belief_state_consistency_full_episode(monkeypatch):
     env = AWBWEnv(max_env_steps=120, max_p1_microsteps=50)
-    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
     rng = np.random.default_rng(0)
     for ep_seed in (0, 1, 2):
         env.reset(seed=ep_seed, options={"map_id": MAP_WITH_P0_UNITS})
@@ -339,7 +339,7 @@ def test_unit_built_during_action_stage_recorded(monkeypatch):
     monkeypatch.setattr(BeliefState, "on_unit_built", rec_on_built)
     env = AWBWEnv()
     env.reset(seed=0, options={"map_id": MAP_WITH_FACTORY})
-    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
+    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
     env.state = s
     env._invalidate_legal_cache()
     for b in env._beliefs.values():

@@ -9,6 +9,9 @@ The environment wraps the AWBW game engine and exposes:
 By default the trained agent controls engine seat 0; the other seat is stepped
 automatically (checkpoint opponent or random). With ``AWBW_SEAT_BALANCE=1`` the
 learner seat is sampled 50/50 each episode (ego-centric obs + learner-frame Φ).
+With ``AWBW_EGOCENTRIC_EPISODE_PROB`` in (0,1], seat is randomized that fraction
+of episodes instead of using ``AWBW_LEARNER_SEAT`` (ignored when seat balance is on;
+live snapshots keep CLI/env-pinned seats).
 
 ``AWBW_VECENV_OBS_COPY`` (default on): return C-contiguous observation copies from
 ``_get_obs`` so ``SubprocVecEnv`` workers do not pickle arrays that alias reused
@@ -118,6 +121,13 @@ BUILD_MASK_INFANTRY_ONLY_ENV = "AWBW_BUILD_MASK_INFANTRY_ONLY"
 # AWBWEnv instance (workers spawn with this fixed); restart with a lower
 # value to decay. See plan p0-capture-architecture-fix Tier 1.
 LEARNER_GREEDY_MIX_ENV = "AWBW_LEARNER_GREEDY_MIX"
+# Episode-level seat mixture (read once per env): with probability p each ``reset()``,
+# sample learner seat {0,1}; else use ``AWBW_LEARNER_SEAT`` / default 0. Live snapshots
+# ignore this (pinned seat). ``AWBW_SEAT_BALANCE`` still forces per-episode random seat.
+EGOCENTRIC_EPISODE_PROB_ENV = "AWBW_EGOCENTRIC_EPISODE_PROB"
+# Deprecated property-loss punishment env key. Training strips it and the env no
+# longer reads it; property loss is already represented by Φ property/income deltas.
+PHI_ENEMY_PROPERTY_CAPTURE_PENALTY_ENV = "AWBW_PHI_ENEMY_PROPERTY_CAPTURE_PENALTY"
 
 # When ``1``, each ``AWBWEnv`` records wall time per ``step()`` in a small ring
 # buffer for FPS / straggler diagnostics (SubprocVecEnv). Default off — zero deque
@@ -181,6 +191,7 @@ PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient
 PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
 PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient
 PHI_GAMMA_ENV = "AWBW_PHI_GAMMA"   # income-saturation coefficient
+PAIRWISE_ZERO_SUM_REWARD_ENV = "AWBW_PAIRWISE_ZERO_SUM_REWARD"
 # (α, β, κ, γ) when in phi mode and a coefficient env is unset:
 #   α (alpha, 2e-5): army value coefficient — unit cost × hp/100, scaled by 2e-5
 #   β (beta,  0.05): property count coefficient — +0.05 per owned property
@@ -194,6 +205,11 @@ PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
 # in the same value units as the army line (α × cost × hp/100), scaled
 # with ``_phi_alpha`` so it tracks profile/env overrides.
 PHI_ENEMY_KILL_BONUS_FRAC = 0.3
+
+
+def _env_truthy(name: str) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 # In-process: threads must not interleave JSONL lines. Cross-process: use SQLite (see _append_game_log_line).
 _log_lock = Lock()
@@ -763,8 +779,8 @@ class AWBWEnv(gym.Env):
         self.observation_space = spaces.Dict(
             {
                 "spatial": spaces.Box(
-                    low=0.0,
-                    high=1.0,
+                    low=-10.0,
+                    high=10.0,
                     shape=(GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS),
                     dtype=np.float32,
                 ),
@@ -855,6 +871,16 @@ class AWBWEnv(gym.Env):
             self._learner_greedy_mix = 0.0
         self._learner_greedy_mix = max(0.0, min(1.0, self._learner_greedy_mix))
 
+        try:
+            self._egocentric_episode_prob = float(
+                os.environ.get(EGOCENTRIC_EPISODE_PROB_ENV, "0") or 0.0
+            )
+        except ValueError:
+            self._egocentric_episode_prob = 0.0
+        self._egocentric_episode_prob = max(0.0, min(1.0, self._egocentric_episode_prob))
+
+        self._phi_enemy_property_capture_penalty = 0.0
+
         # Hoarding penalty: END_TURN with unspent funds above threshold (read once at spawn).
         try:
             self._hoard_funds_threshold = int(
@@ -891,6 +917,11 @@ class AWBWEnv(gym.Env):
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
         self._phi_gamma: float = _read_float(PHI_GAMMA_ENV, p_gamma)
+        # Opt-in only: standard learner-frame ``step()`` can expose and return a
+        # pairwise-centered competitive reward. The active-seat
+        # ``step_active_seat_once()`` path is deliberately left unchanged so
+        # ego-centric / dual-gradient self-play keeps its existing contract.
+        self._pairwise_zero_sum_reward: bool = _env_truthy(PAIRWISE_ZERO_SUM_REWARD_ENV)
 
         self._step_times: collections.deque[float] | None = (
             collections.deque(maxlen=100) if effective_track_per_worker_times() else None
@@ -1172,6 +1203,10 @@ class AWBWEnv(gym.Env):
             _bal = (os.environ.get(SEAT_BALANCE_ENV, "") or "").strip().lower()
             if _bal in ("1", "true", "yes", "on"):
                 self._learner_seat = int(self.np_random.integers(0, 2))
+            elif self._egocentric_episode_prob > 0.0 and float(
+                self.np_random.random()
+            ) < self._egocentric_episode_prob:
+                self._learner_seat = int(self.np_random.integers(0, 2))
             else:
                 try:
                     self._learner_seat = int(os.environ.get(LEARNER_SEAT_ENV, "0"))
@@ -1239,6 +1274,9 @@ class AWBWEnv(gym.Env):
         # learner actions that were overridden by the capture-greedy teacher.
         # Surfaced in game_log.jsonl so we can verify the teacher is firing.
         self._learner_teacher_overrides: int = 0
+        # Deprecated Φ property-loss penalty counter retained for log schema
+        # continuity; the penalty itself is disabled.
+        self._phi_enemy_property_captures_ep: int = 0
         # Snapshot opponent reload count at episode start so we can
         # report per-episode reloads in the log record.
         self._opponent_reloads_at_start: int = int(
@@ -1300,11 +1338,6 @@ class AWBWEnv(gym.Env):
 
         self._p0_env_steps += 1
 
-        # Env-level opening book for the learner must be PPO-consistent: the
-        # action mask is forced to the book action in action_masks(), so here
-        # we only advance the cursor if PPO actually supplied that action.
-        self._maybe_commit_learner_opening_book_action(int(action_idx))
-
         # Tier 1 (plan p0-capture-architecture-fix): with probability
         # `learner_greedy_mix`, override the policy-sampled action with the
         # capture-greedy teacher used by the cold opponent. DAGGER-lite —
@@ -1314,23 +1347,73 @@ class AWBWEnv(gym.Env):
         # mask (only legal actions are sampled) and is the well-known cost
         # of behavior-policy mixing; decay the mix to 0 in a follow-up run
         # for the final on-policy phase.
-        if self._learner_greedy_mix > 0.0 and random.random() < self._learner_greedy_mix:
+        #
+        # Opening-book invariant: never apply this teacher while the joint book
+        # still expects the learner's next flat — doing so executes a move other
+        # than the committed book index (cursor advances from policy-vs-book
+        # commit logic vs execution mismatch), drifting state until the book
+        # line hits ``action_not_legal`` mid-opening (often before the intended
+        # calendar horizon).
+        skip_capture_teacher = False
+        mgr_ob = getattr(self, "_opening_book_manager", None)
+        if (
+            mgr_ob is not None
+            and self.state is not None
+            and int(self.state.active_player) == int(self._learner_seat)
+            and float(self._learner_greedy_mix) > 0.0
+        ):
+            _mout_g = self._action_mask_buf if self._use_preallocated_buffers else None
+            _msk_g = _get_action_mask(self.state, out=_mout_g, legal=self._get_legal())
+            if (
+                mgr_ob.peek_book_candidate_flat_safe(
+                    seat=int(self._learner_seat),
+                    calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+                    action_mask=_msk_g,
+                )
+                is not None
+            ):
+                skip_capture_teacher = True
+
+        if (
+            not skip_capture_teacher
+            and self._learner_greedy_mix > 0.0
+            and random.random() < self._learner_greedy_mix
+        ):
             from rl.self_play import pick_capture_greedy_flat
             _mout = self._action_mask_buf if self._use_preallocated_buffers else None
             mask = _get_action_mask(self.state, out=_mout, legal=self._get_legal())
             action_idx = pick_capture_greedy_flat(self.state, mask)
             self._learner_teacher_overrides += 1
 
+        # Env-level opening book for the learner must be PPO-consistent: the
+        # action mask is forced to the book action in action_masks(), so here
+        # we advance the cursor based on the **executed** flat index after any
+        # capture-greedy override above (skipped while a book line is active).
+        self._maybe_commit_learner_opening_book_action(int(action_idx))
+
         # ── Decode & apply learner action (must be learner's clock) ───────────
         action = _flat_to_action(action_idx, self.state, legal=self._get_legal())
         if action is None:
             self._invalid_action_count += 1
             obs = self._get_obs(observer=self._learner_seat)
+            reward = -0.1
+            info = {
+                "invalid_action": True,
+                "reward_components": {},
+                "reward": float(reward),
+                "reward_contract": self._reward_contract_info(
+                    competitive_learner=0.0,
+                    common_learner=0.0,
+                    seat_local_learner=float(reward),
+                    final_reward=float(reward),
+                ),
+                "property_pressure": self._property_pressure_snapshot(),
+            }
             # Phase 0a.2: invalid-action early return is still P0 work; account it.
             self._wall_p0_s += time.perf_counter() - _t_step_start
             if _track_step_wall:
                 self._step_times.append(time.perf_counter() - _t_wall_track)
-            return obs, -0.1, False, False, {"invalid_action": True}
+            return obs, float(reward), False, False, info
 
         # Φ-shaping snapshot (plan rl_capture-combat_recalibration). Bracketed
         # around P0 action AND opponent micro-steps so a chip → opponent kills
@@ -1345,18 +1428,31 @@ class AWBWEnv(gym.Env):
                 for u in self.state.units[en_s]
                 if u.is_alive
             }
+            if self._phi_enemy_property_capture_penalty > 0.0:
+                phi_prop_pre_cells = self._phi_learner_non_hq_property_cells(self.state)
+            else:
+                phi_prop_pre_cells = None
         else:
             phi_before = 0.0
             pre_enemy_alive = None
             pre_action_capture_progress = None
+            phi_prop_pre_cells = None
 
         acting = int(self.state.active_player)
         self.state, reward, done = self._engine_step_with_belief(action)
         reward = self._signed_engine_reward(reward, acting)
+        rc: dict[str, float] = {
+            "learner_engine_signed_sparse_capture": float(reward),
+        }
         if self.state is not None and self.state.done:
+            rb = reward
             reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
+            rc["phi_max_turn_sparse_terminal_adjust"] = float(reward - rb)
+        kb = 0.0
         if pre_enemy_alive is not None and self.state is not None:
-            reward += self._phi_enemy_kill_one_time_bonus(pre_enemy_alive)
+            kb = float(self._phi_enemy_kill_one_time_bonus(pre_enemy_alive))
+            reward += kb
+            rc["phi_enemy_kill_one_time_bonus"] = kb
         self._capture_frame(action=action)
 
         if (
@@ -1372,10 +1468,11 @@ class AWBWEnv(gym.Env):
             p_me = self.state.count_properties(me)
             p_en = self.state.count_properties(en)
             diff = p_me - p_en
-            if diff >= 0:
-                reward += diff * 0.005
-            else:
-                reward += diff * 0.001
+            lv_prop = (
+                diff * 0.005 if diff >= 0 else diff * 0.001
+            )
+            reward += lv_prop
+            rc["level_dense_property_margin"] = float(lv_prop)
 
             v_me = sum(
                 UNIT_STATS[u.unit_type].cost * u.hp / 100
@@ -1387,16 +1484,20 @@ class AWBWEnv(gym.Env):
                 for u in self.state.units[en]
                 if u.is_alive
             )
-            reward += (v_me - v_en) * 2e-6
+            lv_army = float((v_me - v_en) * 2e-6)
+            reward += lv_army
+            rc["level_dense_army_value_diff"] = lv_army
 
         # ── Auto-step non-learner seat ─────────────────────────────────────────
+        _opp_eng = 0.0
         if not done and int(self.state.active_player) != self._learner_seat:
             _t_p1 = time.perf_counter()
             if self.opponent_policy is not None:
-                reward = self._run_policy_opponent(reward)
+                reward, _opp_eng = self._run_policy_opponent(reward)
             else:
-                reward = self._run_random_opponent(reward)
+                reward, _opp_eng = self._run_random_opponent(reward)
             _p1_delta = time.perf_counter() - _t_p1
+        rc["opponent_engine_signed_microsteps"] = float(_opp_eng)
 
         terminated = bool(self.state.done)
         p1_cap_trunc = bool(self._p1_truncated_mid_turn)
@@ -1420,36 +1521,67 @@ class AWBWEnv(gym.Env):
         # property potential without actually converting the game.
         if self._reward_shaping_mode == "phi":
             phi_after = 0.0 if (terminated or truncated) else self._compute_phi(self.state)
-            reward += phi_after - phi_before
+            pd = phi_after - phi_before
+            rc["phi_potential_delta"] = float(pd)
+            reward += pd
             # Explicit penalty for learner capture progress that was lost (interrupted/reset).
             # If learner started a capture (pre→mid progress increased) but opponent killed the
             # capturer or it got reset, apply -κ × lost_progress penalty.
+            kappa_loss = 0.0
             if pre_action_capture_progress is not None:
                 post_progress = self._get_learner_capture_progress() if not (terminated or truncated) else 0.0
                 # Only penalize if learner made progress from their action that got lost
                 if post_progress < pre_action_capture_progress:
                     lost = pre_action_capture_progress - post_progress
+                    kappa_loss = float(-(self._phi_kappa * lost))
                     reward -= self._phi_kappa * lost
+            rc["phi_capture_interrupt_penalty"] = float(kappa_loss)
 
+        phi_prop_loss_n = 0
+        phi_prop_pen = 0.0
+        if (
+            phi_prop_pre_cells is not None
+            and self._phi_enemy_property_capture_penalty > 0.0
+            and self.state is not None
+        ):
+            phi_prop_loss_n = self._phi_count_learner_props_lost_to_enemy(
+                self.state, phi_prop_pre_cells, self._enemy_seat
+            )
+            if phi_prop_loss_n:
+                phi_prop_pen = -(
+                    float(self._phi_enemy_property_capture_penalty)
+                    * float(phi_prop_loss_n)
+                )
+                reward += phi_prop_pen
+                self._phi_enemy_property_captures_ep += int(phi_prop_loss_n)
+        rc["phi_enemy_property_loss_penalty"] = float(phi_prop_pen)
+
+        trunc_pen_v = 0.0
         if truncated and not terminated:
             raw_tp = os.environ.get(TRUNCATION_PENALTY_ENV, "0").strip()
             if raw_tp:
                 try:
+                    trunc_pen_v = -float(raw_tp)
                     reward -= float(raw_tp)
                 except ValueError:
                     pass
+        rc["truncation_penalty_awbw_trunc"] = trunc_pen_v
 
+        hoard_pen_v = 0.0
         if (
             self._hoard_penalty > 0.0
             and self.state is not None
             and action.action_type == ActionType.END_TURN
             and int(self.state.funds[acting]) > int(self._hoard_funds_threshold)
         ):
+            hoard_pen_v = -float(self._hoard_penalty)
             reward -= float(self._hoard_penalty)
+        rc["end_turn_hoard_penalty"] = hoard_pen_v
 
         # Partial win at the P0 step cap: engine never emits ±1 without a terminal, so
         # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a solid
         # property lead in the learner frame.
+        pb_tiebreak = 0.0
         if (
             truncated
             and not terminated
@@ -1463,7 +1595,16 @@ class AWBWEnv(gym.Env):
             )
             if prop_lead >= 2:
                 self._log_tie_breaker_property_count = int(prop_lead)
+                pb_tiebreak = 0.5
                 reward += 0.5
+        rc["partial_win_property_lead_bonus_half"] = pb_tiebreak
+
+        if self._reward_shaping_mode != "phi":
+            rc.setdefault("phi_potential_delta", 0.0)
+            rc.setdefault("phi_capture_interrupt_penalty", 0.0)
+        rc.setdefault("phi_max_turn_sparse_terminal_adjust", 0.0)
+        rc.setdefault("level_dense_property_margin", 0.0)
+        rc.setdefault("level_dense_army_value_diff", 0.0)
 
         obs = self._get_obs(observer=self._learner_seat)
         info = {
@@ -1471,6 +1612,7 @@ class AWBWEnv(gym.Env):
             "turn": self.state.turn,
             "winner": self.state.winner,
             "truncated": truncated,
+            "phi_enemy_property_captures": int(phi_prop_loss_n),
         }
         if (self.state.win_reason or "") == SPIRIT_BROKEN_REASON:
             info["spirit_broken"] = True
@@ -1478,6 +1620,7 @@ class AWBWEnv(gym.Env):
             if _sk is not None:
                 info["spirit_broken_kind"] = _sk
 
+        inc_adj = 0.0
         if terminated:
             raw_inc = os.environ.get(INCOME_TERM_COEF_ENV, "0").strip()
             if raw_inc:
@@ -1487,18 +1630,24 @@ class AWBWEnv(gym.Env):
                         cap_lim = max(1, self.state.map_data.cap_limit)
                         inc_me = self.state.count_income_properties(self._learner_seat)
                         inc_en = self.state.count_income_properties(self._enemy_seat)
-                        reward += coef * (inc_me - inc_en) / float(cap_lim)
+                        inc_adj = coef * (inc_me - inc_en) / float(cap_lim)
+                        reward += inc_adj
                 except ValueError:
-                    pass
+                    inc_adj = 0.0
+        rc["income_terminal_coefficient_adj"] = float(inc_adj)
 
+        time_cost_adj = 0.0
         if not self.state.done and not truncated:
             raw_tc = os.environ.get(TIME_COST_ENV, "0").strip()
             if raw_tc:
                 try:
+                    time_cost_adj = -float(raw_tc)
                     reward -= float(raw_tc)
                 except ValueError:
-                    pass
+                    time_cost_adj = 0.0
+        rc["per_step_time_cost"] = float(time_cost_adj)
 
+        _pre_spirit = reward
         if (
             self.state is not None
             and self.state.done
@@ -1511,6 +1660,35 @@ class AWBWEnv(gym.Env):
                     reward = r_sparse - phi_before
                 else:
                     reward = r_sparse
+        rc["spirit_broken_sparse_substitution_delta"] = float(reward - _pre_spirit)
+
+        draw_common_v = 0.0
+        if (
+            self.state is not None
+            and self.state.done
+            and int(self.state.winner if self.state.winner is not None else -2) == -1
+        ):
+            draw_common_v = min(
+                0.0, float(rc.get("phi_max_turn_sparse_terminal_adjust", 0.0))
+            )
+        common_reward_v = float(time_cost_adj + trunc_pen_v + draw_common_v)
+        seat_local_reward_v = float(hoard_pen_v)
+        competitive_reward_v = float(reward - common_reward_v - seat_local_reward_v)
+        reward_contract = self._reward_contract_info(
+            competitive_learner=competitive_reward_v,
+            common_learner=common_reward_v,
+            seat_local_learner=seat_local_reward_v,
+            final_reward=float(reward),
+        )
+        if self._pairwise_zero_sum_reward:
+            reward = float(reward_contract["training_reward"])
+
+        _rc_sum = sum(rc.values())
+        rc["_component_sum_gap"] = float(reward - _rc_sum)
+        info["reward_components"] = rc
+        info["reward_contract"] = reward_contract
+        info["property_pressure"] = self._property_pressure_snapshot()
+        info["reward"] = float(reward)
 
         # Phase 0a.2: finalize per-step wall split BEFORE logging so the
         # finished-game record reflects this step's contribution.
@@ -1532,6 +1710,101 @@ class AWBWEnv(gym.Env):
 
         return obs, float(reward), terminated, truncated, info
 
+    def _reward_contract_info(
+        self,
+        *,
+        competitive_learner: float,
+        common_learner: float,
+        seat_local_learner: float,
+        final_reward: float,
+    ) -> dict[str, Any]:
+        """Inspectable reward contract for learner-frame ``step()`` rows.
+
+        Competitive reward is represented as a two-seat zero-sum pair. Common
+        penalties intentionally hit both POVs, while seat-local discipline only
+        hits the learner row that caused it. This keeps ego-centric consumers
+        explicit without changing ``step_active_seat_once()``.
+        """
+        learner = int(self._learner_seat)
+        enemy = 1 - learner
+        competitive = [0.0, 0.0]
+        competitive[learner] = float(competitive_learner)
+        competitive[enemy] = -float(competitive_learner)
+
+        common = [float(common_learner), float(common_learner)]
+        seat_local = [0.0, 0.0]
+        seat_local[learner] = float(seat_local_learner)
+        final_by_seat = [
+            float(competitive[i] + common[i] + seat_local[i])
+            for i in (0, 1)
+        ]
+        return {
+            "version": "pairwise_zero_sum_v1",
+            "pairwise_zero_sum_enabled": bool(self._pairwise_zero_sum_reward),
+            "learner_seat": learner,
+            "enemy_seat": enemy,
+            "competitive_by_seat": competitive,
+            "common_by_seat": common,
+            "seat_local_by_seat": seat_local,
+            "final_by_seat": final_by_seat,
+            "training_reward": float(final_by_seat[learner]),
+            "legacy_reward": float(final_reward),
+            "competitive_antisymmetry_gap": float(sum(competitive)),
+        }
+
+    def _property_pressure_snapshot(self) -> dict[str, Any]:
+        """Compact opening/property-pressure diagnostics for reward audits."""
+        st = self.state
+        if st is None:
+            return {}
+
+        def is_income_prop(prop: Any) -> bool:
+            return (
+                prop.owner is not None
+                and not bool(getattr(prop, "is_hq", False))
+                and not bool(getattr(prop, "is_comm_tower", False))
+                and not bool(getattr(prop, "is_lab", False))
+            )
+
+        income_owned = [0, 0]
+        props_owned = [0, 0]
+        contested = [0.0, 0.0]
+        contested_income = [0.0, 0.0]
+        neutral_income = 0
+
+        for prop in st.properties:
+            owner = prop.owner
+            if owner in (0, 1):
+                props_owned[int(owner)] += 1
+                if is_income_prop(prop):
+                    income_owned[int(owner)] += 1
+            elif (
+                owner is None
+                and not bool(getattr(prop, "is_hq", False))
+                and not bool(getattr(prop, "is_comm_tower", False))
+                and not bool(getattr(prop, "is_lab", False))
+            ):
+                neutral_income += 1
+
+            cp = int(getattr(prop, "capture_points", 20) or 20)
+            if cp < 20:
+                chip = float(1.0 - cp / 20.0)
+                for seat in (0, 1):
+                    if owner != seat:
+                        contested[seat] += chip
+                        if owner is not None and is_income_prop(prop):
+                            contested_income[seat] += chip
+
+        return {
+            "turn": int(getattr(st, "turn", 0) or 0),
+            "learner_seat": int(self._learner_seat),
+            "income_owned_by_seat": income_owned,
+            "properties_owned_by_seat": props_owned,
+            "neutral_income_properties": int(neutral_income),
+            "contested_capture_chips_by_seat": contested,
+            "contested_income_chips_by_seat": contested_income,
+        }
+
     def action_masks(self) -> np.ndarray:
         """Return valid-action bool mask. Required by MaskablePPO wrappers."""
         if self.state is None:
@@ -1547,6 +1820,219 @@ class AWBWEnv(gym.Env):
             _strip_non_infantry_builds(mask, self.state, legal=legal)
         mask = self._maybe_force_learner_opening_book_mask(mask)
         return mask
+
+    def active_seat_observation(self) -> dict:
+        """Observation from the current engine active player's perspective.
+
+        Async dual-gradient self-play uses this to train both seats with one
+        shared policy.  Standard ``step()`` keeps using learner-frame
+        observations and opponent autoplay.
+        """
+        if self.state is None:
+            raise RuntimeError("Call reset() before active_seat_observation().")
+        return self._get_obs(observer=int(self.state.active_player))
+
+    def active_seat_action_mask(self) -> np.ndarray:
+        """Legal-action mask for the current engine active player."""
+        if self.state is None:
+            if self._use_preallocated_buffers:
+                self._action_mask_buf.fill(False)
+                return self._action_mask_buf
+            return np.zeros(ACTION_SPACE_SIZE, dtype=bool)
+        legal = self._get_legal()
+        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+        mask = _get_action_mask(self.state, out=_mout, legal=legal)
+        flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
+        if flag in ("1", "true", "yes", "on"):
+            _strip_non_infantry_builds(mask, self.state, legal=legal)
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is not None and self.state is not None:
+            a = mgr.peek_flat(
+                seat=int(self.state.active_player),
+                calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+                action_mask=mask,
+            )
+            self._sync_opening_book_log()
+            if a is not None:
+                forced = np.zeros_like(mask, dtype=bool)
+                forced[int(a)] = True
+                return forced
+        return mask
+
+    def step_active_seat_once(
+        self, action_idx: int
+    ) -> tuple[dict, float, bool, bool, dict]:
+        """Apply one action for ``state.active_player`` and return that seat's reward.
+
+        This is intentionally lower level than :meth:`step`: it does not autoplay
+        the other seat back to a fixed learner clock.  It is for async
+        dual-gradient self-play where every engine decision becomes one training
+        row for the shared policy.
+        """
+        if self.state is None:
+            raise RuntimeError("Call reset() before step_active_seat_once().")
+
+        self._p0_env_steps += 1
+        acting = int(self.state.active_player)
+        other = 1 - acting
+        legal = self._get_legal()
+        mgr = getattr(self, "_opening_book_manager", None)
+        if mgr is not None:
+            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+            book_mask = _get_action_mask(self.state, out=_mout, legal=legal)
+            expected = mgr.peek_flat(
+                seat=acting,
+                calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+                action_mask=book_mask,
+            )
+            if expected is not None:
+                mgr.commit_flat(seat=acting, action_idx=int(action_idx))
+                self._sync_opening_book_log()
+        action = _flat_to_action(int(action_idx), self.state, legal=legal)
+        if action is None:
+            obs = self._get_obs(observer=acting)
+            return obs, -0.1, False, False, {
+                "invalid_action": True,
+                "seat": acting,
+                "reward_components": {},
+            }
+
+        phi_before = (
+            self._compute_phi_for_seat(self.state, acting)
+            if self._reward_shaping_mode == "phi"
+            else 0.0
+        )
+        pre_capture_progress = (
+            self._capture_progress_for_seat(self.state, acting)
+            if self._reward_shaping_mode == "phi"
+            else None
+        )
+        pre_enemy_alive = (
+            {
+                u.unit_id: (u.unit_type, u.hp)
+                for u in self.state.units[other]
+                if u.is_alive
+            }
+            if self._reward_shaping_mode == "phi"
+            else None
+        )
+        pre_prop_cells = (
+            self._seat_non_hq_property_cells(self.state, acting)
+            if (
+                self._reward_shaping_mode == "phi"
+                and self._phi_enemy_property_capture_penalty > 0.0
+            )
+            else None
+        )
+
+        self.state, reward, _done = self._engine_step_with_belief(action)
+        # ``GameState.step`` reports engine reward in acting-player coordinates.
+        reward = float(reward)
+        rc: dict[str, float] = {
+            # Includes engine sparse + dense capture shaping (until env strips it).
+            "acting_engine_sparse_plus_capture_shaping": float(reward),
+        }
+        if self.state is not None and self.state.done:
+            rb = reward
+            reward = self._apply_phi_sparse_terminal_replacement_for_seat(
+                reward, acting
+            )
+            rc["phi_max_turn_sparse_terminal_adjust"] = float(reward - rb)
+        else:
+            rc.setdefault("phi_max_turn_sparse_terminal_adjust", 0.0)
+        kb = 0.0
+        if pre_enemy_alive is not None and self.state is not None:
+            kb = float(
+                self._phi_enemy_kill_one_time_bonus_for_seat(pre_enemy_alive, acting)
+            )
+            reward += kb
+        rc["phi_enemy_kill_one_time_bonus"] = kb
+
+        self._capture_frame(action=action)
+
+        terminated = bool(self.state.done)
+        truncated = (
+            self._max_env_steps is not None
+            and self._p0_env_steps >= self._max_env_steps
+            and not terminated
+        )
+        truncation_reason = "max_env_steps" if truncated else None
+        if self._reward_shaping_mode == "phi":
+            phi_after = 0.0 if (terminated or truncated) else self._compute_phi_for_seat(
+                self.state, acting
+            )
+            pd = phi_after - phi_before
+            reward += pd
+            rc["phi_potential_delta"] = float(pd)
+            kappa_loss = 0.0
+            if pre_capture_progress is not None:
+                post_progress = (
+                    0.0
+                    if (terminated or truncated)
+                    else self._capture_progress_for_seat(self.state, acting)
+                )
+                if post_progress < pre_capture_progress:
+                    lost = pre_capture_progress - post_progress
+                    kappa_loss = float(-(self._phi_kappa * lost))
+                    reward -= self._phi_kappa * lost
+            rc["phi_capture_interrupt_penalty"] = float(kappa_loss)
+        else:
+            rc.setdefault("phi_potential_delta", 0.0)
+            rc.setdefault("phi_capture_interrupt_penalty", 0.0)
+
+        phi_prop_loss_n = 0
+        phi_prop_pen = 0.0
+        if (
+            pre_prop_cells is not None
+            and self._phi_enemy_property_capture_penalty > 0.0
+            and self.state is not None
+        ):
+            phi_prop_loss_n = self._count_props_lost_to_seat(
+                self.state, pre_prop_cells, other
+            )
+            if phi_prop_loss_n:
+                phi_prop_pen = -(
+                    float(self._phi_enemy_property_capture_penalty)
+                    * float(phi_prop_loss_n)
+                )
+                reward += phi_prop_pen
+                self._phi_enemy_property_captures_ep += int(phi_prop_loss_n)
+        rc["phi_enemy_property_loss_penalty"] = float(phi_prop_pen)
+
+        trunc_pen_v = 0.0
+        if truncated and not terminated:
+            raw_tp = os.environ.get(TRUNCATION_PENALTY_ENV, "0").strip()
+            if raw_tp:
+                try:
+                    trunc_pen_v = -float(raw_tp)
+                    reward -= float(raw_tp)
+                except ValueError:
+                    pass
+        rc["truncation_penalty_awbw_trunc"] = float(trunc_pen_v)
+
+        _rc_sum = sum(rc.values())
+        rc["_component_sum_gap"] = float(reward - _rc_sum)
+
+        next_observer = int(self.state.active_player) if not terminated else acting
+        obs = self._get_obs(observer=next_observer)
+        info = {
+            **self._episode_info,
+            "turn": self.state.turn,
+            "winner": self.state.winner,
+            "truncated": truncated,
+            "truncation_reason": truncation_reason,
+            "seat": acting,
+            "next_active_seat": int(self.state.active_player),
+            "dual_gradient_self_play": True,
+            "phi_enemy_property_captures": int(phi_prop_loss_n),
+            "reward_components": rc,
+            "reward": float(reward),
+        }
+        if terminated or truncated:
+            self._log_episode_truncated = bool(truncated)
+            self._log_episode_truncation_reason = truncation_reason
+            self._log_finished_game()
+        return obs, float(reward), terminated, truncated, info
 
     def _begin_opening_book_episode(self) -> None:
         mgr = getattr(self, "_opening_book_manager", None)
@@ -1645,6 +2131,16 @@ class AWBWEnv(gym.Env):
             return float(r_engine)
         return float(-r_engine)
 
+    def _seat_frame_terminal_outcome(self, observer_seat: int) -> float:
+        """Sparse terminal outcome from ``observer_seat`` coordinates."""
+        st = self.state
+        if st is None or not st.done or st.winner is None:
+            return 0.0
+        wi = int(st.winner)
+        if wi == -1:
+            return 0.0
+        return 1.0 if wi == int(observer_seat) else -1.0
+
     def _learner_frame_terminal_outcome(self, acting_seat: int) -> float:
         """Sparse win/lose/draw from a terminal step, learner frame; excludes capture shaping.
 
@@ -1661,6 +2157,35 @@ class AWBWEnv(gym.Env):
         else:
             s = 1.0 if wi == int(acting_seat) else -1.0
         return self._signed_engine_reward(s, acting_seat)
+
+    def _apply_phi_sparse_terminal_replacement_for_seat(
+        self, reward: float, observer_seat: int
+    ) -> float:
+        """Φ mode terminal replacement in an arbitrary seat frame."""
+        if self._reward_shaping_mode != "phi" or self.state is None or not self.state.done:
+            return float(reward)
+        wr = self.state.win_reason
+        if wr not in ("max_turns_draw", "max_turns_tie", "max_turns_tiebreak"):
+            return float(reward)
+        ls = self._seat_frame_terminal_outcome(observer_seat)
+        rest = float(reward) - ls
+        if wr in ("max_turns_draw", "max_turns_tie"):
+            return -0.1 + rest
+        w = self.state.winner
+        if w is None or int(w) == -1:
+            return float(reward)
+        me = int(observer_seat)
+        en = 1 - me
+        if int(w) == me:
+            l_new = 0.5
+        else:
+            p_en = int(self.state.count_properties(en))
+            p_me = int(self.state.count_properties(me))
+            if p_en - p_me >= 2:
+                l_new = -0.5
+            else:
+                l_new = -1.0
+        return l_new + rest
 
     def _apply_phi_sparse_terminal_replacement(
         self, reward: float, acting_seat: int
@@ -1732,8 +2257,12 @@ class AWBWEnv(gym.Env):
           completed-capture-only logic.
         - income_saturation: log-scale bonus for income property lead after day 8
         """
-        me = int(self._learner_seat)
-        en = int(self._enemy_seat)
+        return self._compute_phi_for_seat(state, int(self._learner_seat))
+
+    def _compute_phi_for_seat(self, state: GameState, observer_seat: int) -> float:
+        """Potential Φ(s) from ``observer_seat`` coordinates."""
+        me = int(observer_seat)
+        en = 1 - me
 
         v_me = sum(
             UNIT_STATS[u.unit_type].cost * u.hp / 100
@@ -1778,9 +2307,13 @@ class AWBWEnv(gym.Env):
         """
         if self.state is None:
             return 0.0
-        me = int(self._learner_seat)
+        return self._capture_progress_for_seat(self.state, int(self._learner_seat))
+
+    def _capture_progress_for_seat(self, state: GameState, observer_seat: int) -> float:
+        """Compute partial capture progress for ``observer_seat``."""
+        me = int(observer_seat)
         cap_progress = 0.0
-        for prop in self.state.properties:
+        for prop in state.properties:
             cp = prop.capture_points
             if cp >= 20:
                 continue
@@ -1788,6 +2321,52 @@ class AWBWEnv(gym.Env):
             if prop.owner != me:
                 cap_progress += 1.0 - cp / 20.0
         return cap_progress
+
+    def _phi_learner_non_hq_property_cells(self, state: GameState) -> frozenset[tuple[int, int]]:
+        """Board cells of capturable properties owned by the learner, excluding HQ.
+
+        HQ is omitted so terminal ``hq_capture`` is not double-penalized alongside
+        sparse / Φ terminal outcomes.
+        """
+        return self._seat_non_hq_property_cells(state, int(self._learner_seat))
+
+    def _seat_non_hq_property_cells(
+        self, state: GameState, observer_seat: int
+    ) -> frozenset[tuple[int, int]]:
+        """Board cells of non-HQ properties owned by ``observer_seat``."""
+        me = int(observer_seat)
+        return frozenset(
+            (int(p.row), int(p.col))
+            for p in state.properties
+            if p.owner == me and not p.is_hq
+        )
+
+    def _phi_count_learner_props_lost_to_enemy(
+        self,
+        state: GameState,
+        pre_cells: frozenset[tuple[int, int]],
+        enemy_seat: int,
+    ) -> int:
+        """Count properties that were learner-owned in ``pre_cells`` and are now ``enemy_seat``."""
+        en = int(enemy_seat)
+        return sum(
+            1
+            for p in state.properties
+            if (int(p.row), int(p.col)) in pre_cells and p.owner == en
+        )
+
+    def _count_props_lost_to_seat(
+        self,
+        state: GameState,
+        pre_cells: frozenset[tuple[int, int]],
+        new_owner_seat: int,
+    ) -> int:
+        """Count properties from ``pre_cells`` now owned by ``new_owner_seat``."""
+        return sum(
+            1
+            for p in state.properties
+            if (int(p.row), int(p.col)) in pre_cells and p.owner == int(new_owner_seat)
+        )
 
     def _phi_enemy_kill_one_time_bonus(
         self, pre_enemy_alive: dict[int, tuple[UnitType, int]]
@@ -1804,6 +2383,23 @@ class AWBWEnv(gym.Env):
             return 0.0
         en = int(self._enemy_seat)
         post_ids = {u.unit_id for u in self.state.units[en] if u.is_alive}
+        total = 0.0
+        frac = float(PHI_ENEMY_KILL_BONUS_FRAC) * float(self._phi_alpha)
+        for uid, (ut, hi) in pre_enemy_alive.items():
+            if uid in post_ids:
+                continue
+            v = float(UNIT_STATS[ut].cost) * (float(hi) / 100.0)
+            total += frac * v
+        return float(total)
+
+    def _phi_enemy_kill_one_time_bonus_for_seat(
+        self, pre_enemy_alive: dict[int, tuple[UnitType, int]], observer_seat: int
+    ) -> float:
+        """Extra Φ reward for kills by ``observer_seat``."""
+        if not pre_enemy_alive or self.state is None:
+            return 0.0
+        enemy = 1 - int(observer_seat)
+        post_ids = {u.unit_id for u in self.state.units[enemy] if u.is_alive}
         total = 0.0
         frac = float(PHI_ENEMY_KILL_BONUS_FRAC) * float(self._phi_alpha)
         for uid, (ut, hi) in pre_enemy_alive.items():
@@ -2175,8 +2771,18 @@ class AWBWEnv(gym.Env):
             )
             # endregion
 
-    def _run_random_opponent(self, accumulated_reward: float) -> float:
-        """Run the non-learner seat using uniform-random legal actions."""
+    def _run_random_opponent(self, accumulated_reward: float) -> tuple[float, float]:
+        """Run the non-learner seat — opening book (if configured) then uniform-random legal.
+
+        Mirrors :meth:`_run_policy_opponent`'s book path so ``opponent_policy=None``
+        (“cold random”) still plays book lines when :class:`~rl.opening_book.TwoSidedOpeningBookManager`
+        is loaded; same as checkpoint opponent when the inner policy would mask-sample.
+
+        Returns ``(accumulated_reward, opponent_engine_signed_sum)``: the second
+        value is only the summed signed learner-frame engine rewards accumulated
+        during opponent micro-steps (AUDIT_FLASK reward breakdown).
+        """
+        opp_engine_signed = 0.0
         microsteps = 0
         cap = self._max_p1_microsteps_cap
         enemy = int(self._enemy_seat)
@@ -2187,18 +2793,37 @@ class AWBWEnv(gym.Env):
             legal = self._get_legal()
             if not legal:
                 break
-            action = random.choice(legal)
+            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+            mask = _get_action_mask(self.state, out=_mout, legal=legal)
+            book_idx = self._suggest_opening_book_for_active(mask)
+            if book_idx is not None:
+                opp_idx = int(book_idx)
+            else:
+                idxs = np.flatnonzero(mask)
+                opp_idx = (
+                    int(idxs[np.random.randint(0, len(idxs))]) if idxs.size else -1
+                )
+            action = _flat_to_action(opp_idx, self.state, legal=legal)
+            if action is None:
+                action = random.choice(legal)
             acting = int(self.state.active_player)
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
-            accumulated_reward += self._signed_engine_reward(r_opp, acting)
+            dr = self._signed_engine_reward(r_opp, acting)
+            opp_engine_signed += dr
+            accumulated_reward += dr
             self._capture_frame(action=action)
             microsteps += 1
         if microsteps > self._max_p1_microsteps:
             self._max_p1_microsteps = microsteps
-        return accumulated_reward
+        return accumulated_reward, opp_engine_signed
 
-    def _run_policy_opponent(self, accumulated_reward: float) -> float:
-        """Run the non-learner seat using the provided opponent policy callable."""
+    def _run_policy_opponent(self, accumulated_reward: float) -> tuple[float, float]:
+        """Run the non-learner seat using the provided opponent policy callable.
+
+        Returns ``(accumulated_reward, opponent_engine_signed_sum)`` —
+        same convention as :meth:`_run_random_opponent`.
+        """
+        opp_engine_signed = 0.0
         microsteps = 0
         cap = self._max_p1_microsteps_cap
         enemy = int(self._enemy_seat)
@@ -2229,12 +2854,14 @@ class AWBWEnv(gym.Env):
 
             acting = int(self.state.active_player)
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
-            accumulated_reward += self._signed_engine_reward(r_opp, acting)
+            dr = self._signed_engine_reward(r_opp, acting)
+            opp_engine_signed += dr
+            accumulated_reward += dr
             self._capture_frame(action=action)
             microsteps += 1
         if microsteps > self._max_p1_microsteps:
             self._max_p1_microsteps = microsteps
-        return accumulated_reward
+        return accumulated_reward, opp_engine_signed
 
     def _capture_frame(self, action: Optional[Action]) -> None:
         """Append a board snapshot to the replay buffer if frame logging is enabled.
@@ -2412,6 +3039,9 @@ class AWBWEnv(gym.Env):
             "learner_seat": int(getattr(self, "_learner_seat", 0)),
             "agent_plays": int(getattr(self, "_learner_seat", 0)),
             "reward_mode": getattr(self, "_reward_shaping_mode", "phi"),
+            "pairwise_zero_sum_reward": bool(
+                getattr(self, "_pairwise_zero_sum_reward", False)
+            ),
             "arch_version": (os.environ.get("AWBW_ARCH_VERSION", "wave2") or "wave2").strip(),
             "opponent_sampler": (
                 "pfsp"
@@ -2447,11 +3077,15 @@ class AWBWEnv(gym.Env):
             # of P0 unit positions on defense>=2 terrain at episode end.
             # See definition above.
             "terrain_usage_p0": terrain_usage_p0,
+            "property_pressure_end": self._property_pressure_snapshot(),
 
             # Tier 1 (plan p0-capture-architecture-fix): visibility into
             # teacher-mix so we can verify it is firing and slice metrics by mix value.
             "learner_greedy_mix": float(getattr(self, "_learner_greedy_mix", 0.0)),
             "learner_teacher_overrides": int(getattr(self, "_learner_teacher_overrides", 0)),
+            "phi_enemy_property_captures": int(
+                getattr(self, "_phi_enemy_property_captures_ep", 0)
+            ),
             # Deprecated: env-side END_TURN gate removed; engine/action.py:_get_select_actions enforces the rule. Field retained for log schema continuity.
             "end_turn_gate_active": False,
 
@@ -2470,13 +3104,14 @@ class AWBWEnv(gym.Env):
             # 1.11: winner / win_condition filled from property tiebreak when truncated
             #       and engine left winner unset (env_step_cap_* reasons).
             # 1.13: alive_unit_count, army_value at episode end.
+            # 1.14: phi_enemy_property_captures — episode sum of learner→enemy property flips (Φ penalty).
             "terminated": bool(self.state.done),
             "truncated": bool(getattr(self, "_log_episode_truncated", False)),
             "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
             "tie_breaker_property_count": getattr(
                 self, "_log_tie_breaker_property_count", None
             ),
-            "log_schema_version": "1.13",
+            "log_schema_version": "1.14",
         }
         sk = getattr(self.state.spirit, "spirit_broken_kind", None)
         if sk is None:

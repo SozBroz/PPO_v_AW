@@ -10,7 +10,10 @@ Output shape: (H, W, N_CHANNELS) where H=W=30 (padded), N_CHANNELS is:
   - 1 neutral contestable income-property mask (owner None, not lab/comm)
   - 6 influence channels (threat/reach/capture-ETA planes; ``engine/threat.py``)
   - 1 defense-stars channel (``TerrainInfo.defense / 4``, map-static; cached on ``MapData``)
-  Total: 28 + 2 + 15 + 15 + 3 + 6 + 1 = 70 spatial channels
+  - 7 unit modifier channels at occupied cells:
+    move_delta/10, attack_delta/100, defense_delta/100, luck_min/100,
+    luck_max/100, indirect_min_range/10, indirect_max_range/10
+  Total: 28 + 2 + 15 + 15 + 3 + 6 + 1 + 7 = 77 spatial channels
 
 Plus scalar features (**ego-centric**, ``observer`` = engine seat of “me”):
   - funds[me], funds[enemy] (normalized by 50000)
@@ -19,10 +22,9 @@ Plus scalar features (**ego-centric**, ``observer`` = engine seat of “me”):
   - turn (normalized by MAX_TURNS)
   - **my_turn**: 1.0 iff ``state.active_player == observer`` (not raw seat id)
   - co_id[me], co_id[enemy] (normalized by 30)
-  - tier (normalized: T1=0.25, T2=0.5, T3=0.75, T4=1.0)
   - weather_rain / weather_snow / weather_turns (same as pre-bundle)
   - **me** income share (contestable income tiles owned by ``observer`` / total)
-  Total scalars: 17
+  Total scalars: 16
 
 HP belief (see ``docs/hp_belief.md``)
 -------------------------------------
@@ -42,11 +44,12 @@ for enemy units when a belief overlay is provided.
   channels, equivalent to the pre-belief single-HP layout.
 
 **Checkpoint compatibility:** legacy 62-channel zips (single HP) load via
-``rl.ckpt_compat.load_maskable_ppo_compat`` — stem weights and Adam moments
-are expanded to 63 channels by duplicating the old HP channel into
-``hp_lo`` / ``hp_hi``. The 63→70 channel bump (influence placeholders +
-defense stars) is a **restart-bundle** contract; do not load pre-restart
-policy weights without a stem transplant. See ``docs/hp_belief.md``.
+``rl.ckpt_compat.load_maskable_ppo_compat``. Stem weights are expanded by
+duplicating the old HP channel into ``hp_lo`` / ``hp_hi`` and zero-filling
+newer channel slices. The 70→77 / 17→16 unit-modifier migration is handled by
+the same best-effort state-dict transplant. Optimizer state is stripped when a
+migration is materialized because parameter shapes no longer line up with Adam
+moments. See ``docs/hp_belief.md``.
 """
 from __future__ import annotations
 
@@ -59,6 +62,7 @@ from engine.map_loader import MapData
 from engine.terrain import get_terrain
 from engine.threat import compute_influence_planes
 from engine.unit import UnitType
+from rl.encoder_unit_features import modifier_features_for_unit
 
 # Flag to enable/disable Cython optimizations
 USE_CYTHON = True
@@ -76,6 +80,7 @@ N_CAPTURE_EXTRA_CHANNELS = 3  # p0 progress, p1 progress, neutral-income mask
 # Influence planes (MASTER_SPEC / influence_channels_spec); see ``compute_influence_planes``.
 N_INFLUENCE_CHANNELS = 6
 N_DEFENSE_STARS_CHANNELS = 1
+N_UNIT_MODIFIER_CHANNELS = 7
 N_SPATIAL_CHANNELS = (
     N_UNIT_CHANNELS
     + N_HP_CHANNELS
@@ -84,9 +89,10 @@ N_SPATIAL_CHANNELS = (
     + N_CAPTURE_EXTRA_CHANNELS
     + N_INFLUENCE_CHANNELS
     + N_DEFENSE_STARS_CHANNELS
-)  # 70
+    + N_UNIT_MODIFIER_CHANNELS
+)  # 77
 
-# First channel index for the 6-plane influence block (63..68); last channel 69 = defense stars.
+# First channel index for the 6-plane influence block (63..68).
 N_INFLUENCE_CHANNEL_BASE = (
     N_UNIT_CHANNELS
     + N_HP_CHANNELS
@@ -94,8 +100,18 @@ N_INFLUENCE_CHANNEL_BASE = (
     + N_PROPERTY_CHANNELS
     + N_CAPTURE_EXTRA_CHANNELS
 )
-N_DEFENSE_STARS_CHANNEL = N_SPATIAL_CHANNELS - 1
-N_SCALARS = 17
+N_DEFENSE_STARS_CHANNEL = N_INFLUENCE_CHANNEL_BASE + N_INFLUENCE_CHANNELS
+N_UNIT_MODIFIER_CHANNEL_BASE = N_DEFENSE_STARS_CHANNEL + N_DEFENSE_STARS_CHANNELS
+UNIT_MODIFIER_CHANNEL_NAMES: tuple[str, ...] = (
+    "move_delta_norm",
+    "attack_delta_norm",
+    "defense_delta_norm",
+    "luck_min_norm",
+    "luck_max_norm",
+    "indirect_min_range_norm",
+    "indirect_max_range_norm",
+)
+N_SCALARS = 16
 
 # Terrain one-hot categories
 TERRAIN_CATEGORIES: dict[str, int] = {
@@ -126,20 +142,6 @@ _PROP_TYPE_CITY = 0
 # UnitType → channel 0-13 (clamped so unknown types fall into last bucket)
 _N_UNIT_TYPES = 14
 UNIT_TO_CHANNEL: dict[UnitType, int] = {ut: min(int(ut), _N_UNIT_TYPES - 1) for ut in UnitType}
-
-# Tier name → normalized scalar
-# NOTE: All tiers encode to 1.0 (T4 value) - different tier encodings waste training
-# time as the PPO tries to learn tier-specific behaviors that don't exist.
-# Tiers only affect CO selection at game start, not gameplay mechanics.
-_TIER_MAP: dict[str, float] = {
-    "T0": 1.0,
-    "TL": 1.0,
-    "T1": 1.0,
-    "T2": 1.0,
-    "T3": 1.0,
-    "T4": 1.0,
-}
-
 
 def _compute_terrain_category_uncached(terrain_id: int) -> int:
     """Map a raw terrain tile id to a TERRAIN_CATEGORIES index (ground truth for table build)."""
@@ -280,6 +282,29 @@ def _get_terrain_category(terrain_id: int) -> int:
     if cached is not None:
         return cached
     return _compute_terrain_category_uncached(terrain_id)
+
+
+def _fill_unit_modifier_planes(spatial: np.ndarray, state: GameState, observer: int) -> None:
+    """
+    Fill encoder-only modifier planes after the Cython/Python unit pass.
+
+    Cython owns the hot presence + HP path. These seven derived planes call
+    Python engine helpers so combat and movement rules do not fork.
+    """
+    base = N_UNIT_MODIFIER_CHANNEL_BASE
+    for player in (observer, 1 - observer):
+        for unit in state.units[player]:
+            r, c = unit.pos
+            if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
+                continue
+            feats = modifier_features_for_unit(state, unit)
+            spatial[r, c, base + 0] = feats.move_delta
+            spatial[r, c, base + 1] = feats.attack_delta
+            spatial[r, c, base + 2] = feats.defense_delta
+            spatial[r, c, base + 3] = feats.luck_min
+            spatial[r, c, base + 4] = feats.luck_max
+            spatial[r, c, base + 5] = feats.indirect_min_range
+            spatial[r, c, base + 6] = feats.indirect_max_range
 
 
 # Cython bridge setup
@@ -487,7 +512,12 @@ def encode_state(
                 # known rendering ambiguity, unchanged from the pre-belief layout.
                 spatial[r, c, hp_lo_ch] = hp_lo
                 spatial[r, c, hp_hi_ch] = hp_hi
-                
+
+    # ── Unit modifier planes (70..76) ───────────────────────────────────────
+    # Kept in Python even when Cython is enabled so we reuse engine movement and
+    # combat helpers directly instead of duplicating CO-specific rules in C++.
+    _fill_unit_modifier_planes(spatial, state, observer)
+
     # ── Terrain cache building optimization ─────────────────────────────────
     if USE_CYTHON and terrain_block is None:
         from rl import _encoder_cython
@@ -560,11 +590,10 @@ def encode_state(
         scalars[9] = my_turn
         scalars[10] = co_me.co_id / 30.0
         scalars[11] = co_en.co_id / 30.0
-        scalars[12] = _TIER_MAP.get(state.tier_name, 1.0)
-        scalars[13] = 1.0 if weather == "rain" else 0.0
-        scalars[14] = 1.0 if weather == "snow" else 0.0
-        scalars[15] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
-        scalars[16] = _income_share_for(state, observer)
+        scalars[12] = 1.0 if weather == "rain" else 0.0
+        scalars[13] = 1.0 if weather == "snow" else 0.0
+        scalars[14] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
+        scalars[15] = _income_share_for(state, observer)
     else:
         scalars = np.array(
             [
@@ -580,7 +609,6 @@ def encode_state(
                 my_turn,
                 co_me.co_id / 30.0,
                 co_en.co_id / 30.0,
-                _TIER_MAP.get(state.tier_name, 1.0),
                 1.0 if weather == "rain" else 0.0,
                 1.0 if weather == "snow" else 0.0,
                 getattr(state, "co_weather_segments_remaining", 0) / 2.0,

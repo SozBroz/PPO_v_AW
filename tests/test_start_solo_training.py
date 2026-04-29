@@ -69,7 +69,7 @@ def test_initial_curriculum_merge_omits_stage_d_map_id(
     fleet = tmp_path / "fleet" / mid
     fleet.mkdir(parents=True)
     state = {
-        "current_stage_name": "stage_d_gl_std_map_pool_t4",
+        "current_stage_name": "stage_d0_gl_std_map_pool_stub",
         "entered_stage_at_ts": 1.0,
         "games_observed_in_stage": 10,
         "last_proposal_ts": 1.0,
@@ -92,7 +92,7 @@ def test_initial_curriculum_merge_omits_stage_d_map_id(
     )
 
     assert merged["args"]["--map-id"] is None
-    assert merged["args"]["--tier"] == "T4"
+    assert merged["args"].get("--tier") is None
     assert merged["args"]["--co-p0"] == 14
     assert merged["args"]["--co-p1"] == 14
     argv = m._build_train_argv(proposed=merged, machine_id=mid, train_extra=[])
@@ -111,7 +111,7 @@ def test_operator_train_args_override_merges_after_curriculum(
     fleet = tmp_path / "fleet" / mid
     fleet.mkdir(parents=True)
     state = {
-        "current_stage_name": "stage_d_gl_std_map_pool_t4",
+        "current_stage_name": "stage_d0_gl_std_map_pool_stub",
         "entered_stage_at_ts": 1.0,
         "games_observed_in_stage": 0,
         "last_proposal_ts": 1.0,
@@ -148,8 +148,8 @@ def test_operator_train_args_override_merges_after_curriculum(
     )
     assert merged2["args"]["--n-envs"] == 99
     assert merged2["args"]["--map-id"] is None
-    # Curriculum still set tier etc.
-    assert merged2["args"]["--tier"] == "T4"
+    assert merged2["args"].get("--tier") is None
+    assert merged2["args"]["--co-p0"] == 14
 
 
 def test_launch_env_sets_machine_and_flags() -> None:
@@ -594,6 +594,104 @@ def test_tune_writes_clamped_batch_to_operator_override(
     assert odoc["args"]["--n-envs"] == 2
 
 
+def test_throughput_tune_override_merges_capture_move_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Throughput tune must not drop ``--capture-move-gate`` (or other pinned args)."""
+    m = _load_sst()
+    import logging
+
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    fleet_mid = tmp_path / "fleet" / "pc-merge"
+    fleet_mid.mkdir(parents=True)
+    (fleet_mid / "operator_train_args_override.json").write_text(
+        json.dumps(
+            {
+                "args": {
+                    "--capture-move-gate": True,
+                    "--tier": "T4",
+                },
+                "reasoning": "op",
+            }
+        ),
+        encoding="utf-8",
+    )
+    log = logging.getLogger("test_tune_merge_cap")
+    proposed: dict = {
+        "machine_id": "pc-merge",
+        "args": {"--n-envs": 2, "--n-steps": 512, "--batch-size": 256},
+        "reasoning": "seed",
+    }
+    with patch(
+        "tools.throughput_tune.choose_n_envs_throughput",
+        lambda **k: (5, {"winner_median": 10.0}),
+    ):
+        m._tune_n_envs_throughput_inplace(
+            proposed,
+            machine_id="pc-merge",
+            train_extra=[],
+            live_gids=[],
+            max_envs=8,
+            per_candidate_s=1.0,
+            min_iters=4096,
+            max_host_ram_pct=90.0,
+            max_host_cpu_pct=90.0,
+            host_wait_s=0.0,
+            log_replay_frames=False,
+            log=log,
+        )
+    odoc = json.loads(
+        (fleet_mid / "operator_train_args_override.json").read_text(encoding="utf-8")
+    )
+    assert odoc["args"]["--n-envs"] == 5
+    assert odoc["args"]["--capture-move-gate"] is True
+    assert odoc["args"]["--tier"] == "T4"
+    assert odoc.get("reasoning") == "op"
+
+
+def test_throughput_tune_override_copies_capture_move_gate_from_proposed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _load_sst()
+    import logging
+
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    fleet_mid = tmp_path / "fleet" / "pc-prop"
+    fleet_mid.mkdir(parents=True)
+    log = logging.getLogger("test_tune_proposed_cap")
+    proposed: dict = {
+        "machine_id": "pc-prop",
+        "args": {
+            "--n-envs": 2,
+            "--n-steps": 512,
+            "--batch-size": 256,
+            "--capture-move-gate": False,
+        },
+    }
+    with patch(
+        "tools.throughput_tune.choose_n_envs_throughput",
+        lambda **k: (3, {"winner_median": 1.0}),
+    ):
+        m._tune_n_envs_throughput_inplace(
+            proposed,
+            machine_id="pc-prop",
+            train_extra=[],
+            live_gids=[],
+            max_envs=8,
+            per_candidate_s=1.0,
+            min_iters=4096,
+            max_host_ram_pct=90.0,
+            max_host_cpu_pct=90.0,
+            host_wait_s=0.0,
+            log_replay_frames=False,
+            log=log,
+        )
+    odoc = json.loads(
+        (fleet_mid / "operator_train_args_override.json").read_text(encoding="utf-8")
+    )
+    assert odoc["args"]["--capture-move-gate"] is False
+
+
 def test_ensure_train_argv_n_envs_for_live_appends() -> None:
     m = _load_sst()
     import logging
@@ -621,3 +719,138 @@ def test_cli_includes_no_orchestrator_auto_apply() -> None:
     out = r.stdout or ""
     assert "no-orchestrator-auto-apply" in out
     assert "use-exported-live-games" in out
+    assert "no-curriculum" in out
+    assert "dual-gradient-self-play" in out
+
+
+def test_no_curriculum_dry_run_skips_merge_and_forwards_orchestrator_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--no-curriculum must not call initial curriculum merge; orchestrator argv gets the flag."""
+    m = _load_sst()
+    mid = "nc-wire"
+    fleet = tmp_path / "fleet" / mid
+    fleet.mkdir(parents=True)
+    proposed = {
+        "machine_id": mid,
+        "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256},
+    }
+    (fleet / "proposed_args.json").write_text(json.dumps(proposed), encoding="utf-8")
+
+    merge_calls: list[int] = []
+
+    def _fake_merge(*_a: object, **_k: object) -> None:
+        merge_calls.append(1)
+        raise AssertionError("_merge_curriculum_for_initial_launch should not be called")
+
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(m, "_merge_curriculum_for_initial_launch", _fake_merge)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "start_solo_training",
+            "--machine-id",
+            mid,
+            "--dry-run-bootstrap",
+            "--no-curriculum",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+    )
+    monkeypatch.setattr(m, "_configure_logging", lambda _: None)
+    assert m.main() == 0
+    assert merge_calls == []
+    out = capsys.readouterr().out
+    idx = out.find("[dry-run] orchestrator cmd:")
+    assert idx >= 0
+    tail = out[idx:]
+    assert "--no-curriculum" in tail
+    assert "fleet_orchestrator.py" in tail
+
+
+def test_dual_gradient_dry_run_appends_train_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    m = _load_sst()
+    mid = "dg-wire"
+    fleet = tmp_path / "fleet" / mid
+    fleet.mkdir(parents=True)
+    proposed = {
+        "machine_id": mid,
+        "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256},
+    }
+    (fleet / "proposed_args.json").write_text(json.dumps(proposed), encoding="utf-8")
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "start_solo_training",
+            "--machine-id",
+            mid,
+            "--dry-run-bootstrap",
+            "--training-backend",
+            "async",
+            "--dual-gradient-self-play",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+    )
+    monkeypatch.setattr(m, "_configure_logging", lambda _: None)
+    assert m.main() == 0
+    out = capsys.readouterr().out
+    assert "--dual-gradient-self-play" in out
+
+
+def test_dual_gradient_requires_async_in_start_solo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    m = _load_sst()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "start_solo_training",
+            "--machine-id",
+            "dg-sync",
+            "--training-backend",
+            "sync",
+            "--dual-gradient-self-play",
+        ],
+    )
+    assert m.main() == 2
+
+
+def test_dry_run_with_proposed_calls_curriculum_merge_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _load_sst()
+    mid = "curr-default"
+    fleet = tmp_path / "fleet" / mid
+    fleet.mkdir(parents=True)
+    proposed = {
+        "machine_id": mid,
+        "args": {"--n-envs": 4, "--n-steps": 512, "--batch-size": 256},
+    }
+    (fleet / "proposed_args.json").write_text(json.dumps(proposed), encoding="utf-8")
+    merge_mock = MagicMock(
+        side_effect=lambda p, **kw: {**p, "args": dict(p.get("args") or {})}
+    )
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(m, "_merge_curriculum_for_initial_launch", merge_mock)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "start_solo_training",
+            "--machine-id",
+            mid,
+            "--dry-run-bootstrap",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+    )
+    monkeypatch.setattr(m, "_configure_logging", lambda _: None)
+    assert m.main() == 0
+    merge_mock.assert_called_once()

@@ -8,7 +8,7 @@
 
 - Flat encoding & mask: `rl/env.py` (`_action_to_flat`, `_get_action_mask`, offsets). **Duplicate flat constants** (for import hygiene): `rl/network.py` — must match `rl/env.py`.  
 - `ACTION_SPACE_SIZE`, `_MOVE_OFFSET` (`1818`), `_BUILD_OFFSET` (`10_000`), `_REPAIR_OFFSET` (`3500`), collision merge `900…902`, scatter slices: `rl/network.py`.  
-- `N_SPATIAL_CHANNELS` (**70**; sum of planes): `rl/encoder.py` (authoritative). Trunk: `rl/network.py` (`AWBWNet`).  
+- `N_SPATIAL_CHANNELS` (**77**; sum of planes): `rl/encoder.py` (authoritative). Trunk: `rl/network.py` (`AWBWNet`).
 - Engine action types: `engine/action.py`.  
 - `UnitType` cardinality for BUILD: `engine/unit.py` (`UnitType`, `len(UnitType) == 27`).
 
@@ -50,7 +50,7 @@ Constants and helpers live in `rl/env.py` (e.g. `_ENC_W = 30`, `_ATTACK_OFFSET`,
 
 ### 2.1 Trunk branch point
 
-`AWBWNet` (`rl/network.py`) permutes the observation to `(B, N_SPATIAL_CHANNELS, 30, 30)` with **N_SPATIAL_CHANNELS = 70** (see `rl/encoder.py`), runs `stem` → **10×** `_ResBlock128` at full **30×30** resolution → trunk tensor **`x`**, shape `(B, 128, 30, 30)`. Scalars are projected to **16** planes (`scalar_to_plane`, `N_SCALARS = 17`) and broadcast, then concatenated: **`xf = cat([x, sp], dim=1)`** → `(B, 144, 30, 30)` where **144 = TRUNK_CHANNELS + SCALAR_PLANES** (`FUSED_CHANNELS`).
+`AWBWNet` (`rl/network.py`) permutes the observation to `(B, N_SPATIAL_CHANNELS, 30, 30)` with **N_SPATIAL_CHANNELS = 77** (see `rl/encoder.py`), runs `stem` → **10×** `_ResBlock128` at full **30×30** resolution → trunk tensor **`x`**, shape `(B, 128, 30, 30)`. Scalars are projected to **16** planes (`scalar_to_plane`, `N_SCALARS = 16`) and broadcast, then concatenated: **`xf = cat([x, sp], dim=1)`** → `(B, 144, 30, 30)` where **144 = TRUNK_CHANNELS + SCALAR_PLANES** (`FUSED_CHANNELS`).
 
 `adaptive_avg_pool2d(xf, (1,1))` yields **`g`**, shape `(B, 144)` — this vector drives **`value_head`** and **`linear_scalar_policy`**; the same **`xf`** feeds all policy 1×1 convs (`conv_select`, `conv_move`, `conv_attack`, `conv_repair`, `conv_build`).
 
@@ -106,8 +106,8 @@ Notes:
 ### 3.2 Pseudocode — `forward`
 
 ```text
-# Inputs: spatial (B,30,30,C), scalars (B,17), action_mask (B,35000) optional
-# C = N_SPATIAL_CHANNELS = 70 (see rl/encoder.py for authoritative sum of planes)
+# Inputs: spatial (B,30,30,C), scalars (B,16), action_mask (B,35000) optional
+# C = N_SPATIAL_CHANNELS = 77 (see rl/encoder.py for authoritative sum of planes)
 
 x = permute(spatial)                     # (B, C, 30, 30)
 x = stem(x); ... trunk blocks ...        # (B, 128, 30, 30)
@@ -233,7 +233,7 @@ In MOVE stage, `_action_to_flat` encodes **`move_pos`** at **`_MOVE_OFFSET + r*_
 
 4. **`ACTIVATE_COP` / `ACTIVATE_SCOP` without positions:** Scalar head is mandatory; pooling+scalars is appropriate.
 
-5. **Memory at batch size `B`:** Reprojected `logits` remains `(B, 35000)` float32 ≈ **`B × 140 KiB`**. The observation’s spatial tensor is `(B, 30, 30, 70)`; activations through the **10** residual blocks are dominated by `(B, 128, 30, 30)` and fused **`xf` `(B, 144, 30, 30)`** in `AWBWNet` — the same as any full-resolution policy forward; plan VRAM for **large** `B` accordingly.
+5. **Memory at batch size `B`:** Reprojected `logits` remains `(B, 35000)` float32 ≈ **`B × 140 KiB`**. The observation’s spatial tensor is `(B, 30, 30, 77)`; activations through the **10** residual blocks are dominated by `(B, 128, 30, 30)` and fused **`xf`** `(B, 144, 30, 30)` in `AWBWNet` — the same as any full-resolution policy forward; plan VRAM for **large** `B` accordingly.
 
 6. **Unused indices:** Gap `1805–1809` and span `2718–3499` (between MOVE band end and `_REPAIR_OFFSET`); no engine action maps there without an encoding change.
 
@@ -247,7 +247,7 @@ In MOVE stage, `_action_to_flat` encodes **`move_pos`** at **`_MOVE_OFFSET + r*_
 | `_action_to_flat` cases | `rl/env.py` approx. 180–251 |
 | `_get_action_mask` | `rl/env.py` approx. 284–306 |
 | `ACTION_SPACE_SIZE`, `_MOVE_OFFSET`, scatter into flat logits, collision merge | `rl/network.py` (imports through forward) |
-| `GRID_SIZE`, `N_SPATIAL_CHANNELS` (**70**), `N_SCALARS` | `rl/encoder.py` (channel sum / definitions) |
+| `GRID_SIZE`, `N_SPATIAL_CHANNELS` (**77**), `N_SCALARS` (**16**) | `rl/encoder.py` (channel sum / definitions) |
 | RL `ActionType` set | `engine/action.py` approx. 57–80, 93–111 |
 
 ---

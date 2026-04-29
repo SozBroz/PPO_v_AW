@@ -122,8 +122,10 @@ def _apply_stage1_narrow_defaults(args: argparse.Namespace) -> None:
 
 def _sync_worker_inherited_env_flags(args: argparse.Namespace) -> None:
     """
-    Subproc / async actors read ``AWBW_LEARNER_GREEDY_MIX`` and ``AWBW_CAPTURE_MOVE_GATE``
-    from this process environment.  After :func:`rl.train_launch_env.pop_train_cli_owned_keys_from_os_environ`
+    Subproc / async actors read ``AWBW_LEARNER_GREEDY_MIX``, ``AWBW_CAPTURE_MOVE_GATE``,
+    ``AWBW_EGOCENTRIC_EPISODE_PROB``, and ``AWBW_PAIRWISE_ZERO_SUM_REWARD`` from this
+    process environment.  After
+    :func:`rl.train_launch_env.pop_train_cli_owned_keys_from_os_environ`
     and stripped parent env at spawn, only this function (from parsed CLI) repopulates them.
     """
     if float(args.learner_greedy_mix) > 0.0:
@@ -131,10 +133,27 @@ def _sync_worker_inherited_env_flags(args: argparse.Namespace) -> None:
     else:
         os.environ.pop("AWBW_LEARNER_GREEDY_MIX", None)
 
+    if float(args.egocentric_episode_prob) > 0.0:
+        os.environ["AWBW_EGOCENTRIC_EPISODE_PROB"] = str(
+            float(args.egocentric_episode_prob)
+        )
+    else:
+        os.environ.pop("AWBW_EGOCENTRIC_EPISODE_PROB", None)
+
     if args.capture_move_gate:
         os.environ["AWBW_CAPTURE_MOVE_GATE"] = "1"
     else:
         os.environ.pop("AWBW_CAPTURE_MOVE_GATE", None)
+
+    # Deprecated: the extra per-property-loss punishment duplicated Φ economy
+    # loss and was large enough to dominate terminal scale. Keep stale shells
+    # and old launch overlays from re-enabling it.
+    os.environ.pop("AWBW_PHI_ENEMY_PROPERTY_CAPTURE_PENALTY", None)
+
+    if bool(args.pairwise_zero_sum_reward):
+        os.environ["AWBW_PAIRWISE_ZERO_SUM_REWARD"] = "1"
+    else:
+        os.environ.pop("AWBW_PAIRWISE_ZERO_SUM_REWARD", None)
 
 
 def build_train_argument_parser() -> argparse.ArgumentParser:
@@ -516,6 +535,36 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--egocentric-episode-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-episode probability (0–1) to randomize learner seat {0,1} on each "
+            "reset; otherwise use AWBW_LEARNER_SEAT / default 0. Live snapshot workers "
+            "keep pinned seats. Sets AWBW_EGOCENTRIC_EPISODE_PROB; 0 removes it."
+        ),
+    )
+    parser.add_argument(
+        "--dual-gradient-self-play",
+        action="store_true",
+        help=(
+            "Async-only: both engine seats sample from the shared policy and each "
+            "active-seat decision is recorded as a policy-gradient row with "
+            "seat-relative zero-sum Phi/reward signals. Requires --training-backend async."
+        ),
+    )
+    parser.add_argument(
+        "--dual-gradient-hist-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Only with async --dual-gradient-self-play: probability each episode uses a "
+            "historical checkpoint as the opponent (standard env.step rollout) instead "
+            "of symmetric mirror self-play from synced weights (1 − this = mirror-SP "
+            'fraction). Set to 0.2 for "~80%% mirror / 20%% vs archive".'
+        ),
+    )
+    parser.add_argument(
         "--capture-move-gate", action="store_true",
         help=(
             "Restrict infantry/mech MOVE choices to capturable enemy/neutral "
@@ -523,6 +572,16 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "SELECT-MOVE-WAIT-in-place loophole. Sets AWBW_CAPTURE_MOVE_GATE=1; "
             "SubprocVecEnv workers inherit. Engine step() bypasses the mask, "
             "so replays are unaffected."
+        ),
+    )
+    parser.add_argument(
+        "--pairwise-zero-sum-reward",
+        action="store_true",
+        help=(
+            "Opt in to the learner-frame pairwise reward contract for AWBWEnv.step(): "
+            "competitive reward is exposed as a zero-sum seat pair while draw/time "
+            "and discipline penalties stay explicit. Does not alter "
+            "step_active_seat_once / dual-gradient active-seat rewards."
         ),
     )
     parser.add_argument(
@@ -779,12 +838,14 @@ def main() -> None:
         ("AWBW_LOG_REPLAY_FRAMES", os.environ.get("AWBW_LOG_REPLAY_FRAMES")),
         ("AWBW_FPS_DIAG", os.environ.get("AWBW_FPS_DIAG")),
         ("AWBW_LEARNER_GREEDY_MIX", os.environ.get("AWBW_LEARNER_GREEDY_MIX")),
+        ("AWBW_EGOCENTRIC_EPISODE_PROB", os.environ.get("AWBW_EGOCENTRIC_EPISODE_PROB")),
         ("AWBW_CAPTURE_MOVE_GATE", os.environ.get("AWBW_CAPTURE_MOVE_GATE")),
         ("AWBW_SEAT_BALANCE", os.environ.get("AWBW_SEAT_BALANCE")),
         ("AWBW_LEARNER_SEAT", os.environ.get("AWBW_LEARNER_SEAT")),
         ("AWBW_PFSP", os.environ.get("AWBW_PFSP")),
         ("AWBW_ASYNC_VEC", os.environ.get("AWBW_ASYNC_VEC")),
         ("AWBW_REWARD_SHAPING", os.environ.get("AWBW_REWARD_SHAPING")),
+        ("AWBW_PAIRWISE_ZERO_SUM_REWARD", os.environ.get("AWBW_PAIRWISE_ZERO_SUM_REWARD")),
         ("AWBW_TRACK_PER_WORKER_TIMES", os.environ.get("AWBW_TRACK_PER_WORKER_TIMES")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
@@ -901,6 +962,8 @@ def main() -> None:
         async_queue_max=args.async_queue_max,
         async_gpu_opponent_permits_subtract=args.async_gpu_opponent_permits_subtract,
         async_learner_forward_chunk=args.async_learner_forward_chunk,
+        dual_gradient_self_play=bool(args.dual_gradient_self_play),
+        dual_gradient_hist_prob=float(args.dual_gradient_hist_prob),
         opening_book_path=args.opening_book,
         opening_book_seat=getattr(args, "opening_book_seat", 1),
         opening_book_seats=getattr(args, "opening_book_seats", "both"),

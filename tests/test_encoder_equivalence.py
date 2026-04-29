@@ -47,7 +47,7 @@ _META = {
         "s3: multiple units with HP 100, 64, 31",
         "s4: turn=8, active_player=1, non-zero funds",
         "s5: weather snow + co_weather_segments_remaining",
-        "s6: tier T4, distinct CO ids, non-trivial power bars",
+        "s6: distinct CO ids, non-trivial power bars, unit modifier planes",
         "s7: two faction cities (P0/P1) for p0_income_share=0.5",
     ],
 }

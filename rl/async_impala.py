@@ -13,6 +13,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue
+import random
+import secrets
 import sys
 import tempfile
 from contextlib import nullcontext
@@ -93,7 +95,22 @@ def _async_wants_cuda_opponent_infer() -> bool:
     )
 
 
+def _os_transient_checkpoint_error(exc: BaseException) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    if isinstance(exc, OSError):
+        errno = getattr(exc, "errno", None)
+        if errno in (11, 13, 16):  # EAGAIN, EACCESS, EBUSY (platform-dependent)
+            return True
+        winerr = getattr(exc, "winerror", None)
+        # 5 ACCESS_DENIED / 32 SHARING_VIOLATION when replace races readers or Defender
+        if winerr in (5, 32):
+            return True
+    return False
+
+
 def _atomic_torch_save(obj: dict[str, Any], dest: Path) -> None:
+    """Write checkpoint bytes then publish under ``dest``. Prefer atomic ``os.replace``."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         prefix=f"{dest.name}.",
@@ -102,22 +119,71 @@ def _atomic_torch_save(obj: dict[str, Any], dest: Path) -> None:
     )
     os.close(fd)
     tmp_path = Path(tmp)
+    tmp_str = str(tmp_path)
+    dest_str = str(dest)
+
+    def backoff(attempt: int) -> None:
+        time.sleep(min(1.0, 0.03 * (1.35**attempt)))
+
     try:
-        torch.save(obj, str(tmp_path))
-        # Windows: actors may briefly ``torch.load`` the destination; ``os.replace`` can
-        # raise PermissionError (WinError 5). Retry with backoff instead of failing training.
-        for attempt in range(20):
+        torch.save(obj, tmp_str)
+
+        first_fail: OSError | None = None
+        for attempt in range(50):
             try:
-                os.replace(str(tmp_path), str(dest))
+                os.replace(tmp_str, dest_str)
+                return
+            except OSError as e:
+                first_fail = e
+                if attempt < 49 and _os_transient_checkpoint_error(e):
+                    backoff(attempt)
+                    continue
+                break
+
+        # NTFS overlay-replace can still deny when many readers ping the path; renaming
+        # the incumbent file frees the basename so ``tmp`` -> ``dest`` is a rename, not ReplaceFile onto busy target.
+        if os.name != "nt" or not Path(dest_str).is_file():
+            raise first_fail
+
+        stash_str = str(dest.parent / f"{dest.name}.prior.{secrets.token_hex(8)}")
+        stash_path = Path(stash_str)
+        rotated = False
+        for attempt in range(50):
+            try:
+                os.replace(dest_str, stash_str)
+                rotated = True
                 break
             except OSError as e:
-                winerr = getattr(e, "winerror", None)
-                if attempt < 19 and (
-                    isinstance(e, PermissionError) or winerr == 5 or e.errno == 13
-                ):
-                    time.sleep(0.02 * (attempt + 1))
+                if attempt < 49 and _os_transient_checkpoint_error(e):
+                    backoff(attempt)
                     continue
-                raise
+                raise first_fail from e
+        if not rotated:
+            raise first_fail
+
+        try:
+            last_fail: OSError | None = None
+            for attempt in range(50):
+                try:
+                    os.replace(tmp_str, dest_str)
+                    return
+                except OSError as e:
+                    last_fail = e
+                    if attempt < 49 and _os_transient_checkpoint_error(e):
+                        backoff(attempt)
+                        continue
+                    break
+            err = last_fail if last_fail is not None else RuntimeError("replace failed")
+            raise RuntimeError(
+                "Could not publish async policy weights after rotating prior copy "
+                f"(stash suffix .prior.<hex>); disk or AV may still be locking files"
+            ) from err
+        finally:
+            try:
+                if stash_path.is_file():
+                    stash_path.unlink()
+            except OSError:
+                pass
     finally:
         if tmp_path.is_file():
             try:
@@ -243,6 +309,11 @@ def _actor_step(
     return act, val, lp
 
 
+def _dual_gradient_env(env: Any) -> Any:
+    """Return the underlying AWBWEnv when factories wrap it in ActionMasker."""
+    return getattr(env, "env", env)
+
+
 def actor_process_main(
     actor_id: int,
     env_factory: Callable[[], Any],
@@ -253,6 +324,8 @@ def actor_process_main(
     unroll_len: int,
     device_str: str,
     poll_s: float,
+    dual_gradient_self_play: bool = False,
+    dual_gradient_hist_prob: float = 0.0,
 ) -> None:
     """One actor: build env, roll unrolls, push dict chunks to rollout_queue."""
     # Hide GPUs from this process *before* importing torch. Otherwise each spawned
@@ -291,7 +364,8 @@ def actor_process_main(
             if not p.is_file():
                 return
             try:
-                blob = torch.load(str(p), map_location="cpu", weights_only=False)
+                with p.open("rb") as fh:
+                    blob = torch.load(fh, map_location="cpu", weights_only=False)
             except OSError:
                 return
             v = int(blob.get("version", -1))
@@ -304,6 +378,17 @@ def actor_process_main(
 
         _reload_if_needed()
         obs, _info = env.reset()
+        dg_env = _dual_gradient_env(env)
+        if dual_gradient_self_play:
+            mirror_mode = bool(
+                dual_gradient_hist_prob <= 0.0
+                or random.random() >= float(dual_gradient_hist_prob)
+            )
+            if mirror_mode:
+                obs = dg_env.active_seat_observation()
+        else:
+            mirror_mode = False
+        use_mirror_dg = bool(dual_gradient_self_play and mirror_mode)
         if not isinstance(obs, dict):
             raise TypeError("AWBWEnv must return dict observations")
 
@@ -321,9 +406,16 @@ def actor_process_main(
             for t in range(unroll_len):
                 if stop_event.is_set():
                     return
-                mask = env.action_masks()
+                mask = (
+                    dg_env.active_seat_action_mask()
+                    if use_mirror_dg
+                    else env.action_masks()
+                )
                 act, _v, logp = _actor_step(policy, obs, mask, dev)
-                next_obs, rew, term, trunc, _info = env.step(act)
+                if use_mirror_dg:
+                    next_obs, rew, term, trunc, _info = dg_env.step_active_seat_once(act)
+                else:
+                    next_obs, rew, term, trunc, _info = env.step(act)
                 done = bool(term or trunc)
                 spatial_chunks.append(np.asarray(obs["spatial"], dtype=np.float32))
                 scalars_chunks.append(np.asarray(obs["scalars"], dtype=np.float32))
@@ -335,12 +427,30 @@ def actor_process_main(
                 last_done = done
                 if done:
                     obs, _info = env.reset()
+                    if dual_gradient_self_play:
+                        mirror_mode = bool(
+                            dual_gradient_hist_prob <= 0.0
+                            or random.random() >= float(dual_gradient_hist_prob)
+                        )
+                        if mirror_mode:
+                            obs = dg_env.active_seat_observation()
+                    else:
+                        mirror_mode = False
+                    use_mirror_dg = bool(dual_gradient_self_play and mirror_mode)
                 else:
-                    obs = next_obs
+                    obs = (
+                        dg_env.active_seat_observation()
+                        if use_mirror_dg
+                        else next_obs
+                    )
                 if not isinstance(obs, dict):
                     raise TypeError("AWBWEnv must return dict observations")
 
-            bootstrap_mask = env.action_masks().astype(np.bool_, copy=False)
+            bootstrap_mask = (
+                dg_env.active_seat_action_mask()
+                if use_mirror_dg
+                else env.action_masks()
+            ).astype(np.bool_, copy=False)
 
             chunk = {
                 "actor_id": actor_id,
@@ -517,6 +627,8 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
     latest_path = ckpt_dir / "latest.zip"
     promoted_path = ckpt_dir / "promoted" / "best.zip"
     resume_path = latest_path
+    dual_gradient_self_play = bool(getattr(trainer, "dual_gradient_self_play", False))
+    dual_gradient_hist_prob = float(getattr(trainer, "dual_gradient_hist_prob", 0.0) or 0.0)
     if trainer.load_promoted and promoted_path.is_file():
         if not latest_path.is_file():
             resume_path = promoted_path
@@ -592,6 +704,22 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         },
     )
     # endregion
+
+    if dual_gradient_self_play:
+        hp = float(dual_gradient_hist_prob)
+        if hp > 0.0:
+            print(
+                f"[async_impala] dual-gradient: ~{100.0 * (1.0 - hp):.0f}% mirror self-play "
+                f"(both seats, synced weights); ~{100.0 * hp:.0f}% learner vs historical "
+                "checkpoint opponent (per-episode roulette).",
+                flush=True,
+            )
+        else:
+            print(
+                "[async_impala] dual-gradient self-play enabled: both engine seats "
+                "sample from the shared policy and contribute rollout rows.",
+                flush=True,
+            )
 
     if resume_path.exists():
         model = load_maskable_ppo_compat(
@@ -725,6 +853,8 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                 unroll,
                 actor_device,
                 0.05,
+                dual_gradient_self_play,
+                float(dual_gradient_hist_prob),
             ),
         )
         p.daemon = True

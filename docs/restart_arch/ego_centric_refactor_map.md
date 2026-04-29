@@ -8,13 +8,13 @@
 
 ### Implementation status (2026-04)
 
-- **Shipped:** ego-centric framing and the **70-channel** spatial encoder in [`rl/encoder.py`](../../rl/encoder.py) (`N_SPATIAL_CHANNELS = 70`, `N_SCALARS = 17`). The two blocks after the pre-influence stack are **six influence planes** (indices 63–68) and **one defense-stars** plane (index 69); see module docstring and `N_INFLUENCE_CHANNEL_BASE` / `N_DEFENSE_STARS_CHANNEL`.
+- **Shipped:** ego-centric framing and the **77-channel** spatial encoder in [`rl/encoder.py`](../../rl/encoder.py) (`N_SPATIAL_CHANNELS = 77`, `N_SCALARS = 16`). The tail after the pre-influence stack is **six influence planes** (indices 63–68), **one defense-stars** plane (index 69), and **seven unit modifier** planes (indices 70–76); see module docstring and `N_INFLUENCE_CHANNEL_BASE` / `N_DEFENSE_STARS_CHANNEL` / `N_UNIT_MODIFIER_CHANNEL_BASE`.
 - **Frozen baseline (byte-identical harness):** [`tests/fixtures/encoder_equivalence_pre_restart.npz`](../../tests/fixtures/encoder_equivalence_pre_restart.npz). **Regeneration policy** (env var, review expectations, 8-sample corpus): [`tests/fixtures/encoder_equivalence_README.md`](../../tests/fixtures/encoder_equivalence_README.md). [`tests/test_encoder_equivalence.py`](../../tests/test_encoder_equivalence.py) compares live `encode_state` output to that file.
 
 | Repo truth (2026-04) | Value |
 |----------------------|--------|
-| `N_SPATIAL_CHANNELS` | **70** (includes **6** influence + **1** defense_stars at the tail) |
-| `N_SCALARS` | **17** |
+| `N_SPATIAL_CHANNELS` | **77** (includes **6** influence + **1** defense_stars + **7** unit modifier planes at the tail) |
+| `N_SCALARS` | **16** |
 | Encoder equivalence fixture | `tests/fixtures/encoder_equivalence_pre_restart.npz` |
 | Regeneration / ops | `tests/fixtures/encoder_equivalence_README.md` |
 
@@ -24,7 +24,7 @@
 
 ### Current (fixed P0 / P1 blocks)
 
-Implementation: [`rl/encoder.py`](../../rl/encoder.py). `N_SPATIAL_CHANNELS = 70`, `N_SCALARS = 17`. The **70** includes the **influence** block (6 channels) and **defense_stars** (1 channel) after terrain, property, capture, and neutral-income planes—see **Implementation status** above.
+Implementation: [`rl/encoder.py`](../../rl/encoder.py). `N_SPATIAL_CHANNELS = 77`, `N_SCALARS = 16`. The **77** includes the **influence** block (6 channels), **defense_stars** (1 channel), and **unit modifier** block (7 channels) after terrain, property, capture, and neutral-income planes—see **Implementation status** above.
 
 **Spatial (conceptual; indices are stable channel *positions*; shipped encoder uses me/enemy via `observer`):**
 
@@ -34,7 +34,7 @@ Implementation: [`rl/encoder.py`](../../rl/encoder.py). `N_SPATIAL_CHANNELS = 70
 - **Property ownership:** for each property type, three slots `neutral / P0 / P1` at `prop_ch_offset + ptype*3 + ownership` with `ownership ∈ {0,1,2}` (lines 261–268).
 - **Capture progress:** `cap_ch0` / `cap_ch1` = unit on tile with `player == 0` or `1` reducing `capture_points` (lines 242–280).
 - **Neutral income mask:** one channel after capture pair (line 244).
-- **Influence + defense stars (tail of the 70):** six influence planes (`engine/threat.py` / `compute_influence_planes`) then one map-static defense-stars channel (`TerrainInfo.defense / 4`), indices **63–69** (`N_INFLUENCE_CHANNEL_BASE` … `N_DEFENSE_STARS_CHANNEL`).
+- **Influence + defense stars + unit modifiers (tail of the 77):** six influence planes (`engine/threat.py` / `compute_influence_planes`), one map-static defense-stars channel (`TerrainInfo.defense / 4`), then seven occupied-cell unit modifier planes, indices **63–76** (`N_INFLUENCE_CHANNEL_BASE` … `N_UNIT_MODIFIER_CHANNEL_BASE + 6`).
 
 **Scalars (index → meaning today):**
 
@@ -52,18 +52,17 @@ Implementation: [`rl/encoder.py`](../../rl/encoder.py). `N_SPATIAL_CHANNELS = 70
 | 9 | `float(state.active_player)` **raw 0/1 (not “my turn”)** |
 | 10 | `co0.co_id / 30` |
 | 11 | `co1.co_id / 30` |
-| 12 | tier normalized |
-| 13 | rain |
-| 14 | snow |
-| 15 | `co_weather_segments_remaining / 2` |
-| 16 | `_p0_income_share(state)` — **P0-only** share of contestable income tiles (lines 374–380) |
+| 12 | rain |
+| 13 | snow |
+| 14 | `co_weather_segments_remaining / 2` |
+| 15 | income share — **me** share of contestable income tiles |
 
 ```python
 def encode_state(state, *, observer=0, belief=None, out_spatial=None, out_scalars=None) -> (spatial, scalars):
     # spatial[..., 0:14] = P0 unit presence; [14:28] = P1 unit presence
     # property: +1 = owned by P0, +2 = owned by P1
     # cap_ch0 = P0 capturing; cap_ch1 = P1 capturing
-    # scalars[0/1] = P0/P1 funds; [9] = raw active_player; [16] = p0 income share
+    # scalars[0/1] = me/enemy funds; [9] = my_turn; [15] = me income share
 ```
 
 ### Proposed (ego-centric, same shapes)
@@ -75,7 +74,7 @@ def encode_state(state, *, observer=0, belief=None, out_spatial=None, out_scalar
 - **Capture progress:** `cap_me` / `cap_enemy` (same two channel *slots* as today; rename semantics only).
 - **HP:** unchanged *logic* — still exact HP for `unit.player == observer`, belief (or exact if `belief is None`) for the other side. Ego unit blocks now line up with “me” / “enemy” channel blocks.
 
-**Scalars — full proposed layout (still `N_SCALARS = 17`):**
+**Scalars — shipped layout (`N_SCALARS = 16`, tier removed):**
 
 | Index | Ego-centric meaning |
 |------:|---------------------|
@@ -91,9 +90,8 @@ def encode_state(state, *, observer=0, belief=None, out_spatial=None, out_scalar
 | 9 | **`1.0` if `state.active_player == observer` else `0.0`** (my turn — **replaces** raw `active_player` at index 9) |
 | 10 | `co_states[observer].co_id / 30` |
 | 11 | `co_states[1-observer].co_id / 30` |
-| 12 | tier (unchanged) |
-| 13–15 | weather scalars (unchanged; not seat-tied) |
-| 16 | **me income share** — `count_income_properties(observer) / n_income_tiles` (same formula as today’s P0 share but with `observer` instead of `0`) |
+| 12–14 | weather scalars (not seat-tied) |
+| 15 | **me income share** — `count_income_properties(observer) / n_income_tiles` |
 
 **Docstring / comments:** update module header in [`rl/encoder.py`](../../rl/encoder.py) (lines 1–48) to describe me/enemy; rename `_p0_income_share` to an observer-argument helper (e.g. `_income_share_for`) internally.
 
@@ -108,7 +106,7 @@ Line numbers are from the **AWBW** repo as of the authoring pass; re-verify befo
 | File | Line(s) | Symbol / region | Current assumption | Required change |
 |------|---------|-----------------|--------------------|-----------------|
 | [`rl/encoder.py`](../../rl/encoder.py) | 1–26 | module doc | P0/P1 channel names in prose | Me/enemy + scalar table; `cap` naming |
-| [`rl/encoder.py`](../../rl/encoder.py) | 57–90 | `N_*` constants | 70 spatial (incl. influence + defense_stars) + 17 scalars | Locked in code; bumping channels is a restart event |
+| [`rl/encoder.py`](../../rl/encoder.py) | 57–90 | `N_*` constants | 77 spatial (incl. influence + defense_stars + unit modifiers) + 16 scalars | Locked in code; bumping channels is a restart event |
 | [`rl/encoder.py`](../../rl/encoder.py) | 240–280 | property + capture | `ownership` 1=P0, 2=P1; `cap_ch0/ch1` by `player == 0/1` | Map to me/enemy using `observer` |
 | [`rl/encoder.py`](../../rl/encoder.py) | 283–312 | unit loop + HP | P0 then P1 fixed offsets | Emit me then enemy; HP branch already uses `observer` |
 | [`rl/encoder.py`](../../rl/encoder.py) | 314–370 | `encode_state` scalars | `funds[0/1]`, `co0/co1` order, `active_player` raw, `_p0_income_share` | Ego order + `my_turn` + me-income share |

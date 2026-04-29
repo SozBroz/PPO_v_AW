@@ -50,7 +50,14 @@ starts ``train.py`` and ``fleet_orchestrator.py``, and tears both down cleanly o
 
 Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps / batch_size):
   Misery Andy mirror ``--map-id 123858 --tier T3 --co-p0 1 --co-p1 1`` (matches fleet
-  map/CO defaults). ``--cold-opponent`` / ``--learner-greedy-mix`` match bare ``train.py``
+  map/CO defaults). **Misery Jess mirror:** ``--map-id 123858 --tier T4 --co-p0 14 --co-p1 14``
+  (Jess ``co_id`` 14; ``T4`` matches ``tools/verify_jess_misery_opening_book.py`` / Jess-focused
+  openings). Pass those inside ``--train-extra-args`` with your rollout knobs if you want the
+  bootstrap’s argv — not curriculum — to pin matchup from launch::
+
+    --train-extra-args "--n-envs 18 --max-env-steps 8000 --map-id 123858 --tier T4 --co-p0 14 --co-p1 14"
+
+  ``--cold-opponent`` / ``--learner-greedy-mix`` match bare ``train.py``
   (``random`` / ``0.0``) unless ``proposed_args`` or curriculum sets them. Stage A/B
   capture/bootstrap knobs come from the orchestrator curriculum merge into ``proposed_args.json``,
   not from static ``propose_train_args`` output. After curriculum, the **first** launch applies
@@ -59,6 +66,9 @@ Early-game defaults (when ``proposed_args.json`` only supplies n_envs / n_steps 
   ``--opening-book*`` flags are **absent** from ``proposed['args']``, they are filled from
   :data:`tools.curriculum_advisor.DEFAULT_OPENING_BOOK_TRAIN_ARGS` (``data/opening_books/std_pool_precombat.jsonl``,
   both seats). Pass ``--no-default-opening-book`` to skip that injection.
+  **No curriculum:** ``--no-curriculum`` skips the initial curriculum merge (and bootstrap writes
+  to ``curriculum_state.json``); default opening-book fill and operator overrides still apply
+  unless you pass ``--no-default-opening-book``.
   Remaining gaps: ``--train-extra-args``.
   ``n_envs<=4`` on pc-b is operator-validated
   (FPS plan 2026-04-22); propose_train_args enforces the cap from probe.
@@ -1236,19 +1246,40 @@ def _write_operator_train_args_override_for_throughput_tune(
     batch_size: int,
     info: dict[str, Any],
     log: logging.Logger,
+    proposed: dict[str, Any] | None = None,
 ) -> None:
-    """Merge-winning train geometry for orchestrator ticks (sparse ``args`` map)."""
+    """Merge-winning train geometry for orchestrator ticks (sparse ``args`` map).
+
+    Preserves other keys from an existing ``operator_train_args_override.json`` (so
+    operator pins like ``--capture-move-gate`` are not wiped). When *proposed* lists
+    ``--capture-move-gate`` in its ``args``, that value is written into the merged map
+    so the override stays aligned with the launch curriculum snapshot.
+    """
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     import fleet_orchestrator as fo  # noqa: PLC0415
 
     path = fleet_dir / fo.OPERATOR_TRAIN_ARGS_OVERRIDE_NAME
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            raw = _read_json(path)
+            if isinstance(raw, dict):
+                existing = raw
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("throughput_tune: could not read existing %s: %s", path, exc)
+    prev = existing.get("args")
+    am: dict[str, Any] = dict(prev) if isinstance(prev, dict) else {}
+    am["--n-envs"] = int(n_envs)
+    am["--batch-size"] = int(batch_size)
+    if proposed:
+        pam = proposed.get("args")
+        if isinstance(pam, dict) and "--capture-move-gate" in pam:
+            am["--capture-move-gate"] = pam["--capture-move-gate"]
     doc: dict[str, Any] = {
-        "args": {
-            "--n-envs": int(n_envs),
-            "--batch-size": int(batch_size),
-        },
+        **existing,
+        "args": am,
         "source": "throughput_tune",
         "throughput_tune": {
             "applied_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1369,6 +1400,7 @@ def _tune_n_envs_throughput_inplace(
         batch_size=int(pam["--batch-size"]),
         info=info,
         log=log,
+        proposed=proposed,
     )
     rs = proposed.get("reasoning")
     if isinstance(rs, str) and rs.strip():
@@ -1774,6 +1806,27 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--no-curriculum",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the curriculum advisor merge on initial launch and do not write "
+            "fleet/<machine-id>/curriculum_state.json from this bootstrap. "
+            "Still applies operator_train_args_override.json, default --opening-book* "
+            "unless --no-default-opening-book, then --train-extra-args. Appends "
+            "--no-curriculum to fleet_orchestrator so recurring ticks do not merge curriculum."
+        ),
+    )
+    ap.add_argument(
+        "--dual-gradient-self-play",
+        action="store_true",
+        default=False,
+        help=(
+            "Append --dual-gradient-self-play to train.py via --train-extra-args "
+            "unless already present. Requires --training-backend async."
+        ),
+    )
+    ap.add_argument(
         "--training-backend",
         type=str,
         default="sync",
@@ -1784,6 +1837,15 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
+    if args.dual_gradient_self_play and args.training_backend != "async":
+        print("--dual-gradient-self-play requires --training-backend async", file=sys.stderr)
+        return 2
+    if args.dual_gradient_self_play and "--dual-gradient-self-play" not in args.train_extra_args:
+        args.train_extra_args = (
+            f"{args.train_extra_args} --dual-gradient-self-play"
+            if args.train_extra_args.strip()
+            else "--dual-gradient-self-play"
+        )
     no_auto_live_games_effective = (not bool(args.use_exported_live_games)) or bool(
         args.no_auto_live_games
     )
@@ -1821,6 +1883,12 @@ def main() -> int:
         no_auto_live_games_effective,
         args.live_games_dir,
     )
+    if args.no_curriculum:
+        log.info(
+            "curriculum: initial merge skipped (--no-curriculum); "
+            "orchestrator will run with --no-curriculum; "
+            "default opening-book fill still applies unless --no-default-opening-book"
+        )
     if args.no_spirit_broken:
         log.info("spirit_broken: disabled (--no-spirit-broken); train env will set AWBW_SPIRIT_BROKEN=0")
     elif os.environ.get("AWBW_SPIRIT_BROKEN") is None:
@@ -1856,13 +1924,14 @@ def main() -> int:
         proposed_fake: dict[str, Any] = {}
         if proposed_path.is_file():
             proposed_fake = _read_json(proposed_path)
-            proposed_fake = _merge_curriculum_for_initial_launch(
-                proposed_fake,
-                machine_id=machine_id,
-                state_path=fleet_dir / "curriculum_state.json",
-                log=log,
-                write_state=False,
-            )
+            if not args.no_curriculum:
+                proposed_fake = _merge_curriculum_for_initial_launch(
+                    proposed_fake,
+                    machine_id=machine_id,
+                    state_path=fleet_dir / "curriculum_state.json",
+                    log=log,
+                    write_state=False,
+                )
             proposed_fake = _merge_operator_train_args_override_into_proposed(
                 proposed_fake, fleet_dir=fleet_dir, log=log
             )
@@ -1974,6 +2043,8 @@ def main() -> int:
                     str(args.orchestrator_curriculum_window_games),
                 ]
             )
+        if args.no_curriculum:
+            orch_bits.append("--no-curriculum")
         print(f"[dry-run] orchestrator cmd: {orch_bits}")
         return 0
 
@@ -2051,13 +2122,14 @@ def main() -> int:
             return rc
 
     proposed = _read_json(proposed_path)
-    proposed = _merge_curriculum_for_initial_launch(
-        proposed,
-        machine_id=machine_id,
-        state_path=fleet_dir / "curriculum_state.json",
-        log=log,
-        write_state=True,
-    )
+    if not args.no_curriculum:
+        proposed = _merge_curriculum_for_initial_launch(
+            proposed,
+            machine_id=machine_id,
+            state_path=fleet_dir / "curriculum_state.json",
+            log=log,
+            write_state=True,
+        )
     proposed = _merge_operator_train_args_override_into_proposed(
         proposed, fleet_dir=fleet_dir, log=log
     )
@@ -2233,6 +2305,8 @@ def main() -> int:
                 str(args.orchestrator_curriculum_window_games),
             ]
         )
+    if args.no_curriculum:
+        orch_argv.append("--no-curriculum")
 
     orch_subproc_log_fh: Any = None
     orch_subproc_log_path = (

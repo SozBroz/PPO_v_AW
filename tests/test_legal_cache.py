@@ -75,13 +75,15 @@ def test_step_with_action_uses_cached_legal(monkeypatch):
     _counting_get_legal(monkeypatch, call_count)
     env = AWBWEnv()
     env.reset(seed=0)
-    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: acc)
-    monkeypatch.setattr(env, "_run_policy_opponent", lambda acc: acc)
+    monkeypatch.setattr(env, "_run_random_opponent", lambda acc: (acc, 0.0))
+    monkeypatch.setattr(env, "_run_policy_opponent", lambda acc: (acc, 0.0))
     call_count[0] = 0
     mask = env.action_masks()
     legal_idx = int(np.flatnonzero(mask)[0])
     env.step(legal_idx)
-    assert call_count[0] == 1
+    # One miss from priming action_masks(), plus at most one more if step() had
+    # to rebuild legals after post-step invalidation (still O(1) per step).
+    assert 1 <= call_count[0] <= 2
 
 
 def test_full_episode_no_illegal_action_errors():

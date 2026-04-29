@@ -12,6 +12,7 @@
     nav a { color: #a8b2d8; text-decoration: none; font-size: 0.9rem; padding: 6px 12px; border-radius: 4px; transition: background 0.2s; }
     nav a:hover { background: #0f3460; color: #e0e0e0; }
     .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .container.container--wide { max-width: min(1920px, 98vw); }
     .card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     .btn { background: #0f3460; color: #e0e0e0; border: 1px solid #e94560; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 0.9rem; transition: background 0.2s; }
     .btn:hover { background: #e94560; }
@@ -25,10 +26,11 @@
   <nav>
     <h1>&#9876; AWBW DRL Bot</h1>
     <a href="/watch">Watch</a>
+    <a href="/reward-audit">Reward audit</a>
     <a href="/replay/">Replay</a>
     <a href="/play/">vs Bot</a>
   </nav>
-  <div class="container">
+  <div class="container{% block container_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </div>
   {% block scripts %}{% endblock %}

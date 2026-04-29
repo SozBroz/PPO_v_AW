@@ -10,8 +10,8 @@
 
 The following matches **`AWBWNet`** and shared trunk pieces in **`rl/network.py`** (constants from **`rl/encoder.py`** where noted):
 
-- **`N_SPATIAL_CHANNELS = 70`**, **`N_SCALARS = 17`**.
-- **Residual trunk:** **`TRUNK_CHANNELS = 128`**, **10×** **`_ResBlock128`** (stride-1 128→128, 3×3, BN + ReLU), after stem **`Conv2d(70 → 128, 3×3, padding=1)`** + ReLU — i.e. **10×128** trunk width/depth.
+- **`N_SPATIAL_CHANNELS = 77`**, **`N_SCALARS = 16`**.
+- **Residual trunk:** **`TRUNK_CHANNELS = 128`**, **10×** **`_ResBlock128`** (stride-1 128→128, 3×3, BN + ReLU), after stem **`Conv2d(77 → 128, 3×3, padding=1)`** + ReLU — i.e. **10×128** trunk width/depth.
 - **Scalar fusion:** **`scalar_to_plane`**: **`Linear(N_SCALARS, SCALAR_PLANES)`** with **`SCALAR_PLANES = 16`**; planes are **broadcast** over the full **30×30** grid and concatenated → **`FUSED_CHANNELS = TRUNK_CHANNELS + SCALAR_PLANES = 144`**.
 - **Spatial path:** **Full 30×30** activations end-to-end on the trunk; **no** **`AdaptiveAvgPool2d((8,8))`** on the CNN trunk.
 - **Policy:** Factored **1×1 conv** heads on **`xf`** — **`conv_select`**, **`conv_move`**, **`conv_attack`**, **`conv_repair`**, **`conv_build`** (27 build channels) — plus **`linear_scalar_policy`**: **`Linear(FUSED_CHANNELS, 16)`** for scalar logits (powers, capture/wait/load/join/dive-hide, unload slots). **No** dense **`Linear(hidden, 35_000)`**.
@@ -48,12 +48,12 @@ python tools/bench_train_throughput.py --budget-seconds 300 --n-envs 4 --n-steps
 
 ## 2. Current network parameter count
 
-Constants: **`N_SPATIAL_CHANNELS = 70`**, **`N_SCALARS = 17`**, **`TRUNK_CHANNELS = 128`**, **`SCALAR_PLANES = 16`**, **`FUSED_CHANNELS = 144`**, **`ACTION_SPACE_SIZE = 35_000`** (`rl/encoder.py`, `rl/network.py`).
+Constants: **`N_SPATIAL_CHANNELS = 77`**, **`N_SCALARS = 16`**, **`TRUNK_CHANNELS = 128`**, **`SCALAR_PLANES = 16`**, **`FUSED_CHANNELS = 144`**, **`ACTION_SPACE_SIZE = 35_000`** (`rl/encoder.py`, `rl/network.py`).
 
 ### Stem
 
-- `Conv2d(70 → 128, 3×3, padding=1)` **with bias:**  
-  weights `70 × 128 × 3 × 3 = 80 640`, bias `128` → **80 768**
+- `Conv2d(77 → 128, 3×3, padding=1)` **with bias:**  
+  weights `77 × 128 × 3 × 3 = 88 704`, bias `128` → **88 832**
 
 ### Residual blocks (`_ResBlock128`, conv layers **bias=False**; each `BatchNorm2d` has `2 × 128` trainable params)
 
@@ -61,7 +61,7 @@ Per block: two `Conv2d(128,128,3×3)` → `2 × (128×128×9) = 294 912`; BN �
 
 ### Scalar broadcast
 
-- `Linear(17, 16)` → `17×16 + 16 = **288**`
+- `Linear(16, 16)` → `16×16 + 16 = **272**`
 
 **CNN + scalar subtotal (stem + 10 blocks + `scalar_to_plane`):** **3 035 296**
 
@@ -102,13 +102,13 @@ Dense **`Linear(256, 35 000)`** (~9.0M params) is **gone**; the **~3.0M** trun
 
 **Forward 3×3 conv MACs (batch 1, spatial 30×30, back-of-envelope):**
 
-- **Stem:** `30×30 × 3×3 × 70 × 128` = **72 576 000**
+- **Stem:** `30×30 × 3×3 × 77 × 128` = **79 833 600**
 - **Each** `_ResBlock128` **:** `2 × (30×30 × 3×3 × 128²)` = **265 420 800**; ×**10** = **2 654 208 000**
-- **Shipped trunk 3×3 total:** **2 726 784 000** MACs (1×1 heads and value MLP are small vs this.)
+- **Shipped trunk 3×3 total:** **2 734 041 600** MACs (1×1 heads and value MLP are small vs this.)
 
 **Ratio `Y` vs pre-restart narrow trunk:** The old **63→64→64→128→128** stack (3 residual blocks + **8×8** pool + wide `fc`) had a documented **~563.6M** MAC baseline in the historical appendix; **`Y ≈ 2.73e9 / 5.64e8 ≈ 4.84`** — same order as the prior **10×128** row in pre-restart planning tables, but the **parameter** story is different (**~3.08M** total **`AWBWNet`** vs **~11.8M** with dense policy).
 
-For **hypothetical** future **`D'×W'`** exploration only (not shipped): reuse the usual AlphaZero-style per-block **`18·W² + 2·W`** (bias-off 3×3 pair; BN trainable params extra) and stem **`Conv2d(70 → W, 3×3)`** → **`70×W×9 + W`**; **omit** any **`AdaptiveAvgPool2d((8,8))`** flatten **`64·W`** fusion — that path is **pre-restart** (see appendix).
+For **hypothetical** future **`D'×W'`** exploration only (not shipped): reuse the usual AlphaZero-style per-block **`18·W² + 2·W`** (bias-off 3×3 pair; BN trainable params extra) and stem **`Conv2d(77 → W, 3×3)`** → **`77×W×9 + W`**; **omit** any **`AdaptiveAvgPool2d((8,8))`** flatten **`64·W`** fusion — that path is **pre-restart** (see appendix).
 
 ---
 

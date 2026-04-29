@@ -1627,6 +1627,8 @@ class SelfPlayTrainer:
         async_max_grad_norm: float = 0.5,
         async_weight_save_every: int = 1,
         async_log_rho_floor: float = -20.0,
+        dual_gradient_self_play: bool = False,
+        dual_gradient_hist_prob: float = 0.0,
         opening_book_path: Path | str | None = None,
         opening_book_seat: int = 1,
         opening_book_seats: str | None = "both",
@@ -1792,6 +1794,18 @@ class SelfPlayTrainer:
         self.async_max_grad_norm = float(async_max_grad_norm)
         self.async_weight_save_every = max(1, int(async_weight_save_every))
         self.async_log_rho_floor = float(async_log_rho_floor)
+        self.dual_gradient_self_play = bool(dual_gradient_self_play)
+        _dghp = float(dual_gradient_hist_prob)
+        if _dghp < 0.0 or _dghp > 1.0:
+            raise ValueError("dual_gradient_hist_prob must be in [0, 1]")
+        self.dual_gradient_hist_prob = _dghp
+        if self.dual_gradient_self_play and self.training_backend != "async":
+            raise ValueError("--dual-gradient-self-play requires --training-backend async")
+        if self.dual_gradient_hist_prob > 0.0 and not self.dual_gradient_self_play:
+            raise ValueError(
+                "dual_gradient_hist_prob is set but dual_gradient_self_play is off; "
+                "use --dual-gradient-self-play with async"
+            )
         self._gpu_pool_manager: Any | None = None
         self._rollout_index: int = 0
         self._applied_reload_requests: set[tuple[str, str | int | None]] = set()

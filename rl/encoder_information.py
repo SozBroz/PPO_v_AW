@@ -28,6 +28,8 @@ N_PROPERTY_CHANNELS = _enc.N_PROPERTY_CHANNELS
 N_SPATIAL_CHANNELS = _enc.N_SPATIAL_CHANNELS
 N_INFLUENCE_CHANNEL_BASE = _enc.N_INFLUENCE_CHANNEL_BASE
 N_DEFENSE_STARS_CHANNEL = _enc.N_DEFENSE_STARS_CHANNEL
+N_UNIT_MODIFIER_CHANNEL_BASE = _enc.N_UNIT_MODIFIER_CHANNEL_BASE
+N_UNIT_MODIFIER_CHANNELS = _enc.N_UNIT_MODIFIER_CHANNELS
 N_SCALARS = _enc.N_SCALARS
 N_INFLUENCE_CHANNELS = 6
 
@@ -67,7 +69,6 @@ SCALAR_NAMES: tuple[str, ...] = (
     "my_turn",
     "co_id_me",
     "co_id_enemy",
-    "tier_norm",
     "weather_rain",
     "weather_snow",
     "co_weather_segments_norm",
@@ -75,20 +76,9 @@ SCALAR_NAMES: tuple[str, ...] = (
 )
 
 
-def _tier_name_from_norm(v: float) -> str:
-    best: str = "T2"
-    best_d = 1.0
-    for k, n in _enc._TIER_MAP.items():
-        d = abs(float(n) - v)
-        if d < best_d:
-            best_d = d
-            best = k
-    return best
-
-
 @dataclass
 class RecoveredScalars:
-    """Inferred values from the 17-d scalar vector (``encode_state`` order)."""
+    """Inferred values from the 16-d scalar vector (``encode_state`` order)."""
 
     raw: np.ndarray
     funds_me: float
@@ -97,7 +87,6 @@ class RecoveredScalars:
     co_id_enemy: int
     turn_index: float
     my_turn: float
-    tier_name: str
     weather_rain: float
     weather_snow: float
     co_weather_segments: float
@@ -123,6 +112,8 @@ class RecoveredObservation:
     neutral_income: np.ndarray
     influence: np.ndarray
     """(H, W, 6)"""
+    unit_modifiers: np.ndarray
+    """(H, W, 7): see ``rl.encoder.UNIT_MODIFIER_CHANNEL_NAMES``."""
     scalars: RecoveredScalars
 
 
@@ -144,10 +135,9 @@ def decode_scalars(scalars: np.ndarray) -> RecoveredScalars:
         co_id_enemy=int(round(float(s[11] * 30.0))),
         turn_index=float(s[8]),
         my_turn=float(s[9]),
-        tier_name=_tier_name_from_norm(float(s[12])),
-        weather_rain=float(s[13]),
-        weather_snow=float(s[14]),
-        co_weather_segments=float(s[15] * 2.0),
+        weather_rain=float(s[12]),
+        weather_snow=float(s[13]),
+        co_weather_segments=float(s[14] * 2.0),
     )
 
 
@@ -163,7 +153,6 @@ def decode_scalars_with_max_turns(scalars: np.ndarray, max_turns: int) -> Recove
         co_id_enemy=rs.co_id_enemy,
         turn_index=float(s[8]) * mt,
         my_turn=rs.my_turn,
-        tier_name=rs.tier_name,
         weather_rain=rs.weather_rain,
         weather_snow=rs.weather_snow,
         co_weather_segments=rs.co_weather_segments,
@@ -197,6 +186,7 @@ def decode_observation_maximal(
     cap1 = np.zeros((H, W), dtype=np.float64)
     neutral = np.zeros((H, W), dtype=np.float64)
     infl = np.zeros((H, W, N_INFLUENCE_CHANNELS), dtype=np.float64)
+    unit_mods = np.zeros((H, W, N_UNIT_MODIFIER_CHANNELS), dtype=np.float64)
 
     t_off = N_UNIT_CHANNELS + N_HP_CHANNELS
     p_off = t_off + N_TERRAIN_CHANNELS
@@ -230,6 +220,12 @@ def decode_observation_maximal(
             cap1[r, c] = float(sp[r, c, cap1_i])
             neutral[r, c] = float(sp[r, c, ne_i])
             infl[r, c, :] = sp[r, c, infl0 : infl0 + N_INFLUENCE_CHANNELS]
+            unit_mods[r, c, :] = sp[
+                r,
+                c,
+                N_UNIT_MODIFIER_CHANNEL_BASE : N_UNIT_MODIFIER_CHANNEL_BASE
+                + N_UNIT_MODIFIER_CHANNELS,
+            ]
 
     rs = decode_scalars_with_max_turns(scalars, max_turns)
     return RecoveredObservation(
@@ -245,6 +241,7 @@ def decode_observation_maximal(
         cap_enemy=cap1.astype(np.float32),
         neutral_income=neutral.astype(np.float32),
         influence=infl.astype(np.float32),
+        unit_modifiers=unit_mods.astype(np.float32),
         scalars=rs,
     )
 
@@ -350,7 +347,6 @@ def _scalar_errors(true_state: GameState, observer: int, scalars: np.ndarray) ->
         1.0 if int(true_state.active_player) == int(observer) else 0.0,
         co_me.co_id / 30.0,
         co_en.co_id / 30.0,
-        _enc._TIER_MAP.get(true_state.tier_name, 0.5),
         1.0 if weather == "rain" else 0.0,
         1.0 if weather == "snow" else 0.0,
         getattr(true_state, "co_weather_segments_remaining", 0) / 2.0,

@@ -272,6 +272,9 @@ RESTART_SIGNIFICANT_KEYS: frozenset[str] = frozenset(
     {
         # Curriculum stage keys
         "--learner-greedy-mix",
+        "--egocentric-episode-prob",
+        "--dual-gradient-self-play",
+        "--dual-gradient-hist-prob",
         "--capture-move-gate",
         "--opening-book-prob",
         "--cold-opponent",
@@ -422,6 +425,11 @@ def build_train_argv_from_proposed_args(
     # ``args_overrides`` after orchestrator merge — do not pre-inject draft 10g here.
     emit_optional(head, processed, "--cold-opponent", "random")
     emit_optional(head, processed, "--learner-greedy-mix", 0.0)
+    emit_optional(head, processed, "--egocentric-episode-prob", 0.0)
+    dg = g("--dual-gradient-self-play", None)
+    if dg is True or dg == _curriculum_advisor.FLAG_PRESENT:
+        head.append("--dual-gradient-self-play")
+        processed.add("--dual-gradient-self-play")
     head.extend(
         [
             "--max-env-steps",

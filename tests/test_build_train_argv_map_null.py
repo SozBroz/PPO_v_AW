@@ -39,6 +39,19 @@ def test_live_games_id_list_emits_repeated_flags() -> None:
     assert snap in argv
 
 
+def test_dual_gradient_self_play_flag_emits_from_proposed_args() -> None:
+    fo = _fo()
+    doc = {
+        "args": {
+            "--n-envs": 4,
+            "--training-backend": "async",
+            "--dual-gradient-self-play": True,
+        }
+    }
+    argv = fo.build_train_argv_from_proposed_args(doc, repo_root=REPO)
+    assert "--dual-gradient-self-play" in argv
+
+
 def test_omit_map_tier_co_when_null() -> None:
     fo = _fo()
     doc = {
