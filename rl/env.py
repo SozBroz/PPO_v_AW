@@ -230,8 +230,37 @@ LEARNER_SEAT_ENV = "AWBW_LEARNER_SEAT"
 PHI_PROFILE_ENV = "AWBW_PHI_PROFILE"
 PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient
 PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
-PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # contested-cap coefficient
+PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # capture-progress coefficient
 PHI_GAMMA_ENV = "AWBW_PHI_GAMMA"   # income-saturation coefficient
+
+# Optional contextual capture weighting for Φ. Default-off so old checkpoints /
+# launch scripts keep exact reward semantics until the flag is enabled. When on,
+# the κ capture-progress term remains potential-based, but progress on tactically
+# important properties is weighted higher: contested neutrals, enemy income
+# properties, production buildings, and HQs.
+PHI_CONTEXTUAL_CAPTURE_ENV = "AWBW_PHI_CONTEXTUAL_CAPTURE"
+PHI_CONTESTED_NEUTRAL_CAPTURE_MULT_ENV = "AWBW_PHI_CONTESTED_NEUTRAL_CAPTURE_MULT"
+PHI_ENEMY_PROPERTY_CAPTURE_MULT_ENV = "AWBW_PHI_ENEMY_PROPERTY_CAPTURE_MULT"
+PHI_PRODUCTION_CAPTURE_MULT_ENV = "AWBW_PHI_PRODUCTION_CAPTURE_MULT"
+PHI_HQ_CAPTURE_MULT_ENV = "AWBW_PHI_HQ_CAPTURE_MULT"
+PHI_CAPTURE_CONTEXT_RADIUS_ENV = "AWBW_PHI_CAPTURE_CONTEXT_RADIUS"
+# Optional component-specific day/turn phase weighting inside capture Φ.
+# This is not a global reward discount: safe neutral expansion gets opening
+# urgency and late falloff, contested neutral gets mild falloff, and enemy /
+# production / HQ capture progress does not fall off.
+PHI_CAPTURE_PHASE_WEIGHTING_ENV = "AWBW_PHI_CAPTURE_PHASE_WEIGHTING"
+PHI_SAFE_NEUTRAL_OPENING_MULT_ENV = "AWBW_PHI_SAFE_NEUTRAL_OPENING_MULT"
+PHI_SAFE_NEUTRAL_EARLY_MID_MULT_ENV = "AWBW_PHI_SAFE_NEUTRAL_EARLY_MID_MULT"
+PHI_SAFE_NEUTRAL_MID_MULT_ENV = "AWBW_PHI_SAFE_NEUTRAL_MID_MULT"
+PHI_SAFE_NEUTRAL_LATE_MULT_ENV = "AWBW_PHI_SAFE_NEUTRAL_LATE_MULT"
+PHI_SAFE_NEUTRAL_ENDGAME_MULT_ENV = "AWBW_PHI_SAFE_NEUTRAL_ENDGAME_MULT"
+PHI_CONTESTED_NEUTRAL_OPENING_MULT_ENV = "AWBW_PHI_CONTESTED_NEUTRAL_OPENING_MULT"
+PHI_CONTESTED_NEUTRAL_MID_MULT_ENV = "AWBW_PHI_CONTESTED_NEUTRAL_MID_MULT"
+PHI_CONTESTED_NEUTRAL_LATE_MULT_ENV = "AWBW_PHI_CONTESTED_NEUTRAL_LATE_MULT"
+PHI_CAPTURE_OPENING_END_DAY_ENV = "AWBW_PHI_CAPTURE_OPENING_END_DAY"
+PHI_CAPTURE_EARLY_MID_END_DAY_ENV = "AWBW_PHI_CAPTURE_EARLY_MID_END_DAY"
+PHI_CAPTURE_MID_END_DAY_ENV = "AWBW_PHI_CAPTURE_MID_END_DAY"
+PHI_CAPTURE_LATE_END_DAY_ENV = "AWBW_PHI_CAPTURE_LATE_END_DAY"
 PAIRWISE_ZERO_SUM_REWARD_ENV = "AWBW_PAIRWISE_ZERO_SUM_REWARD"
 # (α, β, κ, γ) when in phi mode and a coefficient env is unset:
 #   α (alpha, 2e-5): army value coefficient — unit cost × hp/100, scaled by 2e-5
@@ -1057,6 +1086,76 @@ class AWBWEnv(gym.Env):
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
         self._phi_gamma: float = _read_float(PHI_GAMMA_ENV, p_gamma)
+        self._phi_contextual_capture: bool = _env_truthy(PHI_CONTEXTUAL_CAPTURE_ENV)
+        self._phi_contested_neutral_capture_mult: float = max(
+            1.0, _read_float(PHI_CONTESTED_NEUTRAL_CAPTURE_MULT_ENV, 1.75)
+        )
+        self._phi_enemy_property_capture_mult: float = max(
+            1.0, _read_float(PHI_ENEMY_PROPERTY_CAPTURE_MULT_ENV, 2.0)
+        )
+        self._phi_production_capture_mult: float = max(
+            1.0, _read_float(PHI_PRODUCTION_CAPTURE_MULT_ENV, 3.0)
+        )
+        self._phi_hq_capture_mult: float = max(
+            1.0, _read_float(PHI_HQ_CAPTURE_MULT_ENV, 5.0)
+        )
+        try:
+            self._phi_capture_context_radius: int = max(
+                0, int(float(os.environ.get(PHI_CAPTURE_CONTEXT_RADIUS_ENV, "3") or 3))
+            )
+        except ValueError:
+            self._phi_capture_context_radius = 3
+
+        # Optional phase weighting inside the capture-progress potential. This is
+        # deliberately component-specific: safe neutral expansion gets opening
+        # urgency and late falloff; contested neutral gets mild falloff;
+        # enemy properties / production / HQ stay at 1.0 so late conversion is
+        # never discounted away.
+        self._phi_capture_phase_weighting: bool = _env_truthy(PHI_CAPTURE_PHASE_WEIGHTING_ENV)
+        self._phi_safe_neutral_opening_mult: float = max(
+            0.0, _read_float(PHI_SAFE_NEUTRAL_OPENING_MULT_ENV, 1.30)
+        )
+        self._phi_safe_neutral_early_mid_mult: float = max(
+            0.0, _read_float(PHI_SAFE_NEUTRAL_EARLY_MID_MULT_ENV, 1.15)
+        )
+        self._phi_safe_neutral_mid_mult: float = max(
+            0.0, _read_float(PHI_SAFE_NEUTRAL_MID_MULT_ENV, 1.00)
+        )
+        self._phi_safe_neutral_late_mult: float = max(
+            0.0, _read_float(PHI_SAFE_NEUTRAL_LATE_MULT_ENV, 0.75)
+        )
+        self._phi_safe_neutral_endgame_mult: float = max(
+            0.0, _read_float(PHI_SAFE_NEUTRAL_ENDGAME_MULT_ENV, 0.50)
+        )
+        self._phi_contested_neutral_opening_mult: float = max(
+            0.0, _read_float(PHI_CONTESTED_NEUTRAL_OPENING_MULT_ENV, 1.25)
+        )
+        self._phi_contested_neutral_mid_mult: float = max(
+            0.0, _read_float(PHI_CONTESTED_NEUTRAL_MID_MULT_ENV, 1.00)
+        )
+        self._phi_contested_neutral_late_mult: float = max(
+            0.0, _read_float(PHI_CONTESTED_NEUTRAL_LATE_MULT_ENV, 0.90)
+        )
+
+        def _read_int(env_name: str, default: int) -> int:
+            try:
+                return int(float(os.environ.get(env_name, "") or default))
+            except ValueError:
+                return default
+
+        self._phi_capture_opening_end_day: int = max(0, _read_int(PHI_CAPTURE_OPENING_END_DAY_ENV, 5))
+        self._phi_capture_early_mid_end_day: int = max(
+            self._phi_capture_opening_end_day,
+            _read_int(PHI_CAPTURE_EARLY_MID_END_DAY_ENV, 8),
+        )
+        self._phi_capture_mid_end_day: int = max(
+            self._phi_capture_early_mid_end_day,
+            _read_int(PHI_CAPTURE_MID_END_DAY_ENV, 12),
+        )
+        self._phi_capture_late_end_day: int = max(
+            self._phi_capture_mid_end_day,
+            _read_int(PHI_CAPTURE_LATE_END_DAY_ENV, 18),
+        )
         # Opt-in only: standard learner-frame ``step()`` can expose and return a
         # pairwise-centered competitive reward. The active-seat
         # ``step_active_seat_once()`` path is deliberately left unchanged so
@@ -1884,6 +1983,10 @@ class AWBWEnv(gym.Env):
         info["reward_components"] = rc
         info["reward_contract"] = reward_contract
         info["property_pressure"] = self._property_pressure_snapshot()
+        if self._reward_shaping_mode == "phi" and self.state is not None:
+            info["phi_diagnostics"] = self._phi_diagnostics_for_seat(
+                self.state, int(self._learner_seat)
+            )
         info["reward"] = float(reward)
 
         # Phase 0a.2: finalize per-step wall split BEFORE logging so the
@@ -2248,6 +2351,10 @@ class AWBWEnv(gym.Env):
             "reward_components": rc,
             "reward": float(reward),
         }
+        if self._reward_shaping_mode == "phi" and self.state is not None:
+            info["phi_diagnostics"] = self._phi_diagnostics_for_seat(
+                self.state, acting
+            )
         if terminated or truncated:
             self._log_episode_truncated = bool(truncated)
             self._log_episode_truncation_reason = truncation_reason
@@ -2556,18 +2663,8 @@ class AWBWEnv(gym.Env):
         p_me = state.count_properties(me)
         p_en = state.count_properties(en)
 
-        cap_me = 0.0
-        cap_en = 0.0
-        for prop in state.properties:
-            cp = prop.capture_points
-            if cp >= 20:
-                continue
-            chip = 1.0 - cp / 20.0
-            owner = prop.owner
-            if owner != me:
-                cap_me += chip
-            if owner != en:
-                cap_en += chip
+        cap_me = self._capture_progress_for_seat(state, me)
+        cap_en = self._capture_progress_for_seat(state, en)
 
         return (
             self._phi_alpha * (v_me - v_en)
@@ -2587,18 +2684,189 @@ class AWBWEnv(gym.Env):
             return 0.0
         return self._capture_progress_for_seat(self.state, int(self._learner_seat))
 
+    def _phi_is_income_property(self, prop: Any) -> bool:
+        """Whether a property contributes normal income/saturation pressure."""
+        return (
+            not bool(getattr(prop, "is_hq", False))
+            and not bool(getattr(prop, "is_comm_tower", False))
+            and not bool(getattr(prop, "is_lab", False))
+        )
+
+    def _phi_enemy_near_property(
+        self, state: GameState, observer_seat: int, prop: Any
+    ) -> bool:
+        """Cheap contested-neutral proxy: enemy unit within Manhattan radius."""
+        radius = int(getattr(self, "_phi_capture_context_radius", 3))
+        if radius <= 0:
+            return False
+        enemy = 1 - int(observer_seat)
+        pr, pc = int(prop.row), int(prop.col)
+        for u in state.units[enemy]:
+            if not u.is_alive:
+                continue
+            ur, uc = int(u.pos[0]), int(u.pos[1])
+            if abs(ur - pr) + abs(uc - pc) <= radius:
+                return True
+        return False
+
+    def _phi_capture_day(self, state: GameState) -> int:
+        """Return the strategic day/turn index used for capture phase weighting."""
+        try:
+            return int(getattr(state, "turn", 0) or 0)
+        except Exception:
+            return 0
+
+    def _phi_safe_neutral_phase_multiplier(self, state: GameState) -> float:
+        """Phase multiplier for safe neutral expansion capture progress.
+
+        This intentionally falls off by strategic day/turn rather than by
+        micro-step count. The goal is to value early safe-city saturation without
+        teaching the agent that late enemy-property conversion is unimportant.
+        """
+        if not bool(getattr(self, "_phi_capture_phase_weighting", False)):
+            return 1.0
+        day = self._phi_capture_day(state)
+        if day <= int(self._phi_capture_opening_end_day):
+            return float(self._phi_safe_neutral_opening_mult)
+        if day <= int(self._phi_capture_early_mid_end_day):
+            return float(self._phi_safe_neutral_early_mid_mult)
+        if day <= int(self._phi_capture_mid_end_day):
+            return float(self._phi_safe_neutral_mid_mult)
+        if day <= int(self._phi_capture_late_end_day):
+            return float(self._phi_safe_neutral_late_mult)
+        return float(self._phi_safe_neutral_endgame_mult)
+
+    def _phi_contested_neutral_phase_multiplier(self, state: GameState) -> float:
+        """Mild phase multiplier for contested neutral capture progress."""
+        if not bool(getattr(self, "_phi_capture_phase_weighting", False)):
+            return 1.0
+        day = self._phi_capture_day(state)
+        if day <= int(self._phi_capture_early_mid_end_day):
+            return float(self._phi_contested_neutral_opening_mult)
+        if day <= int(self._phi_capture_late_end_day):
+            return float(self._phi_contested_neutral_mid_mult)
+        return float(self._phi_contested_neutral_late_mult)
+
+    def _phi_property_capture_multiplier(
+        self, state: GameState, prop: Any, observer_seat: int
+    ) -> float:
+        """Multiplier for partial capture progress in contextual-capture mode.
+
+        The multiplier is component-specific. Safe neutral expansion can receive
+        turn/phase weighting, contested neutrals receive mild turn weighting, and
+        enemy/production/HQ properties keep their contextual value with no
+        late-game falloff.
+        """
+        me = int(observer_seat)
+        owner = getattr(prop, "owner", None)
+
+        if bool(getattr(prop, "is_hq", False)):
+            return float(self._phi_hq_capture_mult) if bool(getattr(self, "_phi_contextual_capture", False)) else 1.0
+        if (
+            bool(getattr(prop, "is_base", False))
+            or bool(getattr(prop, "is_airport", False))
+            or bool(getattr(prop, "is_port", False))
+        ):
+            return float(self._phi_production_capture_mult) if bool(getattr(self, "_phi_contextual_capture", False)) else 1.0
+        if owner is None:
+            contested = self._phi_enemy_near_property(state, me, prop)
+            base = 1.0
+            if bool(getattr(self, "_phi_contextual_capture", False)) and contested:
+                base = float(self._phi_contested_neutral_capture_mult)
+            if contested:
+                return base * self._phi_contested_neutral_phase_multiplier(state)
+            return base * self._phi_safe_neutral_phase_multiplier(state)
+        if owner != me:
+            return float(self._phi_enemy_property_capture_mult) if bool(getattr(self, "_phi_contextual_capture", False)) else 1.0
+        return 1.0
+
     def _capture_progress_for_seat(self, state: GameState, observer_seat: int) -> float:
-        """Compute partial capture progress for ``observer_seat``."""
+        """Compute weighted partial capture progress for ``observer_seat``."""
         me = int(observer_seat)
         cap_progress = 0.0
         for prop in state.properties:
             cp = prop.capture_points
             if cp >= 20:
                 continue
-            # Only count progress toward properties we don't own yet
+            # Only count progress toward properties we don't own yet.
             if prop.owner != me:
-                cap_progress += 1.0 - cp / 20.0
+                chip = 1.0 - cp / 20.0
+                cap_progress += chip * self._phi_property_capture_multiplier(
+                    state, prop, me
+                )
         return cap_progress
+
+    def _capture_progress_breakdown_for_seat(
+        self, state: GameState, observer_seat: int
+    ) -> dict[str, float]:
+        """Diagnostic-only capture-progress breakdown.
+
+        Do not put these values in ``reward_components``; that dict is summed to
+        audit reward accounting. This is for ``info["phi_diagnostics"]`` and
+        offline dashboards.
+        """
+        me = int(observer_seat)
+        out = {
+            "safe_neutral": 0.0,
+            "contested_neutral": 0.0,
+            "enemy_property": 0.0,
+            "production_property": 0.0,
+            "hq": 0.0,
+            "weighted_total": 0.0,
+        }
+        for prop in state.properties:
+            cp = prop.capture_points
+            if cp >= 20 or prop.owner == me:
+                continue
+            chip = float(1.0 - cp / 20.0)
+            mult = self._phi_property_capture_multiplier(state, prop, me)
+            weighted = chip * mult
+            out["weighted_total"] += weighted
+            if bool(getattr(prop, "is_hq", False)):
+                out["hq"] += weighted
+            elif (
+                bool(getattr(prop, "is_base", False))
+                or bool(getattr(prop, "is_airport", False))
+                or bool(getattr(prop, "is_port", False))
+            ):
+                out["production_property"] += weighted
+            elif getattr(prop, "owner", None) is None:
+                if self._phi_enemy_near_property(state, me, prop):
+                    out["contested_neutral"] += weighted
+                else:
+                    out["safe_neutral"] += weighted
+            else:
+                out["enemy_property"] += weighted
+        return out
+
+    def _phi_diagnostics_for_seat(
+        self, state: GameState, observer_seat: int
+    ) -> dict[str, Any]:
+        """Compact reward-shaping diagnostics from one seat's perspective."""
+        me = int(observer_seat)
+        en = 1 - me
+        v_me = sum(
+            UNIT_STATS[u.unit_type].cost * u.hp / 100
+            for u in state.units[me]
+            if u.is_alive
+        )
+        v_en = sum(
+            UNIT_STATS[u.unit_type].cost * u.hp / 100
+            for u in state.units[en]
+            if u.is_alive
+        )
+        return {
+            "seat": me,
+            "phi_contextual_capture": bool(self._phi_contextual_capture),
+            "army_value_diff": float(v_me - v_en),
+            "property_diff": int(state.count_properties(me) - state.count_properties(en)),
+            "income_property_diff": int(
+                state.count_income_properties(me) - state.count_income_properties(en)
+            ),
+            "income_saturation": float(self._income_saturation(state, me, en)),
+            "capture_progress_me": self._capture_progress_breakdown_for_seat(state, me),
+            "capture_progress_enemy": self._capture_progress_breakdown_for_seat(state, en),
+        }
 
     def _phi_learner_non_hq_property_cells(self, state: GameState) -> frozenset[tuple[int, int]]:
         """Board cells of capturable properties owned by the learner, excluding HQ.

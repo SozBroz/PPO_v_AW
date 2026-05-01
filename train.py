@@ -216,6 +216,41 @@ def _sync_worker_inherited_env_flags(args: argparse.Namespace) -> None:
     else:
         os.environ.pop("AWBW_PAIRWISE_ZERO_SUM_REWARD", None)
 
+    if bool(getattr(args, "phi_contextual_capture", False)):
+        os.environ["AWBW_PHI_CONTEXTUAL_CAPTURE"] = "1"
+    else:
+        os.environ.pop("AWBW_PHI_CONTEXTUAL_CAPTURE", None)
+
+    if bool(getattr(args, "phi_capture_phase_weighting", False)):
+        os.environ["AWBW_PHI_CAPTURE_PHASE_WEIGHTING"] = "1"
+    else:
+        os.environ.pop("AWBW_PHI_CAPTURE_PHASE_WEIGHTING", None)
+
+    for attr, env_name in (
+        ("phi_contested_neutral_capture_mult", "AWBW_PHI_CONTESTED_NEUTRAL_CAPTURE_MULT"),
+        ("phi_enemy_property_capture_mult", "AWBW_PHI_ENEMY_PROPERTY_CAPTURE_MULT"),
+        ("phi_production_capture_mult", "AWBW_PHI_PRODUCTION_CAPTURE_MULT"),
+        ("phi_hq_capture_mult", "AWBW_PHI_HQ_CAPTURE_MULT"),
+        ("phi_capture_context_radius", "AWBW_PHI_CAPTURE_CONTEXT_RADIUS"),
+        ("phi_safe_neutral_opening_mult", "AWBW_PHI_SAFE_NEUTRAL_OPENING_MULT"),
+        ("phi_safe_neutral_early_mid_mult", "AWBW_PHI_SAFE_NEUTRAL_EARLY_MID_MULT"),
+        ("phi_safe_neutral_mid_mult", "AWBW_PHI_SAFE_NEUTRAL_MID_MULT"),
+        ("phi_safe_neutral_late_mult", "AWBW_PHI_SAFE_NEUTRAL_LATE_MULT"),
+        ("phi_safe_neutral_endgame_mult", "AWBW_PHI_SAFE_NEUTRAL_ENDGAME_MULT"),
+        ("phi_contested_neutral_opening_mult", "AWBW_PHI_CONTESTED_NEUTRAL_OPENING_MULT"),
+        ("phi_contested_neutral_mid_mult", "AWBW_PHI_CONTESTED_NEUTRAL_MID_MULT"),
+        ("phi_contested_neutral_late_mult", "AWBW_PHI_CONTESTED_NEUTRAL_LATE_MULT"),
+        ("phi_capture_opening_end_day", "AWBW_PHI_CAPTURE_OPENING_END_DAY"),
+        ("phi_capture_early_mid_end_day", "AWBW_PHI_CAPTURE_EARLY_MID_END_DAY"),
+        ("phi_capture_mid_end_day", "AWBW_PHI_CAPTURE_MID_END_DAY"),
+        ("phi_capture_late_end_day", "AWBW_PHI_CAPTURE_LATE_END_DAY"),
+    ):
+        value = getattr(args, attr, None)
+        if value is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = str(value)
+
 
 def build_train_argument_parser() -> argparse.ArgumentParser:
     """CLI parser for ``train.py`` (also used by ``rl.ai_vs_ai`` to mirror a live run)."""
@@ -678,6 +713,126 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--phi-contextual-capture",
+        action="store_true",
+        help=(
+            "Enable contextual capture-progress weighting in Φ: contested neutral, "
+            "enemy, production, and HQ capture progress get higher κ weight. "
+            "Default off for exact backwards-compatible reward semantics."
+        ),
+    )
+    parser.add_argument(
+        "--phi-contested-neutral-capture-mult",
+        type=float,
+        default=None,
+        help="Φ contextual capture multiplier for neutral properties with nearby enemy units (default 1.75).",
+    )
+    parser.add_argument(
+        "--phi-enemy-property-capture-mult",
+        type=float,
+        default=None,
+        help="Φ contextual capture multiplier for non-neutral enemy-owned properties (default 2.0).",
+    )
+    parser.add_argument(
+        "--phi-production-capture-mult",
+        type=float,
+        default=None,
+        help="Φ contextual capture multiplier for bases/airports/ports (default 3.0).",
+    )
+    parser.add_argument(
+        "--phi-hq-capture-mult",
+        type=float,
+        default=None,
+        help="Φ contextual capture multiplier for HQ capture progress (default 5.0).",
+    )
+    parser.add_argument(
+        "--phi-capture-context-radius",
+        type=int,
+        default=None,
+        help="Manhattan radius used to decide whether a neutral property is contested (default 3).",
+    )
+    parser.add_argument(
+        "--phi-capture-phase-weighting",
+        action="store_true",
+        help=(
+            "Enable component-specific day/turn phase weighting inside capture Φ. "
+            "Safe neutral expansion gets early urgency and late falloff; contested "
+            "neutrals get mild falloff; enemy/production/HQ capture progress does not fall off."
+        ),
+    )
+    parser.add_argument(
+        "--phi-safe-neutral-opening-mult",
+        type=float,
+        default=None,
+        help="Safe neutral capture-progress phase multiplier through opening end day (default 1.30).",
+    )
+    parser.add_argument(
+        "--phi-safe-neutral-early-mid-mult",
+        type=float,
+        default=None,
+        help="Safe neutral capture-progress phase multiplier through early-mid end day (default 1.15).",
+    )
+    parser.add_argument(
+        "--phi-safe-neutral-mid-mult",
+        type=float,
+        default=None,
+        help="Safe neutral capture-progress phase multiplier through mid end day (default 1.00).",
+    )
+    parser.add_argument(
+        "--phi-safe-neutral-late-mult",
+        type=float,
+        default=None,
+        help="Safe neutral capture-progress phase multiplier through late end day (default 0.75).",
+    )
+    parser.add_argument(
+        "--phi-safe-neutral-endgame-mult",
+        type=float,
+        default=None,
+        help="Safe neutral capture-progress phase multiplier after late end day (default 0.50).",
+    )
+    parser.add_argument(
+        "--phi-contested-neutral-opening-mult",
+        type=float,
+        default=None,
+        help="Contested neutral capture-progress phase multiplier through early-mid end day (default 1.25).",
+    )
+    parser.add_argument(
+        "--phi-contested-neutral-mid-mult",
+        type=float,
+        default=None,
+        help="Contested neutral capture-progress phase multiplier through late end day (default 1.00).",
+    )
+    parser.add_argument(
+        "--phi-contested-neutral-late-mult",
+        type=float,
+        default=None,
+        help="Contested neutral capture-progress phase multiplier after late end day (default 0.90).",
+    )
+    parser.add_argument(
+        "--phi-capture-opening-end-day",
+        type=int,
+        default=None,
+        help="Day/turn boundary for safe-neutral opening phase weighting (default 5).",
+    )
+    parser.add_argument(
+        "--phi-capture-early-mid-end-day",
+        type=int,
+        default=None,
+        help="Day/turn boundary for safe-neutral early-mid and contested opening phase weighting (default 8).",
+    )
+    parser.add_argument(
+        "--phi-capture-mid-end-day",
+        type=int,
+        default=None,
+        help="Day/turn boundary for safe-neutral mid phase weighting (default 12).",
+    )
+    parser.add_argument(
+        "--phi-capture-late-end-day",
+        type=int,
+        default=None,
+        help="Day/turn boundary for late capture phase weighting (default 18).",
+    )
+    parser.add_argument(
         "--max-env-steps",
         type=int,
         default=10000,
@@ -990,6 +1145,21 @@ def main() -> None:
         ("AWBW_ASYNC_VEC", os.environ.get("AWBW_ASYNC_VEC")),
         ("AWBW_REWARD_SHAPING", os.environ.get("AWBW_REWARD_SHAPING")),
         ("AWBW_PAIRWISE_ZERO_SUM_REWARD", os.environ.get("AWBW_PAIRWISE_ZERO_SUM_REWARD")),
+        ("AWBW_PHI_CONTEXTUAL_CAPTURE", os.environ.get("AWBW_PHI_CONTEXTUAL_CAPTURE")),
+        (
+            "AWBW_PHI_CONTESTED_NEUTRAL_CAPTURE_MULT",
+            os.environ.get("AWBW_PHI_CONTESTED_NEUTRAL_CAPTURE_MULT"),
+        ),
+        (
+            "AWBW_PHI_ENEMY_PROPERTY_CAPTURE_MULT",
+            os.environ.get("AWBW_PHI_ENEMY_PROPERTY_CAPTURE_MULT"),
+        ),
+        (
+            "AWBW_PHI_PRODUCTION_CAPTURE_MULT",
+            os.environ.get("AWBW_PHI_PRODUCTION_CAPTURE_MULT"),
+        ),
+        ("AWBW_PHI_HQ_CAPTURE_MULT", os.environ.get("AWBW_PHI_HQ_CAPTURE_MULT")),
+        ("AWBW_PHI_CAPTURE_CONTEXT_RADIUS", os.environ.get("AWBW_PHI_CAPTURE_CONTEXT_RADIUS")),
         ("AWBW_TRACK_PER_WORKER_TIMES", os.environ.get("AWBW_TRACK_PER_WORKER_TIMES")),
     ]
     _active = [f"{k}={v!r}" for k, v in _env_flags if v not in (None, "", "0")]
