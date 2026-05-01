@@ -382,7 +382,8 @@ def validate_damage_in_engine_range(
     inside the engine's possible damage envelope?
 
     ``fwd_range`` / ``ctr_range`` are ``(min, max)`` bands from
-    ``engine.combat.damage_range`` (luck sweep 0..9). ``in_range`` is True when
+    ``engine.combat.damage_range`` (luck sweep: one digit 0..9 for most COs,
+    or the full Cartesian product of two digits for dual-luck attackers).
     *both* the forward strike and the counterattack land inside their bands.
     Used by per-attack validators when we want a tighter check than the
     coarse per-envelope ``MAX_PLAUSIBLE_HP_SWING`` cap. Caller is responsible

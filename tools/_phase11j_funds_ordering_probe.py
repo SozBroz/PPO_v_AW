@@ -104,13 +104,13 @@ def _run_end_turn_prefix_to_property_resupply(gs: GameState) -> Optional[int]:
             p1_props = gs.count_properties(1)
             if p0_props > p1_props:
                 gs.winner = 0
-                gs.win_reason = "max_turns_tiebreak"
+                gs.win_reason = "max_days_tiebreak"
             elif p1_props > p0_props:
                 gs.winner = 1
-                gs.win_reason = "max_turns_tiebreak"
+                gs.win_reason = "max_days_tiebreak"
             else:
                 gs.winner = -1
-                gs.win_reason = "max_turns_draw"
+                gs.win_reason = "max_days_draw"
             return None
 
     opp_co_id = gs.co_states[opponent].co_id

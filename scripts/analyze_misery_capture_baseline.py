@@ -70,7 +70,7 @@ def main() -> None:
         if isinstance(pc, list) and len(pc) >= 2:
             combined.append(int(pc[0]) + int(pc[1]))
 
-    turns = [int(r.get("turns", 0)) for r in sl]
+    turns = [int(r.get("days", r.get("turns", 0))) for r in sl]
     wins = Counter(str(r.get("win_condition")) for r in sl)
     opp = Counter(str(r.get("opponent_type", "?")) for r in sl)
 

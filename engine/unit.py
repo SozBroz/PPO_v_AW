@@ -72,6 +72,8 @@ class UnitStats:
     is_indirect: bool
     is_submarine: bool
     can_dive: bool          # stealth/sub: can submerge/hide
+    is_transport: bool      # APC, T-Copter, Lander, Black Boat
+    land_indirect: bool     # Artillery, Rocket, Missiles (indirect vehicles excluding naval)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="infantry", can_capture=True,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.MECH: UnitStats(
         unit_type=UnitType.MECH, name="Mech",
@@ -99,6 +103,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="mech", can_capture=True,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.RECON: UnitStats(
         unit_type=UnitType.RECON, name="Recon",
@@ -108,6 +114,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.TANK: UnitStats(
         unit_type=UnitType.TANK, name="Tank",
@@ -117,6 +125,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.MED_TANK: UnitStats(
         unit_type=UnitType.MED_TANK, name="Medium Tank",
@@ -126,6 +136,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.NEO_TANK: UnitStats(
         unit_type=UnitType.NEO_TANK, name="Neotank",
@@ -135,6 +147,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.MEGA_TANK: UnitStats(
         unit_type=UnitType.MEGA_TANK, name="Megatank",
@@ -144,6 +158,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.APC: UnitStats(
         unit_type=UnitType.APC, name="APC",
@@ -153,6 +169,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=1, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=True,
+        land_indirect=False,
     ),
     UnitType.ARTILLERY: UnitStats(
         unit_type=UnitType.ARTILLERY, name="Artillery",
@@ -162,6 +180,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=2, max_range=3,
         is_indirect=True, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=True,
     ),
     UnitType.ROCKET: UnitStats(
         unit_type=UnitType.ROCKET, name="Rocket",
@@ -171,6 +191,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=3, max_range=5,
         is_indirect=True, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=True,
     ),
     UnitType.ANTI_AIR: UnitStats(
         unit_type=UnitType.ANTI_AIR, name="Anti-Air",
@@ -180,6 +202,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.MISSILES: UnitStats(
         unit_type=UnitType.MISSILES, name="Missiles",
@@ -189,6 +213,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=3, max_range=5,
         is_indirect=True, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=True,
     ),
     UnitType.FIGHTER: UnitStats(
         unit_type=UnitType.FIGHTER, name="Fighter",
@@ -198,6 +224,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="air", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.BOMBER: UnitStats(
         unit_type=UnitType.BOMBER, name="Bomber",
@@ -207,6 +235,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="air", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.STEALTH: UnitStats(
         unit_type=UnitType.STEALTH, name="Stealth",
@@ -216,6 +246,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="air", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=True,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.B_COPTER: UnitStats(
         unit_type=UnitType.B_COPTER, name="B-Copter",
@@ -225,6 +257,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="copter", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.T_COPTER: UnitStats(
         unit_type=UnitType.T_COPTER, name="T-Copter",
@@ -234,6 +268,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="copter", can_capture=False,
         carry_capacity=1, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=True,
+        land_indirect=False,
     ),
     UnitType.BATTLESHIP: UnitStats(
         unit_type=UnitType.BATTLESHIP, name="Battleship",
@@ -243,6 +279,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=0, min_range=2, max_range=6,
         is_indirect=True, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.CARRIER: UnitStats(
         unit_type=UnitType.CARRIER, name="Carrier",
@@ -252,6 +290,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=2, min_range=3, max_range=8,
         is_indirect=True, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.SUBMARINE: UnitStats(
         unit_type=UnitType.SUBMARINE, name="Submarine",
@@ -261,6 +301,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=True, can_dive=True,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.CRUISER: UnitStats(
         unit_type=UnitType.CRUISER, name="Cruiser",
@@ -270,6 +312,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=2, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.LANDER: UnitStats(
         unit_type=UnitType.LANDER, name="Lander",
@@ -279,6 +323,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=2, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=True,
+        land_indirect=False,
     ),
     UnitType.GUNBOAT: UnitStats(
         unit_type=UnitType.GUNBOAT, name="Gunboat",
@@ -288,6 +334,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=1, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.BLACK_BOAT: UnitStats(
         unit_type=UnitType.BLACK_BOAT, name="Black Boat",
@@ -297,6 +345,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="naval", can_capture=False,
         carry_capacity=2, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=True,
+        land_indirect=False,
     ),
     UnitType.BLACK_BOMB: UnitStats(
         unit_type=UnitType.BLACK_BOMB, name="Black Bomb",
@@ -306,6 +356,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="air", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.PIPERUNNER: UnitStats(
         unit_type=UnitType.PIPERUNNER, name="Piperunner",
@@ -315,6 +367,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="pipe", can_capture=False,
         carry_capacity=0, min_range=2, max_range=5,
         is_indirect=True, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
     UnitType.OOZIUM: UnitStats(
         unit_type=UnitType.OOZIUM, name="Oozium",
@@ -324,6 +378,8 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
         unit_class="vehicle", can_capture=False,
         carry_capacity=0, min_range=1, max_range=1,
         is_indirect=False, is_submarine=False, can_dive=False,
+        is_transport=False,
+        land_indirect=False,
     ),
 }
 

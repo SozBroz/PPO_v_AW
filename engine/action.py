@@ -12,6 +12,7 @@ which stage it is in and which unit / move destination was selected.
 from __future__ import annotations
 
 import collections
+import hashlib
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Optional
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from engine.game import GameState
 
 from engine.unit import UnitType, UNIT_STATS, Unit
+from engine.unit_cap import alive_owned_unit_count
 from engine.terrain import get_terrain, INF_PASSABLE
 from engine.weather import effective_move_cost
 
@@ -31,6 +33,71 @@ import os as _os
 # exist in range. Default OFF — replays call step() directly and never hit
 # get_legal_actions, so they are unaffected.
 _CAPTURE_MOVE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
+
+
+def parse_capture_move_gate_env_value(raw: str | None) -> float:
+    """
+    Parse ``AWBW_CAPTURE_MOVE_GATE`` for :func:`_get_move_actions`.
+
+    * Unset / empty / ``0`` / ``false`` / ``no`` / ``off`` → ``0.0`` (disabled).
+    * Legacy full gate: ``1``, ``true``, ``yes``, ``on`` → ``1.0``.
+    * Numeric: values in ``(1, 100]`` are treated as **percent** (``75`` → ``0.75``);
+      values in ``[0, 1]`` are **fractions** (``0.75`` → ``0.75``).
+    * Result is clamped to ``[0, 1]``.
+    """
+    if raw is None:
+        return 0.0
+    s = raw.strip()
+    if not s:
+        return 0.0
+    sl = s.lower()
+    if sl in ("0", "false", "no", "off"):
+        return 0.0
+    if sl in ("1", "true", "yes", "on"):
+        return 1.0
+    try:
+        v = float(s)
+    except ValueError:
+        return 0.0
+    if v > 1.0:
+        v = min(v / 100.0, 1.0)
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
+def _stochastic_capture_gate_restrict(
+    gate_prob: float,
+    state: GameState,
+    player: int,
+    unit: Unit,
+    capturable: set[tuple[int, int]],
+) -> bool:
+    """
+    Deterministic pseudo-random Bernoulli trial for 0<P<1.
+
+    Must not use :attr:`GameState.luck_rng` — that stream is shared with combat.
+    Multiple ``get_legal_actions`` calls in the same MOVE stage must yield the same
+    restriction decision (mask vs ``GameState.step`` validation).
+    """
+    cap_t = tuple(sorted(capturable))
+    mid = int(getattr(state.map_data, "map_id", 0) or 0)
+    payload = (
+        mid,
+        int(state.turn),
+        int(player),
+        int(unit.unit_id),
+        int(unit.pos[0]),
+        int(unit.pos[1]),
+        round(float(gate_prob), 12),
+        cap_t,
+    )
+    h = hashlib.sha256(repr(payload).encode("utf-8")).digest()
+    u = int.from_bytes(h[:8], "big", signed=False) / float(2**64)
+    return u < float(gate_prob)
+
 
 import engine._action_cython as _action_cython
 from engine._occupancy_cython import build_occupancy as _cy_build_occupancy
@@ -228,49 +295,7 @@ def _effective_move_range_cap(state: GameState, unit: Unit) -> int:
     move_range = stats.move_range
     co = state.co_states[unit.player]
 
-    # Adder: +1 move (COP +1, SCOP +2 on top of DTD +1)
-    if co.co_id == 11:
-        move_range += 1
-        if co.cop_active:
-            move_range += 1
-        if co.scop_active:
-            move_range += 2
-
-    # Sami COP: infantry +1, SCOP +2
-    if co.co_id == 8:
-        if stats.unit_class == "infantry":
-            if co.scop_active:
-                move_range += 2
-            elif co.cop_active:
-                move_range += 1
-
-    # Grimm SCOP: all ground +3
-    if co.co_id == 20 and co.scop_active:
-        if stats.unit_class in ("infantry", "mech", "vehicle", "pipe"):
-            move_range += 3
-
-    # Jess COP/SCOP: +2 movement for all vehicles (Turbo Charge / Overdrive).
-    if co.co_id == 14 and (co.cop_active or co.scop_active):
-        if stats.unit_class == "vehicle":
-            move_range += 2
-
-    # Andy SCOP (Hyper Upgrade): +1 movement for all units (AWBW Power envelope
-    # ``global.units_movement_points``; COP is heal-only — no movement bonus).
-    if co.co_id == 1 and co.scop_active:
-        move_range += 1
-
-    # Koal COP (Forced March): +1 movement to all own units globally. The wiki
-    # text "+1 on road tiles" is misleading; live AWBW Power envelopes for Koal
-    # COP carry ``global.units_movement_points: 1`` and unit snapshots show
-    # ``movement_points = base + 1`` regardless of starting tile (Phase 11D-F2
-    # recon, gids 1605367 and 1630794, both with no roads on the failing path).
-    # The road -1 cost discount is applied separately in
-    # ``engine/weather.py::effective_move_cost`` and stacks with this bonus.
-    # SCOP "Trail of Woe" is intentionally NOT bumped here: weather.py already
-    # applies -2 cost per road tile, which is sufficient for the SCOP's road
-    # behavior; a global +2 has not been confirmed by replay evidence.
-    if co.co_id == 21 and co.cop_active:
-        move_range += 1
+    move_range += co.movement_modifier_for_unit(unit.unit_type)
 
     return min(move_range, unit.fuel)
 
@@ -472,18 +497,8 @@ def get_attack_targets(
 
     targets: list[tuple[int, int]] = []
     min_r, max_r = stats.min_range, stats.max_range
-    # CO powers extend **max** indirect range (AWBW: Grit COP +1 / SCOP +2; Jake
-    # COP/SCOP +1 land indirects only — not Battleship).
-    if stats.is_indirect:
-        co = state.co_states[int(unit.player)]
-        if co.co_id == 2:  # Grit — all indirects including naval
-            if co.scop_active:
-                max_r += 2
-            elif co.cop_active:
-                max_r += 1
-        elif co.co_id == 22 and (co.cop_active or co.scop_active):
-            if stats.unit_class != "naval":
-                max_r += 1
+    # CO powers extend max range through data/co_data.json range_modifiers.
+    max_r += state.co_states[int(unit.player)].range_modifier_for_unit(unit.unit_type)
     mr, mc = move_pos
 
     for dr in range(-max_r, max_r + 1):
@@ -684,10 +699,9 @@ def _get_select_actions(
 
     # Direct factory BUILD actions (AWBW-correct: factories build without unit activation)
     # Generate BUILD actions for each owned empty factory/airport/port
-    # Match ``_apply_build``: only alive units count toward the cap (hp==0 placeholders
-    # must not suppress legal BUILDs or oracle replay diverges from AWBW).
-    _alive = sum(1 for u in state.units[player] if u.is_alive)
-    if _alive < state.map_data.unit_limit:
+    # Match ``_apply_build``: alive roster units + loaded cargo (hp==0 placeholders on
+    # roster must not suppress legal BUILDs or oracle replay diverges from AWBW).
+    if alive_owned_unit_count(state.units[player]) < state.map_data.unit_limit:
         for prop in state.properties:
             if prop.owner == player:
                 terrain = get_terrain(state.map_data.terrain[prop.row][prop.col])
@@ -721,17 +735,12 @@ def _get_move_actions(
         return []
     reachable = set(compute_reachable_costs(state, unit, occupancy=occupancy).keys())
     # --- AWBW_CAPTURE_MOVE_GATE (RL / get_legal_actions only; default OFF) ---
-    # When the env var is "1"/"true"/"yes"/"on", capturers with at least one
-    # reachable capturable tile (enemy/neutral property; not comm tower / lab;
-    # same notion as rl/env._has_capturable_property per-tile) may only MOVE
-    # onto those property tiles — closing the "sidestep to grass then WAIT"
-    # loophole. If the filtered set would be empty, we keep the full reachable
-    # set (defensive). Unset env → identical behaviour to pre-gate engine.
-    gate_raw = _os.environ.get(_CAPTURE_MOVE_GATE_ENV, "").strip().lower()
-    if (
-        gate_raw in ("1", "true", "yes", "on")
-        and UNIT_STATS[unit.unit_type].can_capture
-    ):
+    # Probability P in [0,1]: when infantry/mech have reachable capturable
+    # tiles (enemy/neutral property; not comm tower/lab). P=1 restricts always;
+    # 0<P<1 uses a deterministic trial (never luck_rng — mask vs GameState.step
+    # must agree on repeated get_legal_actions calls).
+    gate_prob = parse_capture_move_gate_env_value(_os.environ.get(_CAPTURE_MOVE_GATE_ENV))
+    if gate_prob > 0.0 and UNIT_STATS[unit.unit_type].can_capture:
         capturable: set[tuple[int, int]] = set()
         for pos in reachable:
             tid = state.map_data.terrain[pos[0]][pos[1]]
@@ -744,7 +753,12 @@ def _get_move_actions(
                 continue
             capturable.add(pos)
         if capturable:
-            reachable = capturable
+            if gate_prob >= 1.0:
+                reachable = capturable
+            elif _stochastic_capture_gate_restrict(
+                gate_prob, state, player, unit, capturable
+            ):
+                reachable = capturable
     # ``reachable`` is a set — iterate in deterministic (row, col) order so
     # ``rng.choice(get_legal_actions(...))`` and RL masks are stable across
     # PYTHONHASHSEED / process boundaries (ai_vs_ai + replay exports).
@@ -979,25 +993,12 @@ def _black_boat_repair_eligible(state: GameState, ally: Unit) -> bool:
 
 
 def _build_cost(ut: UnitType, state: GameState, player: int, pos: tuple[int, int]) -> int:
-    """Adjusted build cost after CO modifiers.
-
-    Source: AWBW CO Chart https://awbw.amarriner.com/co.php
-      * Kanbei  (3)  — units cost +20% more  → ×1.20
-      * Colin   (15) — units cost  20% less  → ×0.80
-      * Hachi   (17) — units cost  10% less  → ×0.90 (D2D, **all build sites**,
-        not just bases). Phase 10T section 3 flagged the previous "50% on
-        ``terrain.is_base`` only" heuristic as a HIGH-priority canon gap; the
-        chart line is "Units cost 10% less". See
-        ``docs/oracle_exception_audit/phase11a_kindle_hachi_canon.md``.
-    """
+    """Adjusted build cost after CO modifiers."""
     cost = UNIT_STATS[ut].cost
     co   = state.co_states[player]
-    if co.co_id == 3:            # Kanbei: 120% cost
-        cost = int(cost * 1.2)
-    elif co.co_id == 15:         # Colin: 80% cost
-        cost = int(cost * 0.8)
-    elif co.co_id == 17:         # Hachi: 90% cost on every build (CO Chart "Units cost 10% less")
-        cost = int(cost * 0.9)
+    cost_mod = co.unit_cost_modifier_for_unit(ut)
+    if cost_mod:
+        cost = int(cost * (100 + cost_mod) / 100)
     return cost
 
 

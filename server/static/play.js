@@ -169,12 +169,17 @@
     } else if (p.active_player === 1) {
       setStatus('Bot thinking… (blocked on server until your turn)', 'warn');
     } else {
-      const botNote =
-        p.bot_mode === 'random'
-          ? ' | Bot: random legal moves (train → checkpoints/latest.zip for PPO)'
-          : '';
+      const bm = typeof p.bot_mode === 'string' ? p.bot_mode : '';
+      let extra = '';
+      if (bm.startsWith('book+')) {
+        const tail = bm.endsWith('ppo') ? 'PPO' : 'random legal';
+        extra = ` | P1: data/opening_books/std_pool_precombat.jsonl while line matches, then ${tail}`;
+      } else if (bm === 'random') {
+        extra =
+          ' | Bot: random legal moves (train → checkpoints/latest.zip for PPO)';
+      }
       setStatus(
-        `Your turn — ${p.action_stage} | Day ${p.turn} | Funds ${p.funds[0]}g (you) vs ${p.funds[1]}g${botNote}`,
+        `Your turn — ${p.action_stage} | Day ${p.turn} | Funds ${p.funds[0]}g (you) vs ${p.funds[1]}g${extra}`,
         'ok'
       );
     }
@@ -197,9 +202,9 @@
     setStatus('Starting…', 'warn');
     const { res, data } = await postJson('/play/api/new', {
       map_id: 123858,
-      tier: 'T3',
-      human_co_id: 1,
-      bot_co_id: 1,
+      tier: 'T4',
+      human_co_id: 14,
+      bot_co_id: 14,
     });
     if (!res.ok) {
       setStatus(data.error || 'Failed to start (need checkpoint?)', 'err');

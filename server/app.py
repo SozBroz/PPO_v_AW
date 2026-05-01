@@ -1,9 +1,10 @@
 """Flask application factory.
 
-To run the server, use one of these methods from the project root:
+To run the server from the project root:
     python -m server.app
-    OR
-    python server/app.py  (with sys.path fix below)
+    python -m server
+    scripts\\run_play_server.cmd   (Windows)
+    flask run --no-reload --port 5000   (uses .flaskenv when python-dotenv is installed)
 """
 import sys
 from pathlib import Path

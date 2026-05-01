@@ -124,7 +124,7 @@ def main() -> None:
             except json.JSONDecodeError:
                 bad_json += 1
                 continue
-            if rec.get("turns") is None:
+            if rec.get("turns") is None and rec.get("days") is None:
                 continue
             ld = _episode_local_date(rec)
             if ld is None:
@@ -144,7 +144,7 @@ def main() -> None:
         ot = str(rec.get("opponent_type") or "missing")
         tag = rec.get("curriculum_tag")
         tag_k = str(tag) if tag else "(none)"
-        t = int(rec["turns"])
+        t = int(rec["days"] if rec.get("days") is not None else rec["turns"])
         wr = rec.get("win_condition")
         by_ot[ot].append(t)
         by_ot_wc[ot].append(wr if isinstance(wr, str) else None)

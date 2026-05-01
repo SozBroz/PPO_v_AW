@@ -73,7 +73,7 @@ def main() -> int:
         "0",
         "--max-env-steps",
         "0",
-        "--max-turns",
+        "--max-days",
         "100",
         "--phi-profile",
         args.phi_profile,

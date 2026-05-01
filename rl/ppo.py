@@ -16,7 +16,7 @@ DEFAULT_HYPERPARAMS: dict[str, Any] = {
     "n_steps": 2048,          # steps collected per update cycle (per env)
     "batch_size": 64,
     "n_epochs": 10,
-    "gamma": 0.995,           # high discount: AWBW games run 100+ turns
+    "gamma": 0.99925,          # long-horizon discount (AWBW episodes are many learner-steps)
     "gae_lambda": 0.95,
     "clip_range": 0.2,
     "ent_coef": 0.02,         # entropy bonus encourages exploration

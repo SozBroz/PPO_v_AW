@@ -23,7 +23,7 @@ def main() -> None:
     ap.add_argument("--runs", type=int, default=10)
     ap.add_argument("--seed-base", type=int, default=10_000)
     ap.add_argument("--game-id-base", type=int, default=880_000)
-    ap.add_argument("--max-turns", type=int, default=40)
+    ap.add_argument("--max-days", "--max-turns", dest="max_days", type=int, default=40)
     ap.add_argument("--tier", type=str, default="T2")
     args = ap.parse_args()
 
@@ -40,7 +40,7 @@ def main() -> None:
                 co1=None,
                 tier=args.tier,
                 seed=seed,
-                max_turns=args.max_turns,
+                max_days=args.max_days,
                 force_random=True,
                 open_viewer=False,
                 output_dir=out,

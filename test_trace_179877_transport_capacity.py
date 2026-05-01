@@ -61,7 +61,10 @@ class TestTrace179877TransportCapacity(unittest.TestCase):
         for i, entry in enumerate(self.full_trace):
             with self.subTest(step=i, type=entry.get("type")):
                 action = _trace_to_action(entry)
-                state.step(action)
+                # AWBW zip/trace envelopes can include factory BUILDs PHP accepted under a
+                # roster-only unit-cap view while cargo sits aboard transports; this test
+                # pins transport carry overflow only, not global BUILD legality.
+                state.step(action, oracle_mode=True)
                 _assert_all_transports_within_capacity(state)
 
 

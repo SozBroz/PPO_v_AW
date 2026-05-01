@@ -171,7 +171,7 @@ def test_sonja_counter_amplifier_d2d() -> None:
     sonja_counter = calculate_counterattack(
         attacker, sonja_def, PLAIN, PLAIN,
         andy_atk_co, sonja_co,
-        attack_damage=0, luck_roll=0,
+        attack_damage=0, luck_roll=0, luck_roll_bad=0,
     )
     andy_counter = calculate_counterattack(
         attacker, andy_def, PLAIN, PLAIN,
@@ -219,7 +219,7 @@ def test_sonja_counter_amplifier_active_under_cop() -> None:
     counter = calculate_counterattack(
         attacker, sonja_def, PLAIN, PLAIN,
         andy_atk_co, sonja_cop,
-        attack_damage=0, luck_roll=0,
+        attack_damage=0, luck_roll=0, luck_roll_bad=0,
     )
     # COP grants Sonja the universal SCOPB +10 ATK → AV 110.
     # raw = 55 * 110/100 * 0.5 * (200 - 100 - 1*10)/100 = 27.225
@@ -242,7 +242,7 @@ def test_sonja_counter_amplifier_stacks_with_scop_counter_break() -> None:
     counter = calculate_counterattack(
         attacker, sonja_def, PLAIN, PLAIN,
         andy_atk_co, sonja_scop,
-        attack_damage=20, luck_roll=0,  # restored to 50 → display 5
+        attack_damage=20, luck_roll=0, luck_roll_bad=0,  # restored to 50 → display 5
     )
     # SCOPB +10 ATK on Sonja under SCOP → AV 110.
     # raw = 55 * 110/100 * (5/10) * (200 - 100 - 1*10)/100 = 27.225
@@ -276,7 +276,7 @@ def test_forward_then_counter_amp_chain() -> None:
     counter = calculate_counterattack(
         attacker, sonja_def, PLAIN, PLAIN,
         andy_atk_co, sonja_co,
-        attack_damage=fwd, luck_roll=0,
+        attack_damage=fwd, luck_roll=0, luck_roll_bad=0,
     )
     # raw = 55 * 1.0 * (3/10) * (200 - 100 - 1*10)/100 = 14.85
     # *1.5 = 22.275; ceil-to-0.05 → 22.30; floor → 22.

@@ -265,11 +265,13 @@ def _merge_train_launch_env(existing: Any) -> dict[str, str]:
 # Keys that curriculum ``args_overrides()`` or MCTS health gate emits.  Only a
 # change in *these* keys triggers a ``maybe_restart_train_for_proposed_args`` hard
 # restart; every other key in ``applied_args`` is preserved as-is.  This keeps
-# ``--n-envs``, ``--max-env-steps``, ``--n-steps``, ``--batch-size``,
-# ``--training-backend``, live-game knobs, etc. frozen to whatever
-# ``start_solo_training`` originally wrote — exactly one bootstrap, no probe churn.
+# ``--n-envs``, ``--n-steps``, ``--batch-size``, ``--training-backend``,
+# live-game knobs, etc. frozen to whatever ``start_solo_training`` originally
+# wrote — exactly one bootstrap, no probe churn.  ``--max-env-steps`` is
+# significant so operator / proposed horizon changes respawn ``train.py``.
 RESTART_SIGNIFICANT_KEYS: frozenset[str] = frozenset(
     {
+        "--max-env-steps",
         # Curriculum stage keys
         "--learner-greedy-mix",
         "--egocentric-episode-prob",
@@ -383,11 +385,17 @@ def build_train_argv_from_proposed_args(
         If ``args`` does not list *flag*, emit ``default`` (fleet bootstrap).
         If the value is JSON ``null`` (Python None), **omit** the flag so
         ``train.py`` uses its default (e.g. all GL Std maps, or random COs).
+        If *default* is ``None`` and the flag is absent from ``args``, omit.
         """
         if flag in args_map and args_map[flag] is None:
             return
         val = g(flag, default)
-        out.extend([flag, str(val)])
+        if val is None:
+            return
+        if isinstance(val, (list, tuple)):
+            out.extend([flag, ",".join(str(int(x)) for x in val)])
+        else:
+            out.extend([flag, str(val)])
         processed_keys.add(flag)
 
     n_envs = int(g("--n-envs", 4))
@@ -419,8 +427,16 @@ def build_train_argv_from_proposed_args(
     }
     emit_optional(head, processed, "--map-id", 123858)
     emit_optional(head, processed, "--tier", "T3")
-    emit_optional(head, processed, "--co-p0", 1)
-    emit_optional(head, processed, "--co-p1", 1)
+    # Pin tier without CO flags → train samples random COs from that tier each episode.
+    co_p0_default: Any = 1
+    co_p1_default: Any = 1
+    if args_map.get("--tier") is not None:
+        if "--co-p0" not in args_map:
+            co_p0_default = None
+        if "--co-p1" not in args_map:
+            co_p1_default = None
+    emit_optional(head, processed, "--co-p0", co_p0_default)
+    emit_optional(head, processed, "--co-p1", co_p1_default)
     # Match train.py defaults; stage A/B (capture bootstrap) comes from curriculum
     # ``args_overrides`` after orchestrator merge — do not pre-inject draft 10g here.
     emit_optional(head, processed, "--cold-opponent", "random")
@@ -453,6 +469,11 @@ def build_train_argv_from_proposed_args(
     if cm is True or cm == _curriculum_advisor.FLAG_PRESENT:
         head.append("--capture-move-gate")
         processed.add("--capture-move-gate")
+    elif isinstance(cm, (int, float)) and not isinstance(cm, bool):
+        fv = float(cm)
+        if 0.0 < fv <= 1.0:
+            head.extend(["--capture-move-gate", str(fv)])
+            processed.add("--capture-move-gate")
 
     lr = g("--log-replay-frames", None)
     if lr is True or lr == _curriculum_advisor.FLAG_PRESENT:
@@ -1444,10 +1465,11 @@ class FleetOrchestrator:
         drift from ``applied_args.json``, optionally terminate and respawn ``train.py``.
 
         Only the keys defined in ``RESTART_SIGNIFICANT_KEYS`` are compared for the
-        restart decision.  All other keys (``--n-envs``, ``--max-env-steps``,
-        ``--n-steps``, ``--batch-size``, ``--training-backend``, live-game knobs,
-        etc.) are **frozen** to the last ``applied_args.json`` on respawn — they
-        are never mutated by probe churn or curriculum ticks.
+        restart decision.  All other keys (``--n-envs``, ``--n-steps``,
+        ``--batch-size``, ``--training-backend``, live-game knobs, etc.) are
+        **frozen** to the last ``applied_args.json`` on respawn — they are not
+        mutated by probe churn or curriculum ticks.  Horizon changes
+        (``--max-env-steps``) are restart-significant so ``train.py`` picks up new argv.
 
         Gated by the orchestrator's ``--auto-apply`` (``self.auto_apply``) plus
         cooldown / circuit-breaker. The ``auto_apply`` field inside
@@ -1460,9 +1482,9 @@ class FleetOrchestrator:
             proposed = read_proposed_args(mid, self.shared_root)
             if proposed is None:
                 continue
-            # Curriculum-only hash: a restart is triggered *only* when curriculum keys change.
-            # All other keys (--n-envs, --max-env-steps, --n-steps, --batch-size,
-            # --training-backend, live games, etc.) are frozen to the last applied_args.
+            # Significant-key hash (see RESTART_SIGNIFICANT_KEYS): restart when curriculum,
+            # MCTS knobs, horizon, etc. drift. Keys not in that set (--n-envs, live games, …)
+            # stay pinned from the previous applied/trainer state across probe churn.
             prop_ch = _restart_significant_args_hash(proposed)
             if prop_ch is None:
                 continue
@@ -1779,9 +1801,8 @@ class FleetOrchestrator:
                 launch_payload = {**raw_launch}
             else:
                 launch_payload = {}
-            # Build restart doc from applied_args + curriculum overlay: all non-curriculum
-            # keys (--n-envs, --max-env-steps, --batch-size, --training-backend, live games,
-            # etc.) come from the last applied state — they survive probe churn.
+            # Build restart doc from applied_args + proposed overlay; non-significant keys
+            # (--n-envs, live games, …) preserve the last bootstrap geometry from applied.
             restart_args = _merge_restart_args(proposed, applied)
             restart_doc: dict[str, Any] = {
                 **proposed,

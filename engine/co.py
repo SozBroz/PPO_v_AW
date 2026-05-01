@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from engine.unit import UnitType, UNIT_STATS
+
 DATA_PATH = Path(__file__).parent.parent / "data" / "co_data.json"
 
 _co_data_cache: Optional[dict] = None
@@ -64,6 +66,9 @@ class COState:
     scop_active: bool       # SCOP firing this turn
     _data: dict = field(repr=False, compare=False)
     power_uses: int = 0    # incremented each time COP or SCOP is activated
+    # When True (RL curriculum only), COP cannot be activated this episode; SCOP is
+    # unchanged. Default False for replays/oracle.
+    cop_activation_disabled: bool = False
     comm_towers: int = 0   # owned comm towers; updated by GameState each turn
     # Sasha (co_id 19) SCOP "War Bonds" — credits 50% of damage cost (capped at
     # 9 display HP per attack) to her treasury for damage dealt by her units.
@@ -105,17 +110,106 @@ class COState:
     # ------------------------------------------------------------------
     # Modifier helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _unit_can_attack(unit_type: UnitType) -> bool:
+        """True for units with a weapon, including MG-only direct attackers."""
+        stats = UNIT_STATS[unit_type]
+        return stats.max_ammo > 0 or unit_type == UnitType.RECON
+
+    @classmethod
+    def _is_direct_awbw_tag(cls, unit_type: UnitType) -> bool:
+        """AWBW CO-chart direct tag: attacking non-footsoldier direct units."""
+        stats = UNIT_STATS[unit_type]
+        if stats.is_indirect:
+            return False
+        if unit_type in (UnitType.INFANTRY, UnitType.MECH):
+            return False
+        return cls._unit_can_attack(unit_type)
+
+    @classmethod
+    def _modifier_keys_for_unit(cls, unit_type: UnitType) -> tuple[str, ...]:
+        """Lookup priority for JSON modifier maps.
+
+        The first matching key wins. This lets specific unit classes override
+        broader tags like ``direct`` / ``indirect`` / ``all``.
+        """
+        stats = UNIT_STATS[unit_type]
+        keys: list[str] = [stats.unit_class]
+        if stats.land_indirect:
+            keys.append("land_indirect")
+        if stats.is_transport:
+            keys.append("transport")
+        if stats.is_indirect and cls._unit_can_attack(unit_type):
+            keys.append("indirect")
+        if cls._is_direct_awbw_tag(unit_type):
+            keys.append("direct")
+        keys.append("all")
+        return tuple(dict.fromkeys(keys))
+
+    def _section(self, field: str, source_key: Optional[str] = None) -> dict:
+        """Return a modifier section from top-level/day-to-day or a power."""
+        if source_key is not None:
+            source = self._data.get(source_key) or {}
+            return source.get(field, {}) or {}
+        merged: dict = {}
+        top = self._data.get(field, {}) or {}
+        if isinstance(top, dict):
+            merged.update(top)
+        day_to_day = self._data.get("day_to_day", {}) or {}
+        dtd = day_to_day.get(field, {}) or {}
+        if isinstance(dtd, dict):
+            merged.update(dtd)
+        return merged
+
     def _lookup(self, section: dict, unit_class: str) -> int:
-        """Return modifier for unit class, falling back to 'all', then 0."""
-        return section.get(unit_class, section.get("all", 0))
+        """Return modifier for legacy unit-class callers."""
+        return int(section.get(unit_class, section.get("all", 0)) or 0)
+
+    def _lookup_for_unit(self, section: dict, unit_type: UnitType) -> int:
+        """Return the first matching modifier for a concrete unit type."""
+        for key in self._modifier_keys_for_unit(unit_type):
+            if key in section:
+                return int(section[key] or 0)
+        return 0
 
     def atk_modifier(self, unit_class: str) -> int:
         """Day-to-day ATK percent bonus (e.g. 20 → +20%)."""
-        return self._lookup(self._data.get("atk_modifiers", {}), unit_class)
+        return self._lookup(self._section("atk_modifiers"), unit_class)
+
+    def atk_modifier_for_unit(self, unit_type: UnitType) -> int:
+        """Day-to-day ATK percent bonus for a concrete unit type."""
+        return self._lookup_for_unit(self._section("atk_modifiers"), unit_type)
 
     def def_modifier(self, unit_class: str) -> int:
         """Day-to-day DEF percent bonus."""
-        return self._lookup(self._data.get("def_modifiers", {}), unit_class)
+        return self._lookup(self._section("def_modifiers"), unit_class)
+    
+    def def_modifier_for_unit(self, unit_type: UnitType) -> int:
+        """Day-to-day DEF percent bonus for a concrete unit type."""
+        return self._lookup_for_unit(self._section("def_modifiers"), unit_type)
+
+    def _against_indirect_bonus(self, section: dict, attacker_unit_type: Optional[UnitType]) -> int:
+        if attacker_unit_type is None:
+            return 0
+        if not UNIT_STATS[attacker_unit_type].is_indirect:
+            return 0
+        return int(section.get("against_indirect", section.get("against_indirects", 0)) or 0)
+
+    def def_modifier_against(self, defender_unit_class: str, attacker_unit_type: Optional[UnitType] = None) -> int:
+        """Day-to-day DEF percent bonus against a specific attacker.
+        
+        Handles contextual keys such as Javier's ``against_indirect``.
+        """
+        section = self._section("def_modifiers")
+        return self._lookup(section, defender_unit_class) + self._against_indirect_bonus(section, attacker_unit_type)
+
+    def def_modifier_for_unit_against(
+        self,
+        defender_unit_type: UnitType,
+        attacker_unit_type: Optional[UnitType] = None,
+    ) -> int:
+        section = self._section("def_modifiers")
+        return self._lookup_for_unit(section, defender_unit_type) + self._against_indirect_bonus(section, attacker_unit_type)
 
     def cop_atk_modifier(self, unit_class: str) -> int:
         """ATK bonus from active COP/SCOP (0 if no power active).
@@ -126,8 +220,15 @@ class COState:
         if not self.cop_active and not self.scop_active:
             return 0
         source_key = "scop" if self.scop_active else "cop"
-        section = self._data.get(source_key, {}).get("atk_modifiers", {})
+        section = self._section("atk_modifiers", source_key)
         return 10 + self._lookup(section, unit_class)  # 10 = SCOPB
+
+    def cop_atk_modifier_for_unit(self, unit_type: UnitType) -> int:
+        """ATK bonus from active COP/SCOP for a concrete unit."""
+        if not self.cop_active and not self.scop_active:
+            return 0
+        source_key = "scop" if self.scop_active else "cop"
+        return 10 + self._lookup_for_unit(self._section("atk_modifiers", source_key), unit_type)
 
     def cop_def_modifier(self, unit_class: str) -> int:
         """DEF bonus from active COP/SCOP.
@@ -138,8 +239,70 @@ class COState:
         if not self.cop_active and not self.scop_active:
             return 0
         source_key = "scop" if self.scop_active else "cop"
-        section = self._data.get(source_key, {}).get("def_modifiers", {})
+        section = self._section("def_modifiers", source_key)
         return 10 + self._lookup(section, unit_class)  # 10 = SCOPB
+
+    def cop_def_modifier_for_unit_against(
+        self,
+        defender_unit_type: UnitType,
+        attacker_unit_type: Optional[UnitType] = None,
+    ) -> int:
+        """DEF bonus from active COP/SCOP, including contextual JSON keys."""
+        if not self.cop_active and not self.scop_active:
+            return 0
+        source_key = "scop" if self.scop_active else "cop"
+        section = self._section("def_modifiers", source_key)
+        return 10 + self._lookup_for_unit(section, defender_unit_type) + self._against_indirect_bonus(section, attacker_unit_type)
+
+    def movement_modifier_for_unit(self, unit_type: UnitType) -> int:
+        """Movement-point bonus from D2D plus active power JSON modifiers."""
+        bonus = self._lookup_for_unit(self._section("movement_modifiers"), unit_type)
+        bonus += self._lookup_for_unit(self._section("transport_modifiers"), unit_type)
+        if self.cop_active:
+            bonus += self._lookup_for_unit(self._section("movement_modifiers", "cop"), unit_type)
+            bonus += self._lookup_for_unit(self._section("transport_modifiers", "cop"), unit_type)
+        if self.scop_active:
+            bonus += self._lookup_for_unit(self._section("movement_modifiers", "scop"), unit_type)
+            bonus += self._lookup_for_unit(self._section("transport_modifiers", "scop"), unit_type)
+        return bonus
+
+    def range_modifier_for_unit(self, unit_type: UnitType) -> int:
+        """Attack max-range bonus from D2D plus active power JSON modifiers."""
+        bonus = self._lookup_for_unit(self._section("range_modifiers"), unit_type)
+        if self.cop_active:
+            bonus += self._lookup_for_unit(self._section("range_modifiers", "cop"), unit_type)
+        if self.scop_active:
+            bonus += self._lookup_for_unit(self._section("range_modifiers", "scop"), unit_type)
+        return bonus
+
+    def unit_cost_modifier_for_unit(self, unit_type: UnitType) -> int:
+        """Build-cost percent modifier from JSON, e.g. -20 for Colin."""
+        return self._lookup_for_unit(self._section("unit_cost_modifiers"), unit_type)
+
+    def luck_bounds(self) -> Optional[tuple[int, int]]:
+        """Return active luck bounds from JSON as ``(low, high_exclusive)``."""
+        section = self._section("luck_modifiers")
+        if self.cop_active:
+            section = self._section("luck_modifiers", "cop") or section
+        if self.scop_active:
+            section = self._section("luck_modifiers", "scop") or section
+        raw = section.get("all")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            low_s, high_s = raw.split(",", 1)
+            return int(low_s.strip()), int(high_s.strip())
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            return int(raw[0]), int(raw[1])
+        return None
+    
+    def total_atk_for_unit(self, unit_type: UnitType) -> int:
+        """Base 100 + DTD + active power ATK modifier + Javier tower bonus for a unit."""
+        return 100 + self.atk_modifier_for_unit(unit_type) + self.cop_atk_modifier_for_unit(unit_type) + self.tower_atk_bonus()
+    
+    def total_def_for_unit(self, unit_type: UnitType) -> int:
+        """Base 100 + DTD + active power DEF modifier + Javier tower bonus for a unit."""
+        return 100 + self.def_modifier_for_unit(unit_type) + self.cop_def_modifier_for_unit_against(unit_type) + self.tower_def_bonus()
 
     # ------------------------------------------------------------------
     # Power activation guards
@@ -156,6 +319,8 @@ class COState:
         return self.scop_stars * (9000 + self.power_uses * 1800)
 
     def can_activate_cop(self) -> bool:
+        if self.cop_activation_disabled:
+            return False
         if self.cop_stars is None or self._data.get("cop") is None:
             return False
         return (
@@ -180,7 +345,7 @@ class COState:
         return co_id == 18
 
     def has_luck_modifier(self) -> bool:
-        return self.co_id in (24, 28, 25, 26)  # Nell, Rachel, Flak, Jugger
+        return self.luck_bounds() is not None
 
     # ------------------------------------------------------------------
     # Javier: comm-tower dynamic bonuses
@@ -218,6 +383,21 @@ class COState:
         return (100 + self.def_modifier(unit_class)
                 + self.cop_def_modifier(unit_class)
                 + self.tower_def_bonus())
+    
+    def total_def_against(self, defender_unit_class: str, attacker_unit_type: Optional[UnitType] = None) -> int:
+        """Base 100 + DTD (with against_indirect) + active power DEF modifier + Javier tower bonus."""
+        return (100 + self.def_modifier_against(defender_unit_class, attacker_unit_type)
+                + self.cop_def_modifier(defender_unit_class)
+                + self.tower_def_bonus())
+    
+    def total_def_for_unit_against(self, defender_unit_type: UnitType, attacker_unit_type: Optional[UnitType] = None) -> int:
+        """Base 100 + DTD (with against_indirect) + active power DEF modifier + Javier tower bonus for a unit."""
+        return (
+            100
+            + self.def_modifier_for_unit_against(defender_unit_type, attacker_unit_type)
+            + self.cop_def_modifier_for_unit_against(defender_unit_type, attacker_unit_type)
+            + self.tower_def_bonus()
+        )
 
 
 # ------------------------------------------------------------------

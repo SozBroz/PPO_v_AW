@@ -9,9 +9,16 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from rl.ai_vs_ai import _MaxCalendarDaysAction
 
 
 class _FixedZipOpponent:
@@ -62,8 +69,8 @@ def _worker_bo3_game(payload: dict) -> tuple[int, int]:
     max_env_steps = payload.get("max_env_steps")
     max_p1_microsteps = payload.get("max_p1_microsteps")
     max_turns = payload.get("max_turns")
-
-    class _Opp:
+    if max_turns is None:
+        max_turns = payload.get("max_days")
         def __init__(self) -> None:
             self._m = None
 
@@ -129,18 +136,21 @@ def main() -> None:
         help="Override cap on P1 engine steps per P0 step (default: derived from max-env-steps).",
     )
     ap.add_argument(
+        "--max-days",
         "--max-turns",
+        dest="max_days",
         type=int,
         default=None,
         metavar="N",
-        help="Engine calendar tiebreak day cap (default: MAX_TURNS from engine.game).",
+        action=_MaxCalendarDaysAction,
+        help="End-inclusive engine calendar day cap (alias --max-turns deprecated).",
     )
     args = ap.parse_args()
     max_env_steps = (
         None if args.max_env_steps is None or args.max_env_steps <= 0 else int(args.max_env_steps)
     )
-    if args.max_turns is not None and int(args.max_turns) < 1:
-        raise SystemExit("--max-turns must be >= 1")
+    if args.max_days is not None and int(args.max_days) < 1:
+        raise SystemExit("--max-days must be >= 1")
     ch, df = args.challenger.resolve(), args.defender.resolve()
     if not ch.is_file():
         raise SystemExit(f"Missing challenger: {ch}")
@@ -197,7 +207,8 @@ def main() -> None:
                     "deterministic": args.deterministic,
                     "max_env_steps": max_env_steps,
                     "max_p1_microsteps": args.max_p1_microsteps,
-                    "max_turns": args.max_turns,
+                    "max_turns": args.max_days,
+                    "max_days": args.max_days,
                 }
                 for i in range(batch)
             ]
@@ -227,7 +238,8 @@ def main() -> None:
                         "deterministic": args.deterministic,
                         "max_env_steps": max_env_steps,
                         "max_p1_microsteps": args.max_p1_microsteps,
-                        "max_turns": args.max_turns,
+                        "max_turns": args.max_days,
+                        "max_days": args.max_days,
                     }
                 )[1]
                 print(f"[bo3] game {games} (sequential tail) winner={w}")
@@ -249,8 +261,8 @@ def main() -> None:
                 env_kw["max_env_steps"] = max_env_steps
             if args.max_p1_microsteps is not None:
                 env_kw["max_p1_microsteps"] = int(args.max_p1_microsteps)
-            if args.max_turns is not None:
-                env_kw["max_turns"] = int(args.max_turns)
+            if args.max_days is not None:
+                env_kw["max_turns"] = int(args.max_days)
             env = ActionMasker(
                 AWBWEnv(**env_kw),
                 lambda e: e.action_masks(),

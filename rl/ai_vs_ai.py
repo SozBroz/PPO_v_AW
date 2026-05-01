@@ -12,13 +12,13 @@ Usage
   python -m rl.ai_vs_ai --no-follow-train       # never read train.py from memory
   python -m rl.ai_vs_ai --from-latest-export    # newest ``engine_snapshot.pkl`` under
                                                 # replays/amarinner_my_games
-  python -m rl.ai_vs_ai --from-live-games-dir replays/amarinner_my_games
-                                                # one zip per game (+10d cap each)
-
-Unless ``--no-follow-train`` is set, this process scans for a **training**
+  python -m rl.ai_vs_ai --no-follow-train --map-id 123858 --tier T4 --co0 14 --co1 14 \\
+        --opening-book data/opening_books/std_pool_precombat.jsonl \\
+        --capture-move-gate 0.10 --learner-greedy-mix 0.15
 ``train.py`` process, parses its CLI, and uses that as the **base** run (same
 idea as ``SelfPlayTrainer`` / ``AWBWEnv``). **Any** ``--map-id``, ``--tier``,
-``--co0`` / ``--co1``, ``--ckpt``, or ``--capture-move-gate`` you add on the
+``--co0`` / ``--co1``, ``--ckpt``, ``--capture-move-gate``, ``--opening-book`` /
+``--opening-book-strict-co``, or ``--learner-greedy-mix`` you add on the
 ``ai_vs_ai`` command line **overrides** only those fields; everything else still
 comes from the live trainer (checkpoint dir, promoted load, curriculum
 broad prob, capture gate when not overridden, etc.).
@@ -79,6 +79,8 @@ _REPO = Path(__file__).parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from train import _parse_capture_move_gate_probability_cli
+
 from engine.action import Action, ActionType, get_legal_actions
 from engine.game import GameState, make_initial_state
 from engine.map_loader import MapData, load_map
@@ -106,6 +108,33 @@ def _default_ckpt_path() -> Path:
 _TRAIN_PY_TAIL = re.compile(r"train\.py[\"']?$", re.IGNORECASE)
 
 
+def _resolve_max_calendar_days(
+    max_days: Optional[int],
+    max_turns: Optional[int],
+    *,
+    default: int = 100,
+) -> int:
+    """Single end-inclusive calendar day cap from optional ``max_days`` / deprecated ``max_turns``."""
+    if max_days is not None and max_turns is not None and int(max_days) != int(max_turns):
+        raise ValueError("pass only one of max_days and max_turns")
+    if max_days is not None:
+        return int(max_days)
+    if max_turns is not None:
+        return int(max_turns)
+    return int(default)
+
+
+class _MaxCalendarDaysAction(argparse.Action):
+    """Warn when ``--max-turns`` is used; ``--max-days`` is canonical."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if option_string == "--max-turns":
+            sys.stderr.write(
+                "[ai_vs_ai] --max-turns is deprecated; use --max-days (same end-inclusive calendar cap).\n"
+            )
+        setattr(namespace, self.dest, int(values))
+
+
 def _log(msg: str) -> None:
     """US Eastern wall clock on every line (ISO-8601 with ms, America/New_York)."""
     ts = log_now_iso()
@@ -128,8 +157,8 @@ def _argv_for_this_module() -> list[str]:
     ``python -m rl.ai_vs_ai`` does **not** put ``-m`` in ``sys.argv``; CPython sets
     ``sys.argv[0]`` to this module's path and places all flags in ``argv[1:]``.
     Without the ``Path(sys.argv[0]) == __file__`` fast-path, the scan below could
-    treat ``--max-turns 2``'s ``2`` as a bogus "script" token and return ``[]``,
-    wiping out every CLI flag (``--max-turns``, ``--random``, …).
+    treat ``--max-days 2``'s ``2`` as a bogus "script" token and return ``[]``,
+    wiping out every CLI flag (``--max-days``, ``--max-turns``, ``--random``, …).
     """
     a = sys.argv[1:]
     if not a:
@@ -343,9 +372,14 @@ def _sample_from_train_ns(train_ns: Any, rng: random.Random) -> tuple[int, str, 
         pool: list[dict] = json.load(f)
     map_pool = pool
     if train_ns.map_id is not None:
-        map_pool = [m for m in pool if m["map_id"] == train_ns.map_id]
+        mids = train_ns.map_id
+        if isinstance(mids, int):
+            allowed = {int(mids)}
+        else:
+            allowed = {int(x) for x in mids}
+        map_pool = [m for m in pool if m["map_id"] in allowed]
         if not map_pool:
-            raise ValueError(f"follow-train: no map with map_id={train_ns.map_id}")
+            raise ValueError(f"follow-train: no map with map_id in {sorted(allowed)}")
     _std = [m for m in map_pool if m.get("type") == "std"]
     sample_map_pool = _std if _std else map_pool
     mid, tier, c0, c1, _name = sample_training_matchup(
@@ -376,11 +410,61 @@ def _merge_train_ns_with_explicit_ai_args(
     return merged
 
 
-def _capture_move_gate_effective(train_ns: Any, user: list[str]) -> bool:
-    """True if ``--capture-move-gate`` was passed on the ai_vs_ai CLI, else train's flag."""
-    if "--capture-move-gate" in user:
+def _user_mentions_capture_move_gate(argv: list[str]) -> bool:
+    """True if ``argv`` overrides capture-move-gate on the ai_vs_ai CLI."""
+    for tok in argv:
+        if tok == "--capture-move-gate" or tok.startswith("--capture-move-gate="):
+            return True
+    return False
+
+
+def _capture_move_gate_effective(train_ns: Any, user: list[str], ai_args: Any) -> float:
+    """Probability from ai_vs_ai CLI if present, else from the live trainer's argparse namespace."""
+    if _user_mentions_capture_move_gate(user):
+        return float(getattr(ai_args, "capture_move_gate", 0.0) or 0.0)
+    if train_ns is not None:
+        return float(getattr(train_ns, "capture_move_gate", 0.0) or 0.0)
+    return 0.0
+
+
+def _user_mentions_learner_greedy_mix(argv: list[str]) -> bool:
+    for tok in argv:
+        if tok == "--learner-greedy-mix" or tok.startswith("--learner-greedy-mix="):
+            return True
+    return False
+
+
+def _learner_greedy_mix_effective(train_ns: Any, user: list[str], ai_args: Any) -> float:
+    if _user_mentions_learner_greedy_mix(user):
+        return max(
+            0.0,
+            min(1.0, float(getattr(ai_args, "learner_greedy_mix", 0.0) or 0.0)),
+        )
+    if train_ns is not None:
+        return max(
+            0.0,
+            min(1.0, float(getattr(train_ns, "learner_greedy_mix", 0.0) or 0.0)),
+        )
+    return 0.0
+
+
+def _opening_book_path_effective(train_ns: Any, ai_args: Any) -> Optional[Path]:
+    p = getattr(ai_args, "opening_book", None)
+    if p is not None:
+        return Path(p)
+    if train_ns is not None:
+        t = getattr(train_ns, "opening_book", None)
+        if t is not None:
+            return Path(t)
+    return None
+
+
+def _opening_book_strict_co_effective(train_ns: Any, ai_args: Any) -> bool:
+    if bool(getattr(ai_args, "opening_book_strict_co", False)):
         return True
-    return bool(getattr(train_ns, "capture_move_gate", False))
+    if train_ns is not None:
+        return bool(getattr(train_ns, "opening_book_strict_co", False))
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -392,9 +476,15 @@ _CAPTURE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
 
 def _log_capture_move_gate_status() -> None:
     """Mirror train.py: log when legal-action mask uses capture move gate."""
-    raw = os.environ.get(_CAPTURE_GATE_ENV, "").strip().lower()
-    if raw not in ("", "0", "false", "no"):
-        _log(f"env: {_CAPTURE_GATE_ENV}={raw!r} (infantry/mech MOVE mask active)")
+    from engine.action import parse_capture_move_gate_env_value
+
+    raw = os.environ.get(_CAPTURE_GATE_ENV, "")
+    prob = parse_capture_move_gate_env_value(raw)
+    if prob > 0.0:
+        _log(
+            f"env: {_CAPTURE_GATE_ENV}={raw!r} (stochastic capture gate P={prob}; "
+            "infantry/mech MOVE may be restricted when capturable tiles are reachable)"
+        )
 
 
 def _open_replay_in_desktop_viewer(replay_zip: Path) -> None:
@@ -522,24 +612,69 @@ def _load_model(ckpt_path: Path):
 # ---------------------------------------------------------------------------
 
 def _obs_from_state(state: GameState) -> dict:
-    spatial, scalars = encode_state(state)
+    """Observation from **active** player's seat (ego-centric, matches training rollout)."""
+
+    seat = int(state.active_player)
+    spatial, scalars = encode_state(state, observer=seat)
     return {"spatial": spatial, "scalars": scalars}
 
 
-def _choose_action(state: GameState, model, rng: random.Random) -> Action:
+def _choose_action(
+    state: GameState,
+    model,
+    rng: random.Random,
+    *,
+    opening_book_mgr: Any | None = None,
+    learner_greedy_mix: float,
+) -> Action:
     """
     Pick an action for the current player.
-    Uses *model* (MaskablePPO) if provided, else uniform random over legal actions.
+    Optionally consumes ``TwoSidedOpeningBookManager`` indices (same as env opponent/book path),
+    then applies capture-greedy teacher mix on **P0** only (matching ``AWBWEnv``).
+    Uses *MaskablePPO* with ego-centric observations when *model* is set.
     """
     legal = get_legal_actions(state)
     if not legal:
         raise RuntimeError(_NO_LEGAL_ACTIONS_MSG)
 
+    seat = int(state.active_player)
+    mask = _get_action_mask(state)
+    cal = int(getattr(state, "turn", 0) or 0)
+
+    if opening_book_mgr is not None:
+        bk = opening_book_mgr.suggest_flat(seat=seat, calendar_turn=cal, action_mask=mask)
+        if bk is not None:
+            act = _flat_to_action(int(bk), state)
+            if act is not None:
+                return act
+
+    skip_greedy = False
+    if opening_book_mgr is not None and seat == 0 and float(learner_greedy_mix) > 0.0:
+        if (
+            opening_book_mgr.peek_book_candidate_flat_safe(
+                seat=0, calendar_turn=cal, action_mask=mask
+            )
+            is not None
+        ):
+            skip_greedy = True
+
+    if (
+        not skip_greedy
+        and seat == 0
+        and float(learner_greedy_mix) > 0.0
+        and rng.random() < float(learner_greedy_mix)
+    ):
+        from rl.self_play import pick_capture_greedy_flat
+
+        greedy_idx = pick_capture_greedy_flat(state, mask)
+        ga = _flat_to_action(greedy_idx, state)
+        if ga is not None:
+            return ga
+
     if model is None:
         return rng.choice(legal)
 
-    obs  = _obs_from_state(state)
-    mask = _get_action_mask(state)
+    obs = _obs_from_state(state)
     try:
         idx, _ = model.predict(obs, action_masks=mask, deterministic=False)
         action = _flat_to_action(int(idx), state)
@@ -652,13 +787,13 @@ def _apply_max_turn_tiebreak(state: GameState) -> None:
     # Keep in lockstep with ``GameState._end_turn`` calendar cap (AWBW parity).
     if p0_props > p1_props:
         state.winner = 0
-        state.win_reason = "max_turns_tiebreak"
+        state.win_reason = "max_days_tiebreak"
     elif p1_props > p0_props:
         state.winner = 1
-        state.win_reason = "max_turns_tiebreak"
+        state.win_reason = "max_days_tiebreak"
     else:
         state.winner = -1
-        state.win_reason = "max_turns_draw"
+        state.win_reason = "max_days_draw"
 
 
 def run_game(
@@ -668,15 +803,19 @@ def run_game(
     co1: Optional[int] = None,
     tier: str = "T2",
     seed: Optional[int] = None,
-    max_turns: int = 100,
+    max_days: Optional[int] = None,
+    max_turns: Optional[int] = None,
     force_random: bool = False,
     open_viewer: bool = True,
     output_dir: Optional[Path] = None,
     game_id: Optional[int] = None,
     max_total_actions: int = _DEFAULT_MAX_TOTAL_ACTIONS,
     max_actions_per_active_turn: int = _DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN,
-    capture_move_gate: bool = False,
+    capture_move_gate: float = 0.0,
     live_snapshot_path: Optional[Path] = None,
+    opening_book_path: Optional[Path] = None,
+    opening_book_strict_co: bool = False,
+    learner_greedy_mix: float = 0.0,
 ) -> Path:
     """
     Run one AI vs AI game and export an AWBW Replay Player–compatible zip.
@@ -686,9 +825,19 @@ def run_game(
     layout) and sets ``state.max_turns = current day + 10`` (see ``LIVE_SNAPSHOT_CALENDAR_CAP_DAYS``).
 
     Legal actions honor ``AWBW_CAPTURE_MOVE_GATE`` (see ``engine.action``): set the
-    environment variable before running, or pass ``capture_move_gate=True`` (same
-    effect as ``train.py --capture-move-gate``). Follow-train copies a running
-    trainer's ``--capture-move-gate`` into the environment.
+    environment variable before running, or pass ``capture_move_gate`` in ``[0,1]``
+    (same effect as ``train.py --capture-move-gate P``). Follow-train inherits a
+    live trainer's probability when the ai_vs_ai CLI does not override the flag.
+
+    Opening book: pass ``opening_book_path`` to a flat-action JSONL
+    (e.g. ``data/opening_books/std_pool_precombat.jsonl``); both seats consume lines
+    like ``TwoSidedOpeningBookManager`` in ``AWBWEnv``. Ignored for live snapshots.
+
+    ``learner_greedy_mix``: P0-only capture-greedy teacher probability (parity with
+    ``train.py --learner-greedy-mix`` / ``AWBW_LEARNER_GREEDY_MIX``); skipped when
+    seat-0 joint book expects the next legal flat.
+
+    Observations passed to MaskablePPO use **observer = active_player** (ego-centric).
 
     Turn / day semantics
     --------------------
@@ -703,14 +852,16 @@ def run_game(
     """
     rng = random.Random(seed)
 
-    if live_snapshot_path is None and max_turns < 1:
+    calendar_cap = _resolve_max_calendar_days(max_days, max_turns, default=100)
+    if live_snapshot_path is None and calendar_cap < 1:
         raise ValueError(
-            "max_turns must be >= 1 (``make_initial_state`` / engine contract). "
-            "For a very short run use e.g. --max-turns 2."
+            "max_days / max_turns must be >= 1 (``make_initial_state`` / engine contract). "
+            "For a very short run use e.g. --max-days 2."
         )
 
-    if capture_move_gate:
-        os.environ[_CAPTURE_GATE_ENV] = "1"
+    cmg = float(capture_move_gate or 0.0)
+    if cmg > 0.0:
+        os.environ[_CAPTURE_GATE_ENV] = str(cmg)
     _log_capture_move_gate_status()
 
     state: GameState
@@ -749,7 +900,7 @@ def run_game(
         )
     else:
         _log(
-            f"session: start  seed={seed!r}  max_turns={max_turns}  "
+            f"session: start  seed={seed!r}  max_days={calendar_cap}  "
             f"force_random={force_random}  map_id={map_id!r}"
         )
 
@@ -792,19 +943,63 @@ def run_game(
         rfm = getattr(map_data, "replay_first_mover", None)
         if rfm is not None:
             _mka["replay_first_mover"] = int(rfm)
-        state = make_initial_state(map_data, co0, co1, max_turns=max_turns, **_mka)
-        # Single source of truth for the play loop (must match CLI ``max_turns``).
-        state.max_turns = int(max_turns)
-    _log(
-        f"engine: ready  active_player=P{state.active_player}  day={state.turn}  "
-        f"max_turns={state.max_turns}  done={state.done}"
-    )
+        state = make_initial_state(map_data, co0, co1, max_days=calendar_cap, **_mka)
+        # Single source of truth for the play loop (must match CLI ``max_days``).
+        state.max_turns = int(calendar_cap)
+        _log(
+            f"engine: ready  active_player=P{state.active_player}  day={state.turn}  "
+            f"max_days={state.max_turns}  done={state.done}"
+        )
 
     # ---- Output paths (resolved up front so error handler can also use them) ----
     gid = game_id or snapshot_games_id or (int(time.time()) % 999000 + 1000)
     out_dir = output_dir or _REPLAY_OUT
     out_path = Path(out_dir) / f"{gid}.zip"
     start_date_str = log_now_wall()
+
+    lgm = max(0.0, min(1.0, float(learner_greedy_mix or 0.0)))
+    from rl.env import LEARNER_GREEDY_MIX_ENV
+
+    if lgm > 0.0:
+        os.environ[LEARNER_GREEDY_MIX_ENV] = str(lgm)
+        _log(f"env: {LEARNER_GREEDY_MIX_ENV}={lgm!r}")
+    else:
+        os.environ.pop(LEARNER_GREEDY_MIX_ENV, None)
+
+    opening_book_mgr: Any | None = None
+    if live_snapshot_path is None and opening_book_path is not None:
+        p_ob = Path(opening_book_path)
+        if not p_ob.is_file():
+            _log(f"opening_book: not found ({p_ob.resolve()}) — skipping")
+        else:
+            try:
+                from rl.opening_book import TwoSidedOpeningBookManager
+
+                ob_seed = int((seed if seed is not None else gid) ^ 0xABC5_DEE5) & (
+                    (1 << 31) - 1
+                )
+                opening_book_mgr = TwoSidedOpeningBookManager(
+                    p_ob,
+                    seats="both",
+                    prob=1.0,
+                    strict_co=bool(opening_book_strict_co),
+                    max_day=None,
+                    seed=int(ob_seed),
+                )
+                epi = int(gid) % (2**31 - 2)
+                opening_book_mgr.on_episode_start(
+                    episode_id=max(1, epi),
+                    map_id=int(map_id),
+                    co_ids=[int(co0), int(co1)],
+                )
+                fld = opening_book_mgr.log_fields()
+                _log(
+                    f"opening_book: {p_ob.name}  strict_co={opening_book_strict_co}  "
+                    f"id_p0={fld.get('opening_book_id_p0')!r}  id_p1={fld.get('opening_book_id_p1')!r}"
+                )
+            except Exception as exc:
+                _log(f"opening_book: init failed ({exc!r}) — skipping")
+                opening_book_mgr = None
 
     # ---- Snapshot collection ----
     # Take one snapshot at the start of EACH player-turn (after END_TURN processes)
@@ -854,8 +1049,8 @@ def run_game(
             # when P1 ends — see engine). Always compare to ``state.max_turns``.
             if state.turn > state.max_turns:
                 _log(
-                    f"play: day limit — turn {state.turn} > cap {state.max_turns} "
-                    "(property tiebreak / stop)"
+                    f"play: day limit — day {state.turn} > cap {state.max_turns} "
+                    "(end-inclusive calendar cap; property tiebreak / stop)"
                 )
                 _apply_max_turn_tiebreak(state)
                 break
@@ -868,7 +1063,13 @@ def run_game(
                 raise RuntimeError(_FUSE_PER_TURN_MSG)
 
             turn_before = int(state.turn)
-            action = _choose_action(state, model, rng)
+            action = _choose_action(
+                state,
+                model,
+                rng,
+                opening_book_mgr=opening_book_mgr,
+                learner_greedy_mix=lgm,
+            )
             prev_player = state.active_player
             state, _reward, _done = state.step(action)
             action_count += 1
@@ -905,7 +1106,7 @@ def run_game(
 
             if state.turn > state.max_turns and not state.done:
                 _log(
-                    f"play: day limit after step — turn {state.turn} > {state.max_turns}"
+                    f"play: day limit after step — day {state.turn} > {state.max_turns}"
                 )
                 _apply_max_turn_tiebreak(state)
                 break
@@ -1022,6 +1223,7 @@ def run_game(
         "co1": co1,
         "tier": tier,
         "turns": state.turn,
+        "days": state.turn,
         "winner": winner_str,
         "win_reason": state.win_reason,
         "n_actions_full_trace": len(state.full_trace),
@@ -1243,6 +1445,7 @@ def _dump_partial_replay_on_failure(
         "co1":                  co1,
         "tier":                 tier,
         "turns":                state.turn,
+        "days":                 state.turn,
         "winner":               winner_label,
         "win_reason":           state.win_reason,
         "n_actions_full_trace": len(full_trace_copy),
@@ -1319,6 +1522,7 @@ def _save_trace(
         "co1": co1,
         "tier": tier,
         "turns": state.turn,
+        "days": state.turn,
         "winner": winner_str,
         "win_reason": state.win_reason,
         "n_actions_full_trace": len(state.full_trace),
@@ -1385,14 +1589,17 @@ def main() -> None:
     )
     parser.add_argument("--seed",     type=int,  default=None, help="RNG seed")
     parser.add_argument(
+        "--max-days",
         "--max-turns",
+        dest="max_days",
         type=int,
         default=100,
+        metavar="N",
+        action=_MaxCalendarDaysAction,
         help=(
-            "Calendar day cap: matches engine ``GameState.turn`` / tie-break limit "
-            "(the counter advances when P1 ends their segment; default: 100). "
-            "When it would exceed this value, the game stops with the same property "
-            "tiebreak as the engine. Must be >= 1. Short smoke: --max-turns 2."
+            "End-inclusive calendar day cap (play days 1..N; tiebreak when day N+1 would start). "
+            "Same as engine ``GameState.max_turns``. Default 100. "
+            "Alias ``--max-turns`` (deprecated). Short smoke: --max-days 2."
         ),
     )
     parser.add_argument("--random",   action="store_true",
@@ -1401,10 +1608,46 @@ def main() -> None:
                         help="Do not launch AWBW Replay Player (or folder fallback) after export")
     parser.add_argument(
         "--capture-move-gate",
+        nargs="?",
+        const=1.0,
+        default=0.0,
+        metavar="P",
+        type=_parse_capture_move_gate_probability_cli,
+        help=(
+            "Sets AWBW_CAPTURE_MOVE_GATE=stochastic probability P in [0,1] (same as "
+            "train.py). Omit the value for P=1. See engine.action capture gate."
+        ),
+    )
+    parser.add_argument(
+        "--opening-book",
+        type=Path,
+        default=None,
+        metavar="JSONL",
+        help=(
+            "Flat-action opening book for both seats "
+            "(e.g. data/opening_books/std_pool_precombat.jsonl). "
+            "Ignored for --from-live-* snapshot loads. "
+            "When following train: used if set here, else trainer --opening-book."
+        ),
+    )
+    parser.add_argument(
+        "--opening-book-strict-co",
         action="store_true",
         help=(
-            "Set AWBW_CAPTURE_MOVE_GATE=1 for this run (same legal-action mask as "
-            "train.py --capture-move-gate; infantry/mech MOVE restricted when capture tiles reachable)."
+            "Restrict book lines to per-seat CO metadata. "
+            "When following train: true if this flag or trainer --opening-book-strict-co."
+        ),
+    )
+    parser.add_argument(
+        "--learner-greedy-mix",
+        type=float,
+        default=0.0,
+        metavar="P",
+        help=(
+            "P0-only: with probability P in [0,1], act as capture-greedy teacher "
+            "(train.py / AWBW_LEARNER_GREEDY_MIX); skipped when a seat-0 book line "
+            "expects the next flat. When following train: overridden by this flag if "
+            "you pass it; else copied from train --learner-greedy-mix."
         ),
     )
     parser.add_argument("--out-dir",  type=Path, default=None,
@@ -1423,8 +1666,9 @@ def main() -> None:
         "--max-actions-per-active-turn", type=int,
         default=_DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN,
         help=(
-            "Abort and dump a partial replay if a single active player "
-            "consumes this many consecutive actions without ending their turn "
+            "Fuse: cap actions within one seat's player-turn through END_TURN "
+            "(not a calendar-day limit). Abort and dump a partial replay if that seat "
+            "takes this many consecutive actions without ending their turn "
             f"(default: {_DEFAULT_MAX_ACTIONS_PER_ACTIVE_TURN})."
         ),
     )
@@ -1465,8 +1709,8 @@ def main() -> None:
         ),
     )
     args = parser.parse_args(user)
-    if args.max_turns < 1:
-        parser.error("--max-turns must be >= 1 (try 2 for a very short run)")
+    if args.max_days < 1:
+        parser.error("--max-days must be >= 1 (try 2 for a very short run)")
     # If CPython/launcher preflags made ``user`` empty or incomplete, the flag
     # can still appear in raw ``sys.argv``; honor it so ``--no-follow-train`` is reliable.
     if not args.no_follow_train and any(x == "--no-follow-train" for x in sys.argv[1:]):
@@ -1493,7 +1737,7 @@ def main() -> None:
             co1=0,  # unused
             tier="T2",  # unused
             seed=args.seed,
-            max_turns=args.max_turns,  # ignored for live; kept for API
+            max_days=args.max_days,  # ignored for live; kept for API
             force_random=args.random,
             open_viewer=open_viewer,
             output_dir=args.out_dir,
@@ -1572,8 +1816,14 @@ def main() -> None:
                 for n in ("map_id", "ckpt", "co0", "co1", "tier")
                 if hasattr(args, n)
             ]
-            if "--capture-move-gate" in user:
+            if _user_mentions_capture_move_gate(user):
                 override_bits.append("capture-move-gate")
+            if getattr(args, "opening_book", None) is not None:
+                override_bits.append("opening-book")
+            if getattr(args, "opening_book_strict_co", False):
+                override_bits.append("opening-book-strict-co")
+            if _user_mentions_learner_greedy_mix(user):
+                override_bits.append("learner-greedy-mix")
             if override_bits:
                 _log(
                     "follow-train: CLI overrides on top of train.py: "
@@ -1584,7 +1834,7 @@ def main() -> None:
                 f"(map_id={merged.map_id} tier={merged.tier!r} "
                 f"co_p0={merged.co_p0} co_p1={merged.co_p1} "
                 f"broad_prob={merged.curriculum_broad_prob} "
-                f"capture_move_gate={_capture_move_gate_effective(train_ns, user)})"
+                f"capture_move_gate={_capture_move_gate_effective(train_ns, user, args)})"
             )
             rng = random.Random(args.seed) if args.seed is not None else random.Random()
             try:
@@ -1605,14 +1855,21 @@ def main() -> None:
                     co1=co1,
                     tier=tier,
                     seed=args.seed,
-                    max_turns=args.max_turns,
+                    max_days=args.max_days,
                     force_random=args.random,
                     open_viewer=not args.no_open,
                     output_dir=args.out_dir,
                     game_id=args.game_id,
                     max_total_actions=args.max_total_actions,
                     max_actions_per_active_turn=args.max_actions_per_active_turn,
-                    capture_move_gate=_capture_move_gate_effective(train_ns, user),
+                    capture_move_gate=_capture_move_gate_effective(train_ns, user, args),
+                    opening_book_path=_opening_book_path_effective(train_ns, args),
+                    opening_book_strict_co=_opening_book_strict_co_effective(
+                        train_ns, args
+                    ),
+                    learner_greedy_mix=_learner_greedy_mix_effective(
+                        train_ns, user, args
+                    ),
                 )
                 return
         else:
@@ -1628,14 +1885,17 @@ def main() -> None:
         co1=getattr(args, "co1", None),
         tier=getattr(args, "tier", "T2"),
         seed=args.seed,
-        max_turns=args.max_turns,
+        max_days=args.max_days,
         force_random=args.random,
         open_viewer=not args.no_open,
         output_dir=args.out_dir,
         game_id=args.game_id,
         max_total_actions=args.max_total_actions,
         max_actions_per_active_turn=args.max_actions_per_active_turn,
-        capture_move_gate=args.capture_move_gate,
+        capture_move_gate=_capture_move_gate_effective(None, user, args),
+        opening_book_path=_opening_book_path_effective(None, args),
+        opening_book_strict_co=_opening_book_strict_co_effective(None, args),
+        learner_greedy_mix=_learner_greedy_mix_effective(None, user, args),
     )
 
 

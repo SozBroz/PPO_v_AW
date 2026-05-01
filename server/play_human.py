@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import random
 import threading
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+from uuid import UUID
 
 import numpy as np
 
@@ -39,6 +41,67 @@ from server.write_watch_state import board_dict
 ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
+P1_OPENING_BOOK_JSONL = ROOT / "data" / "opening_books" / "std_pool_precombat.jsonl"
+
+_OPENING_BOOK_INDEX: Any | None = None
+_OPENING_BOOK_INDEX_KEY: Optional[str] = None
+
+
+def _p1_opening_book_strict_co() -> bool:
+    """When true, P1 uses only book lines whose stored CO matches the bot (opt-in via env)."""
+
+    raw = os.environ.get("AWBW_PLAY_OPENING_BOOK_STRICT_CO", "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _std_pool_opening_book_index():
+    """Parse ``std_pool_precombat.jsonl`` once per path (lazy, thread-safe-enough under GIL writes)."""
+
+    global _OPENING_BOOK_INDEX, _OPENING_BOOK_INDEX_KEY
+    path = P1_OPENING_BOOK_JSONL
+    if not path.is_file():
+        _OPENING_BOOK_INDEX = None
+        _OPENING_BOOK_INDEX_KEY = None
+        return None
+    key = str(path.resolve())
+    if _OPENING_BOOK_INDEX is None or _OPENING_BOOK_INDEX_KEY != key:
+        from rl.opening_book import OpeningBookIndex
+
+        _OPENING_BOOK_INDEX = OpeningBookIndex.from_jsonl(path)
+        _OPENING_BOOK_INDEX_KEY = key
+    return _OPENING_BOOK_INDEX
+
+
+def _spawn_p1_opening_book_ctl(
+    map_id: int, bot_co_id: int, session_id: str
+) -> Optional[Any]:
+    """P1 OpeningBookController for this session, or None if file missing / no eligible line."""
+
+    from rl.opening_book import OpeningBookController
+
+    idx = _std_pool_opening_book_index()
+    if idx is None:
+        return None
+    try:
+        seed = int(UUID(session_id).int % (2**63))
+    except Exception:
+        seed = hash(session_id)
+    ctl = OpeningBookController(
+        idx,
+        seat=BOT_PLAYER,
+        strict_co=_p1_opening_book_strict_co(),
+        rng=random.Random((seed ^ 0x9E3779B9) & (2**63 - 1)),
+        max_calendar_turn=None,
+    )
+    ctl.on_episode_start(
+        episode_id=seed & 0x7FFFFFFF,
+        map_id=int(map_id),
+        co_id_for_seat=int(bot_co_id),
+        enabled=True,
+    )
+    if ctl.book_id is None:
+        return None
+    return ctl
 
 # Seat invariants — match training: human always P0 (red / first seat), bot P1 (blue / second).
 # Ego-centric encoder: human demos use observer=HUMAN_PLAYER; bot inference uses observer=BOT_PLAYER.
@@ -49,9 +112,9 @@ BOT_PLAYER = 1
 _SESSION_TTL_S: Optional[float] = None
 
 _DEFAULT_MAP_ID = 123858  # Misery — MASTERPLAN Stage 1 / train.py narrow bootstrap
-_DEFAULT_TIER = "T3"
-_DEFAULT_HUMAN_CO = 1   # Andy
-_DEFAULT_BOT_CO = 1     # Andy mirror (same as typical `train.py --co-p0 1 --co-p1 1`)
+_DEFAULT_TIER = "T4"  # Jess (14) appears under T4 for this map only (Andy etc. remain T3)
+_DEFAULT_HUMAN_CO = 14  # Jess mirror for /play defaults
+_DEFAULT_BOT_CO = 14
 
 _sessions: dict[str, GameState] = {}
 _session_meta: dict[str, dict[str, Any]] = {}
@@ -299,24 +362,49 @@ def build_play_payload(
         "map_id": getattr(state.map_data, "map_id", None),
         "tier": getattr(state, "tier_name", None),
         "bot_mode": _session_meta.get(session_id, {}).get("bot_mode", "ppo"),
+        **_session_meta_opening_book_log(session_id),
     }
 
 
-def _run_bot_turn(state: GameState, model: Optional[Any]) -> None:
+def _session_meta_opening_book_log(session_id: str) -> dict[str, Any]:
+    ctl = _session_meta.get(session_id, {}).get("p1_opening_book")
+    return ctl.log_fields() if ctl is not None else {}
+
+
+def _run_bot_turn(
+    state: GameState,
+    model: Optional[Any],
+    *,
+    p1_opening_book: Any | None = None,
+) -> None:
     """Step bot until human SELECT or terminal. Caller holds game lock per session.
 
     ``model`` is MaskablePPO when a checkpoint loaded; ``None`` means uniform random
     over legal flat actions (same mask contract as training).
+    When ``p1_opening_book`` is active (same flat schema as AWBWEnv), P1 consumes
+    ``std_pool_precombat.jsonl`` lines until desync/exhaust then falls back.
     """
     while not state.done and state.active_player == BOT_PLAYER:
         mask = _get_action_mask(state)
-        if model is not None:
+        calendar_turn = int(getattr(state, "turn", 0) or 0)
+        idx: int | None = None
+        use_book = (
+            p1_opening_book is not None
+            and getattr(p1_opening_book, "book_id", None) is not None
+            and not getattr(p1_opening_book, "desync", False)
+        )
+        if use_book:
+            picked = p1_opening_book.suggest_flat(
+                calendar_turn=calendar_turn, action_mask=mask
+            )
+            idx = int(picked) if picked is not None else None
+        if idx is None and model is not None:
             obs_sp, obs_sc = encode_state(state, observer=BOT_PLAYER)
             obs = {"spatial": obs_sp, "scalars": obs_sc}
             with _model_lock:
                 action_arr, _ = model.predict(obs, action_masks=mask, deterministic=False)
             idx = int(np.asarray(action_arr).reshape(-1)[0])
-        else:
+        elif idx is None:
             legal_flat = np.flatnonzero(mask)
             if legal_flat.size == 0:
                 break
@@ -544,6 +632,9 @@ def new_session(
     state = make_initial_state(map_data, p0, p1, **_mkp)
 
     sid = str(uuid.uuid4())
+    p1_book = _spawn_p1_opening_book_ctl(mid, p1, sid)
+    display_bot_mode = f"book+{bot_mode}" if p1_book is not None else bot_mode
+
     with _session_io_lock:
         _sessions[sid] = state
         _session_meta[sid] = {
@@ -551,12 +642,13 @@ def new_session(
             "tier": tier_name,
             "p0_co": p0,
             "p1_co": p1,
-            "bot_mode": bot_mode,
+            "bot_mode": display_bot_mode,
+            "p1_opening_book": p1_book,
         }
 
         # make_initial_state can open on P1 (asymmetric predeploy); run the bot first so the human view is always on P0's clock.
         if state.active_player == BOT_PLAYER:
-            _run_bot_turn(state, model)
+            _run_bot_turn(state, model, p1_opening_book=p1_book)
 
     payload = build_play_payload(sid, state, ok=True, error=None)
     return payload, None
@@ -628,6 +720,7 @@ def apply_human_step(
         state.step(action)
 
         if not state.done and state.active_player == BOT_PLAYER:
-            _run_bot_turn(state, model)
+            ob = _session_meta.get(session_id, {}).get("p1_opening_book")
+            _run_bot_turn(state, model, p1_opening_book=ob)
 
         return build_play_payload(session_id, state), None

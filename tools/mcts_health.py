@@ -157,7 +157,7 @@ def _rows_for_machine(
             continue
         # Finished-game records have ``winner`` and ``turns``
         # Finished-game writer always sets ``turns``; ignore stray lines
-        if "turns" not in row:
+        if "turns" not in row and "days" not in row:
             continue
         out.append(row)
     return out
@@ -278,7 +278,7 @@ def compute_health(machine_id: str, logs_dir: Path, window: int = 200) -> MctsHe
 
         wins.append(1.0 if game_log_row_learner_win(r) else 0.0)
 
-        t = r.get("turns")
+        t = r.get("days", r.get("turns"))
         try:
             t_f = float(t) if t is not None else 0.0
         except (TypeError, ValueError):

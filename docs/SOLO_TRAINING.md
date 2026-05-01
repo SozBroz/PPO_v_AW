@@ -58,7 +58,7 @@ The bootstrap traps SIGINT/SIGTERM, stops the orchestrator then `train.py`, wait
 
 ## Operator arg override and apply gate
 
-1. Copy `fleet/<id>/proposed_args.json` to `fleet/<id>/operator_train_args_override.json`, keep a top-level `"args": { ... }` map, and **only** list the flags you want to force (e.g. `"--n-envs": 12`). Flags you omit keep the normal probe + curriculum + MCTS merge for that tick. Delete the file to revert; the next orchestrator refresh rebuilds `proposed_args.json` without those keys.
+1. Copy `fleet/<id>/proposed_args.json` to `fleet/<id>/operator_train_args_override.json`, keep a top-level `"args": { ... }` map, and **only** list the flags you want to force (e.g. `"--n-envs": 12`, or `"--max-days": 50` for the end-inclusive engine calendar cap — same value as deprecated `"--max-turns"`). Flags you omit keep the normal probe + curriculum + MCTS merge for that tick. Delete the file to revert; the next orchestrator refresh rebuilds `proposed_args.json` without those keys.
 2. To **apply** drift (hard restart or allow soft reconfig on PPO geometry), start the solo bootstrap with **`--auto-apply`** so `fleet_orchestrator` is launched with the same flag. That is the gate for Tier-1 train restarts when `proposed_args.json` and `applied_args.json` differ (including after `operator_train_args_override.json` merges on refresh). The `auto_apply` field inside `proposed_args.json` is preserved when the orchestrator regenerates the file, but it does **not** block restarts; only running without orchestrator `--auto-apply` does (audit: `orchestrator_auto_apply_off`).
 3. Hash alignment: `applied_args.json` must match the `args` hash implied by `proposed_args.json` if you want **no** restart on the next tick (same as before).
 

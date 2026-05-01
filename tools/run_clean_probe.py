@@ -186,7 +186,7 @@ def run_single_game(
 
     The game is run with all scaffolds forced to zero:
         --learner-greedy-mix 0
-        --capture-move-gate false
+        (capture-move-gate omitted; default off)
         --opening-book-prob 0.0
         --cold-opponent random
     """
@@ -201,7 +201,6 @@ def run_single_game(
         "--co-p0", str(co_p0),
         "--co-p1", str(co_p1),
         "--learner-greedy-mix", "0.0",
-        "--capture-move-gate", "false",
         "--opening-book-prob", "0.0",
         "--cold-opponent", "random",
         "--n-envs", "1",
@@ -232,7 +231,7 @@ def run_single_game(
         return {
             "map_id": map_id, "co_p0": co_p0, "co_p1": co_p1,
             "seed": seed, "done": False, "truncated": True,
-            "win": False, "turns": 0, "wall_s": timeout,
+            "win": False, "turns": 0, "days": 0, "wall_s": timeout,
             "first_learner_capture_step": None, "captures_by_day5": 0,
             "income_by_day5": 0, "error": "timeout",
         }
@@ -240,7 +239,7 @@ def run_single_game(
         return {
             "map_id": map_id, "co_p0": co_p0, "co_p1": co_p1,
             "seed": seed, "done": False, "truncated": True,
-            "win": False, "turns": 0, "wall_s": 0.0,
+            "win": False, "turns": 0, "days": 0, "wall_s": 0.0,
             "first_learner_capture_step": None, "captures_by_day5": 0,
             "income_by_day5": 0, "error": str(exc),
         }
@@ -251,7 +250,7 @@ def _parse_game_output(output: str, elapsed: float) -> dict:
     # Look for JSON lines in output
     result = {
         "done": False, "truncated": False, "win": False,
-        "turns": 0, "wall_s": elapsed,
+        "turns": 0, "days": 0, "wall_s": elapsed,
         "first_learner_capture_step": None,
         "captures_by_day5": 0,
         "income_by_day5": 0,
@@ -265,7 +264,9 @@ def _parse_game_output(output: str, elapsed: float) -> dict:
                 if obj["event"] == "game_done" or obj.get("done"):
                     result["done"] = True
                     result["win"] = bool(obj.get("learner_win", obj.get("winner") == 0))
-                    result["turns"] = int(obj.get("turns", 0))
+                    _td = obj.get("days", obj.get("turns", 0))
+                    result["turns"] = int(_td)
+                    result["days"] = int(_td)
                     result["truncated"] = bool(obj.get("truncated", False))
                     result["first_learner_capture_step"] = obj.get("first_p0_capture_p0_step")
                     result["captures_by_day5"] = int(obj.get("captures_completed_p0", 0))

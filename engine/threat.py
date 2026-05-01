@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from engine.action import compute_reachable_costs, get_attack_targets, _build_occupancy
-from engine.combat import calculate_damage
+from engine.combat import _is_dual_luck_bounds, calculate_damage
 from engine.game import GameState
 from engine.terrain import get_terrain
 from engine.unit import UNIT_STATS, Unit, UnitType
@@ -180,14 +180,24 @@ def _max_incoming_damage_to_unit(
             tr, tc = target.pos
             att_terra = get_terrain(state.map_data.terrain[move_pos[0]][move_pos[1]])
             def_terra = get_terrain(state.map_data.terrain[tr][tc])
+            atk_co = state.co_states[att.player]
+            bnds = atk_co.luck_bounds()
+            luck_kw: dict = {}
+            if bnds is not None and _is_dual_luck_bounds(bnds):
+                # Dual-luck COs need both digits pinned — omitting ``luck_roll_bad``
+                # would draw randomly from ``luck_rng=None``.
+                luck_kw["luck_roll"] = 9
+                luck_kw["luck_roll_bad"] = 0
+            else:
+                luck_kw["luck_roll"] = 5
             dmg = calculate_damage(
                 att,
                 target,
                 att_terra,
                 def_terra,
-                state.co_states[att.player],
+                atk_co,
                 state.co_states[target.player],
-                luck_roll=5,
+                **luck_kw,
             )
             if dmg is not None:
                 best = max(best, float(dmg))

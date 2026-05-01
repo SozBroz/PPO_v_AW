@@ -68,6 +68,40 @@ ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
 MAPS_DIR = ROOT / "data" / "maps"
 
+
+def coerce_map_id_filter(raw: int | Sequence[int] | None) -> list[int] | None:
+    """``None`` = full GL pool; singleton or sequence → deduped ordered id list."""
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        n = int(raw)
+        if n < 0:
+            raise ValueError(f"map_id must be non-negative, got {n}")
+        return [n]
+    out: list[int] = []
+    for x in raw:
+        n = int(x)
+        if n < 0:
+            raise ValueError(f"map_id must be non-negative, got {n}")
+        if n not in out:
+            out.append(n)
+    if not out:
+        raise ValueError("map id list must be non-empty")
+    return out
+
+
+def coerce_co_selection(raw: int | Sequence[int] | None) -> list[int] | None:
+    """``None`` = sample CO from tier each episode; else uniform choice from list per reset."""
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        return [int(raw)]
+    out = [int(x) for x in raw]
+    if not out:
+        raise ValueError("CO list must be non-empty")
+    return list(dict.fromkeys(out))
+
+
 # region agent log
 _AGENT_DEBUG_LOG_PATH = ROOT / "debug-a6d5a1.log"
 _AGENT_DEBUG_SESSION_ID = "a6d5a1"
@@ -94,10 +128,17 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict
 # Session game counter: set by training (SelfPlayTrainer) so all SubprocVecEnv workers share one sequence.
 SESSION_GAME_COUNTER_DB_ENV = "AWBW_SESSION_GAME_COUNTER_DB"
 
+# Calendar milestones (``GameState.turn`` — 1-indexed day counter) where we snapshot
+# ``neutral_income_properties`` into game_log rows (see AWBWEnv._log_finished_game).
+GAME_LOG_NEUTRAL_INCOME_SNAPSHOT_DAYS = frozenset((7, 9, 11, 13, 15))
+
 # When set to "1", each finished game in game_log.jsonl carries a `frames` array with one
 # board snapshot per engine step (P0 + opponent substeps). Disabled by default because the
 # payload grows roughly O(turns * actions_per_turn) per record.
 LOG_REPLAY_FRAMES_ENV = "AWBW_LOG_REPLAY_FRAMES"
+# Per seat, each curriculum episode: probability COP activation is disabled (SCOP
+# unchanged). Live snapshots skip this. Override with ``cop_disable_per_seat_p`` kwarg.
+COP_DISABLE_PER_SEAT_P_ENV = "AWBW_COP_DISABLE_PER_SEAT_P"
 
 # Slow-game threshold (wall seconds). Episodes exceeding this get a compact red-flag
 # line appended to logs/slow_games.jsonl alongside the normal game_log row. Override
@@ -172,10 +213,10 @@ PREALLOCATED_BUFFERS_ENV = "AWBW_PREALLOCATED_BUFFERS"
 #                       a one-time kill bonus (see PHI_ENEMY_KILL_BONUS_FRAC,
 #                       _phi_enemy_kill_one_time_bonus).
 #                       On engine day-cap resolution (``win_reason``): replace the
-#                       usual sparse ±1/0 with scaled outcomes — max_turns_tie or
-#                       (legacy) max_turns_draw → −0.1; max_turns_tiebreak win → +0.5;
+#                       usual sparse ±1/0 with scaled outcomes — max_days_tie or
+#                       max_days_draw → −0.1; max_days_tiebreak win → +0.5;
 #                       tiebreak loss with
-#                       ≥2 property deficit → −0.5 (else −1). See
+#                       ≥1 property deficit → −0.5 (else −1). See
 #                       _apply_phi_sparse_terminal_replacement.
 #   "level"           — legacy property + unit-value differential (me − enemy).
 # When mode is "phi", AWBW_PHI_PROFILE picks defaults for α,β,κ if the
@@ -205,6 +246,30 @@ PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
 # in the same value units as the army line (α × cost × hp/100), scaled
 # with ``_phi_alpha`` so it tracks profile/env overrides.
 PHI_ENEMY_KILL_BONUS_FRAC = 0.3
+# Φ: CO power usage (per acting player; standard step maps to learner frame via
+# ``_signed_engine_reward``). Attack bonus uses pre-step ``state`` so only
+# attacks *after* COP/SCOP activation on that turn qualify (``cop_active`` /
+# ``scop_active`` on the pre-action state).
+# Base Φ bonuses before meter scaling (see ``PHI_VON_BOLT_SCOP_REF_THRESHOLD``).
+PHI_COP_ACTIVATION_BONUS = 0.09
+PHI_SCOP_ACTIVATION_BONUS = 0.18
+PHI_POWER_TURN_ATTACK_BONUS = 0.001
+# Von Bolt (co_id 30): 10★ SCOP, no COP — ``data/co_data.json``. Activation
+# bonuses multiply by (this power's ``_cop_threshold`` / ``_scop_threshold``)
+# ÷ this value so cheap meters (Adder) earn less than expensive ones (Hawke)
+# on each COP/SCOP tap. Uses AWBW first-segment formula ``stars × 9000`` as
+# the reference bar (same unit as ``COState._scop_threshold`` at power_uses=0
+# for a 10★ SCOP).
+PHI_VON_BOLT_SCOP_STARS = 10
+PHI_VON_BOLT_SCOP_REF_THRESHOLD = float(PHI_VON_BOLT_SCOP_STARS * 9000)
+
+# Engine calendar day-cap outcomes (:meth:`GameState._end_turn`). Canonical ``max_days_*``;
+# ``max_turns_*`` kept for log/replay compatibility.
+PHI_DAY_CAP_DRAWLIKE = frozenset(
+    {"max_days_draw", "max_days_tie", "max_turns_draw", "max_turns_tie"}
+)
+PHI_DAY_CAP_TIEBREAK = frozenset({"max_days_tiebreak", "max_turns_tiebreak"})
+PHI_DAY_CAP_REASONS = PHI_DAY_CAP_DRAWLIKE | PHI_DAY_CAP_TIEBREAK
 
 
 def _env_truthy(name: str) -> bool:
@@ -219,22 +284,22 @@ _local_session_game_count = 0
 
 def _synthetic_env_cap_property_tiebreak(p0_props: int, p1_props: int) -> tuple[int, str]:
     """
-    P0 vs P1 ``count_properties`` margin — same rule as engine calendar max-turns
+    P0 vs P1 ``count_properties`` — same rule as engine calendar max-turns
     (``engine.game.GameState`` end of ``_end_turn`` when ``turn > max_turns``):
-    |Δ| ≤ 1 → draw; else the leader wins. Used for ``game_log`` only when the
-    episode is env-truncated (``max_env_steps`` / ``max_p1_microsteps``) and the
-    engine never set ``winner`` / ``win_reason``.
+    strictly more properties wins; equal counts draw. Used for ``game_log`` only
+    when the episode is env-truncated (``max_env_steps`` / ``max_p1_microsteps``)
+    and the engine never set ``winner`` / ``win_reason``.
 
     Return value is (engine_seat_winner, win_reason) with -1 for draw. Reasons
     ``env_step_cap_*`` are only for env truncation (``max_env_steps`` / ``max_p1_microsteps``),
-    distinct from calendar ``max_turns_tie`` / ``max_turns_tiebreak``.
+    distinct from calendar ``max_days_tie`` / ``max_days_tiebreak`` (and legacy ``max_turns_*``).
     """
     d = int(p0_props) - int(p1_props)
-    if abs(d) <= 1:
-        return -1, "env_step_cap_tie"
-    if d >= 2:
+    if d > 0:
         return 0, "env_step_cap_tiebreak"
-    return 1, "env_step_cap_tiebreak"
+    if d < 0:
+        return 1, "env_step_cap_tiebreak"
+    return -1, "env_step_cap_tie"
 
 
 def _resolve_opponent_critic_model(opp: object) -> Any:
@@ -508,6 +573,59 @@ def _strip_non_infantry_builds(
                 mask[idx] = False
 
 
+def _tier_order_num(tier_name: str) -> int:
+    """Numeric ordering for GL tier rows (TL < T0 < T1 < …). Unknown names → -2."""
+    if not str(tier_name).startswith("T"):
+        return -2
+    if tier_name == "TL":
+        return -1
+    rest = tier_name[1:]
+    if rest.isdigit():
+        return int(rest)
+    return -2
+
+
+def _resolve_named_tier_row(meta: dict, tier_name: str) -> dict:
+    """
+    Resolve a pinned tier name to a roster dict usable for curriculum sampling.
+
+    Training follows operator intent: use the named tier row's ``co_ids`` even when
+    the row is ``enabled: false`` on a map (GL ladder flags differ from sim roster).
+    If that row has no IDs, merge IDs from enabled tiers at or above this tier's rank.
+    """
+    tiers = meta.get("tiers") or []
+    row = next((t for t in tiers if t.get("tier_name") == tier_name), None)
+    if row is None:
+        raise ValueError(
+            f"Map {meta.get('name', meta['map_id'])}: unknown tier {tier_name!r}"
+        )
+    raw_ids = list(row.get("co_ids") or [])
+    if raw_ids:
+        return row
+    need = _tier_order_num(tier_name)
+    enabled = [t for t in tiers if t.get("enabled") and t.get("co_ids")]
+    at_or_above = [
+        t for t in enabled if _tier_order_num(str(t.get("tier_name", ""))) >= need
+    ]
+    pool_src = at_or_above if at_or_above else enabled
+    merged: list[int] = []
+    seen: set[int] = set()
+    for t in sorted(pool_src, key=lambda x: _tier_order_num(str(x.get("tier_name", "")))):
+        for cid in t.get("co_ids") or []:
+            ci = int(cid)
+            if ci not in seen:
+                seen.add(ci)
+                merged.append(ci)
+    if not merged:
+        raise ValueError(
+            f"Map {meta.get('name', meta['map_id'])}: tier {tier_name!r} has no CO roster "
+            "and no fallback tiers provided CO ids"
+        )
+    out = dict(row)
+    out["co_ids"] = merged
+    return out
+
+
 def _is_co_allowed_in_tier(meta: dict, tier_name: str, co_id: int) -> bool:
     """
     Check if a CO is allowed in a tier based on hierarchy.
@@ -557,8 +675,8 @@ def _is_co_allowed_in_tier(meta: dict, tier_name: str, co_id: int) -> bool:
 def sample_training_matchup(
     sample_map_pool: list[dict],
     *,
-    co_p0: int | None = None,
-    co_p1: int | None = None,
+    co_p0: int | Sequence[int] | None = None,
+    co_p1: int | Sequence[int] | None = None,
     tier_name: str | None = None,
     curriculum_broad_prob: float = 0.0,
     rng: random.Random | None = None,
@@ -569,7 +687,18 @@ def sample_training_matchup(
     Mirrors :meth:`AWBWEnv._sample_config` (same distribution as training
     for the given curriculum knobs). When ``rng`` is ``None``, uses the
     global ``random`` module like the env does on each ``reset``.
+
+    ``co_p0`` / ``co_p1`` may be a single CO id or a non-empty sequence; each
+    reset draws uniformly from that set (after tier selection). ``None`` means
+    draw uniformly from the resolved tier roster for that seat.
+
+    Explicit CO ids are never rejected for hierarchy vs the pinned tier — the tier
+    controls roster sampling for unset seats only; disabled tier rows still supply
+    rosters when named explicitly.
     """
+    c0 = coerce_co_selection(co_p0)
+    c1 = coerce_co_selection(co_p1)
+
     def _choice(seq: Sequence[Any]) -> Any:
         if rng is None:
             return random.choice(seq)
@@ -597,14 +726,22 @@ def sample_training_matchup(
 
     def _pick_tier_for_fixed_cos(meta: dict) -> dict:
         enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
-        need = [c for c in (co_p0, co_p1) if c is not None]
+        need: list[int] = []
+        if c0 is not None:
+            need.extend(c0)
+        if c1 is not None:
+            need.extend(c1)
+        need = list(dict.fromkeys(need))
         if not need:
             return _choice(enabled) if enabled else meta["tiers"][0]
         candidates = [t for t in enabled if all(c in t["co_ids"] for c in need)]
         if not candidates:
+            # CO ids are explicit for this reset; use any enabled tier for metadata.
+            candidates = enabled
+        if not candidates:
             raise ValueError(
                 f"Map {meta.get('name', meta['map_id'])}: no enabled tier contains "
-                f"CO id(s) {need}"
+                f"CO id(s) {need} and map has no enabled tiers"
             )
         return _choice(candidates)
 
@@ -614,16 +751,8 @@ def sample_training_matchup(
     meta = _choice(sample_map_pool)
 
     if tier_name is not None:
-        tier = next(
-            (t for t in meta["tiers"] if t.get("tier_name") == tier_name),
-            None,
-        )
-        if tier is None or not tier.get("enabled") or not tier.get("co_ids"):
-            raise ValueError(
-                f"Map {meta.get('name', meta['map_id'])}: no enabled tier "
-                f"{tier_name!r}"
-            )
-    elif co_p0 is not None or co_p1 is not None:
+        tier = _resolve_named_tier_row(meta, tier_name)
+    elif c0 is not None or c1 is not None:
         tier = _pick_tier_for_fixed_cos(meta)
     else:
         enabled = [t for t in meta["tiers"] if t.get("enabled") and t.get("co_ids")]
@@ -632,25 +761,15 @@ def sample_training_matchup(
     co_ids: list[int] = tier["co_ids"]
     tname = tier["tier_name"]
 
-    if co_p0 is not None:
-        if not _is_co_allowed_in_tier(meta, tname, co_p0):
-            raise ValueError(
-                f"CO {co_p0} not allowed in tier {tname} for map "
-                f"{meta.get('name', meta['map_id'])}"
-            )
-        p0_co = co_p0
+    if c0 is not None:
+        p0_co = int(_choice(c0))
     else:
-        p0_co = _choice(co_ids)
+        p0_co = int(_choice(co_ids))
 
-    if co_p1 is not None:
-        if not _is_co_allowed_in_tier(meta, tname, co_p1):
-            raise ValueError(
-                f"CO {co_p1} not allowed in tier {tname} for map "
-                f"{meta.get('name', meta['map_id'])}"
-            )
-        p1_co = co_p1
+    if c1 is not None:
+        p1_co = int(_choice(c1))
     else:
-        p1_co = _choice(co_ids)
+        p1_co = int(_choice(co_ids))
 
     return (
         meta["map_id"],
@@ -681,11 +800,14 @@ class AWBWEnv(gym.Env):
     render_mode:
         "ansi" to print the board after each step, None to suppress.
     co_p0, co_p1:
-        If set, fix that player's CO id for each episode (must appear in the
-        sampled tier's ``co_ids``). Used with ``tier_name`` for narrow curriculum.
+        If set, each episode samples that seat's CO uniformly from this list (or
+        a fixed singleton). Explicit ids are not filtered against tier hierarchy.
+        ``None`` means sample uniformly from the pinned tier roster (if ``tier_name``
+        is set) or from the tier picked for this episode. Also accepts a bare ``int``
+        for backward compatibility (coerced to a one-element list).
     tier_name:
-        If set, use this tier (e.g. ``\"T3\"``) for the sampled map; raises if
-        the map has no enabled tier with that name.
+        If set, use this tier name's roster on the sampled map (even when that GL row
+        is ``enabled: false``); raises only if the tier name is unknown on that map.
     curriculum_broad_prob:
         Each episode, with this probability ignore fixed CO/tier and sample the
         full random matchup (0 = always use fixed settings when provided).
@@ -703,6 +825,11 @@ class AWBWEnv(gym.Env):
         ``env.step`` (prevents infinite loops if the opponent never hands back).
         If ``None`` and ``max_env_steps`` is set, defaults to
         ``max(500, max_env_steps * 30)``.
+    cop_disable_per_seat_p:
+        Each curriculum ``reset``, independently per seat that has a COP,
+        COP activation is disabled with this probability in ``[0, 1]`` (SCOP
+        unchanged). ``None`` reads ``AWBW_COP_DISABLE_PER_SEAT_P``. Ignored when
+        loading a live snapshot (site parity).
     """
 
     metadata = {"render_modes": ["ansi"]}
@@ -713,8 +840,8 @@ class AWBWEnv(gym.Env):
         opponent_policy: Callable | None = None,
         render_mode: str | None = None,
         log_replay_frames: bool | None = None,
-        co_p0: int | None = None,
-        co_p1: int | None = None,
+        co_p0: int | Sequence[int] | None = None,
+        co_p1: int | Sequence[int] | None = None,
         tier_name: str | None = None,
         curriculum_broad_prob: float = 0.0,
         curriculum_tag: str | None = None,
@@ -731,13 +858,14 @@ class AWBWEnv(gym.Env):
         opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
         opening_book_force_mask_for_learner: bool = True,
+        cop_disable_per_seat_p: float | None = None,
     ) -> None:
         super().__init__()
 
         self.render_mode = render_mode
         self.opponent_policy = opponent_policy
-        self.co_p0 = co_p0
-        self.co_p1 = co_p1
+        self.co_p0 = coerce_co_selection(co_p0)
+        self.co_p1 = coerce_co_selection(co_p1)
         self.tier_name = tier_name
         self.curriculum_broad_prob = float(curriculum_broad_prob)
         self.curriculum_tag = curriculum_tag
@@ -751,6 +879,18 @@ class AWBWEnv(gym.Env):
         self._opening_book_seed = int(opening_book_seed)
         self._opening_book_force_mask_for_learner = bool(opening_book_force_mask_for_learner)
         self._opening_book_manager: Any | None = None
+        if cop_disable_per_seat_p is None:
+            _cdp_raw = (os.environ.get(COP_DISABLE_PER_SEAT_P_ENV) or "").strip()
+            try:
+                self._cop_disable_per_seat_p = (
+                    max(0.0, min(1.0, float(_cdp_raw))) if _cdp_raw else 0.0
+                )
+            except ValueError:
+                self._cop_disable_per_seat_p = 0.0
+        else:
+            self._cop_disable_per_seat_p = max(
+                0.0, min(1.0, float(cop_disable_per_seat_p))
+            )
         self._max_env_steps: int | None = int(max_env_steps) if max_env_steps is not None else None
         if max_p1_microsteps is not None:
             self._max_p1_microsteps_cap: int | None = int(max_p1_microsteps)
@@ -935,6 +1075,8 @@ class AWBWEnv(gym.Env):
             int(live_games_id) if live_games_id is not None else None
         )
         self._live_fallback_curriculum: bool = bool(live_fallback_curriculum)
+        # Async IMPALA dual-gradient: set each episode (``mirror`` vs ``hist``).
+        self._async_rollout_mode: str | None = None
 
     def get_step_time_stats(self) -> dict[str, float]:
         """Return percentile summary of recent ``step()`` wall times, or ``{}`` if tracking is off.
@@ -981,6 +1123,18 @@ class AWBWEnv(gym.Env):
             return int(fn())
         except Exception:
             return None
+
+    def set_async_rollout_mode(self, mode: str | None) -> None:
+        """Tag the current episode for ``game_log.jsonl`` (async dual-gradient only).
+
+        Use ``mirror`` (both seats, shared policy) or ``hist`` (vs historical checkpoint).
+        Cleared at the start of each ``reset()``.
+        """
+        if mode is not None and mode not in ("mirror", "hist"):
+            raise ValueError(
+                f"async_rollout_mode must be 'mirror', 'hist', or None; got {mode!r}"
+            )
+        self._async_rollout_mode = mode
 
     def _get_legal(self) -> list[Action]:
         """Return cached legal actions for self.state; populate on first call.
@@ -1113,6 +1267,7 @@ class AWBWEnv(gym.Env):
     ) -> tuple[dict, dict]:
         super().reset(seed=seed)
         self._episode_id = int(getattr(self, "_episode_id", 0)) + 1
+        self._async_rollout_mode = None
         self._opening_book_log: dict[str, Any] = {}
 
         # Zero reused buffers before any encode / mask use (unused map cells must not
@@ -1152,6 +1307,9 @@ class AWBWEnv(gym.Env):
                 else:
                     self.state = st
                     from_live = True
+                    # Live play must match site power rules; never carry curriculum COP-disable.
+                    self.state.co_states[0].cop_activation_disabled = False
+                    self.state.co_states[1].cop_activation_disabled = False
             except (OSError, ValueError, KeyError) as exc:
                 if not self._live_fallback_curriculum:
                     raise
@@ -1186,6 +1344,7 @@ class AWBWEnv(gym.Env):
 
             _mk: dict = dict(starting_funds=0, tier_name=tier_name)
             if self._max_turns is not None:
+                _mk["max_days"] = self._max_turns
                 _mk["max_turns"] = self._max_turns
             if seed is not None:
                 _mk["luck_seed"] = int(seed)
@@ -1193,6 +1352,24 @@ class AWBWEnv(gym.Env):
             if rfm is not None:
                 _mk["replay_first_mover"] = int(rfm)
             self.state = make_initial_state(map_data, p0_co, p1_co, **_mk)
+        p0_cop_activation_disabled = False
+        p1_cop_activation_disabled = False
+        if (
+            self.state is not None
+            and not from_live
+            and self._cop_disable_per_seat_p > 0.0
+        ):
+            _pcd = float(self._cop_disable_per_seat_p)
+            for _seat in (0, 1):
+                _co = self.state.co_states[_seat]
+                if _co.cop_stars is None or _co._data.get("cop") is None:
+                    continue
+                if float(self.np_random.random()) < _pcd:
+                    _co.cop_activation_disabled = True
+                    if _seat == 0:
+                        p0_cop_activation_disabled = True
+                    else:
+                        p1_cop_activation_disabled = True
         self._invalidate_legal_cache()
         # Who opens (engine seat 0 or 1) per make_initial_state / snapshot.
         self._opening_player = int(self.state.active_player)
@@ -1226,6 +1403,8 @@ class AWBWEnv(gym.Env):
                 "learner_seat": self._learner_seat,
                 "episode_started_at": time.time(),
                 "live": True,
+                "p0_cop_activation_disabled": p0_cop_activation_disabled,
+                "p1_cop_activation_disabled": p1_cop_activation_disabled,
             }
             if self._live_games_id is not None:
                 self._episode_info["games_id"] = int(self._live_games_id)
@@ -1238,6 +1417,8 @@ class AWBWEnv(gym.Env):
                 "p1_co": p1_co,
                 "learner_seat": self._learner_seat,
                 "episode_started_at": time.time(),  # Track episode start time
+                "p0_cop_activation_disabled": p0_cop_activation_disabled,
+                "p1_cop_activation_disabled": p1_cop_activation_disabled,
             }
         if self.curriculum_tag:
             self._episode_info["curriculum_tag"] = self.curriculum_tag
@@ -1262,7 +1443,7 @@ class AWBWEnv(gym.Env):
         # Episode-end log metadata (set in step() immediately before _log_finished_game).
         self._log_episode_truncated: bool = False
         self._log_episode_truncation_reason: str | None = None
-        # Step-cap tie-break: learner property lead (me − enemy); logged when >=2.
+        # Step-cap tie-break: learner property lead (me − enemy); logged when >=1.
         self._log_tie_breaker_property_count: int | None = None
         # Phase 0a.2 (FPS campaign): per-episode wall-time split between the
         # P0 step path and the P1 microstep loop. Bounded by perf_counter()
@@ -1275,14 +1456,20 @@ class AWBWEnv(gym.Env):
         # Surfaced in game_log.jsonl so we can verify the teacher is firing.
         self._learner_teacher_overrides: int = 0
         # Deprecated Φ property-loss penalty counter retained for log schema
-        # continuity; the penalty itself is disabled.
+        # continuity; the penalty itself is disabled. 
         self._phi_enemy_property_captures_ep: int = 0
+        # Episode COP/SCOP activation counts by engine seat (for game_log.jsonl).
+        self._episode_cop_by_seat: list[int] = [0, 0]
+        self._episode_scop_by_seat: list[int] = [0, 0]
         # Snapshot opponent reload count at episode start so we can
         # report per-episode reloads in the log record.
         self._opponent_reloads_at_start: int = int(
             getattr(self.opponent_policy, "reload_count", 0) or 0
         )
         self._first_learner_capture_step: int | None = None
+
+        # Neutral income property count at specific calendar days (turn == day).
+        self._neutral_income_snapshot_by_day: dict[int, int] = {}
 
         self._begin_opening_book_episode()
 
@@ -1316,6 +1503,8 @@ class AWBWEnv(gym.Env):
         # Reset replay buffer and record the starting position.
         self._replay_frames = []
         self._capture_frame(action=None)
+
+        self._maybe_record_neutral_income_snapshot_days()
 
         return self._get_obs(observer=self._learner_seat), dict(self._episode_info)
 
@@ -1439,11 +1628,18 @@ class AWBWEnv(gym.Env):
             phi_prop_pre_cells = None
 
         acting = int(self.state.active_player)
+        phi_power_b, phi_power_rc = self._phi_power_activation_and_attack_bonus(
+            action, acting, self.state, learner_frame=True
+        )
         self.state, reward, done = self._engine_step_with_belief(action)
         reward = self._signed_engine_reward(reward, acting)
         rc: dict[str, float] = {
             "learner_engine_signed_sparse_capture": float(reward),
         }
+        if phi_power_b != 0.0:
+            reward += phi_power_b
+            rc.update(phi_power_rc)
+        self._phi_after_step_record_power_activations(action, acting)
         if self.state is not None and self.state.done:
             rb = reward
             reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
@@ -1579,8 +1775,8 @@ class AWBWEnv(gym.Env):
         rc["end_turn_hoard_penalty"] = hoard_pen_v
 
         # Partial win at the P0 step cap: engine never emits ±1 without a terminal, so
-        # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a solid
-        # property lead in the learner frame.
+        # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a
+        # property lead in the learner frame (same single-property margin as calendar tiebreak).
         pb_tiebreak = 0.0
         if (
             truncated
@@ -1593,7 +1789,7 @@ class AWBWEnv(gym.Env):
             prop_lead = self.state.count_properties(me) - self.state.count_properties(
                 en
             )
-            if prop_lead >= 2:
+            if prop_lead >= 1:
                 self._log_tie_breaker_property_count = int(prop_lead)
                 pb_tiebreak = 0.5
                 reward += 0.5
@@ -1751,6 +1947,23 @@ class AWBWEnv(gym.Env):
             "legacy_reward": float(final_reward),
             "competitive_antisymmetry_gap": float(sum(competitive)),
         }
+
+    def _maybe_record_neutral_income_snapshot_days(self) -> None:
+        """First time ``state.turn`` hits a milestone day, stash neutral-income count."""
+
+        if self.state is None:
+            return
+        cur = int(getattr(self.state, "turn", 0) or 0)
+        if cur not in GAME_LOG_NEUTRAL_INCOME_SNAPSHOT_DAYS:
+            return
+        dct = self._neutral_income_snapshot_by_day
+        if cur in dct:
+            return
+        snap = self._property_pressure_snapshot()
+        ni = snap.get("neutral_income_properties")
+        if ni is None:
+            return
+        dct[cur] = int(ni)
 
     def _property_pressure_snapshot(self) -> dict[str, Any]:
         """Compact opening/property-pressure diagnostics for reward audits."""
@@ -1925,6 +2138,9 @@ class AWBWEnv(gym.Env):
             else None
         )
 
+        phi_power_b, phi_power_rc = self._phi_power_activation_and_attack_bonus(
+            action, acting, self.state, learner_frame=False
+        )
         self.state, reward, _done = self._engine_step_with_belief(action)
         # ``GameState.step`` reports engine reward in acting-player coordinates.
         reward = float(reward)
@@ -1932,6 +2148,10 @@ class AWBWEnv(gym.Env):
             # Includes engine sparse + dense capture shaping (until env strips it).
             "acting_engine_sparse_plus_capture_shaping": float(reward),
         }
+        if phi_power_b != 0.0:
+            reward += phi_power_b
+            rc.update(phi_power_rc)
+        self._phi_after_step_record_power_activations(action, acting)
         if self.state is not None and self.state.done:
             rb = reward
             reward = self._apply_phi_sparse_terminal_replacement_for_seat(
@@ -2131,6 +2351,63 @@ class AWBWEnv(gym.Env):
             return float(r_engine)
         return float(-r_engine)
 
+    def _phi_power_activation_and_attack_bonus(
+        self,
+        action: Action,
+        acting: int,
+        state: GameState,
+        *,
+        learner_frame: bool,
+    ) -> tuple[float, dict[str, float]]:
+        """Φ-mode COP/SCOP activation and same-turn attack-under-power bonuses.
+
+        ``state`` must be the **pre-step** game state. ``learner_frame``: when
+        True (``step()`` / opponent autoplay), return bonus signed into learner
+        coordinates; when False (``step_active_seat_once``), return acting-seat
+        frame.
+        """
+        if self._reward_shaping_mode != "phi":
+            return 0.0, {}
+        a = int(acting)
+        co = state.co_states[a]
+        b_act = 0.0
+        key: str | None = None
+        rc_extra: dict[str, float] = {}
+        vb_ref = float(PHI_VON_BOLT_SCOP_REF_THRESHOLD)
+        if action.action_type == ActionType.ACTIVATE_COP:
+            scale = float(co._cop_threshold) / vb_ref
+            b_act = float(PHI_COP_ACTIVATION_BONUS) * scale
+            key = "phi_cop_activation_bonus"
+            rc_extra["phi_power_bonus_meter_scale_vs_vb_scop"] = float(scale)
+        elif action.action_type == ActionType.ACTIVATE_SCOP:
+            scale = float(co._scop_threshold) / vb_ref
+            b_act = float(PHI_SCOP_ACTIVATION_BONUS) * scale
+            key = "phi_scop_activation_bonus"
+            rc_extra["phi_power_bonus_meter_scale_vs_vb_scop"] = float(scale)
+        elif action.action_type == ActionType.ATTACK:
+            if co.cop_active or co.scop_active:
+                b_act = float(PHI_POWER_TURN_ATTACK_BONUS)
+                key = "phi_power_turn_attack_bonus"
+        if b_act == 0.0 or key is None:
+            return 0.0, {}
+        if learner_frame:
+            b = float(self._signed_engine_reward(b_act, a))
+        else:
+            b = b_act
+        out: dict[str, float] = {key: float(b)}
+        out.update(rc_extra)
+        return b, out
+
+    def _phi_after_step_record_power_activations(
+        self, action: Action, acting: int
+    ) -> None:
+        """Count COP/SCOP uses by seat for game_log (all reward modes)."""
+        a = int(acting)
+        if action.action_type == ActionType.ACTIVATE_COP:
+            self._episode_cop_by_seat[a] += 1
+        elif action.action_type == ActionType.ACTIVATE_SCOP:
+            self._episode_scop_by_seat[a] += 1
+
     def _seat_frame_terminal_outcome(self, observer_seat: int) -> float:
         """Sparse terminal outcome from ``observer_seat`` coordinates."""
         st = self.state
@@ -2165,11 +2442,11 @@ class AWBWEnv(gym.Env):
         if self._reward_shaping_mode != "phi" or self.state is None or not self.state.done:
             return float(reward)
         wr = self.state.win_reason
-        if wr not in ("max_turns_draw", "max_turns_tie", "max_turns_tiebreak"):
+        if wr not in PHI_DAY_CAP_REASONS:
             return float(reward)
         ls = self._seat_frame_terminal_outcome(observer_seat)
         rest = float(reward) - ls
-        if wr in ("max_turns_draw", "max_turns_tie"):
+        if wr in PHI_DAY_CAP_DRAWLIKE:
             return -0.1 + rest
         w = self.state.winner
         if w is None or int(w) == -1:
@@ -2181,7 +2458,7 @@ class AWBWEnv(gym.Env):
         else:
             p_en = int(self.state.count_properties(en))
             p_me = int(self.state.count_properties(me))
-            if p_en - p_me >= 2:
+            if p_en - p_me >= 1:
                 l_new = -0.5
             else:
                 l_new = -1.0
@@ -2192,11 +2469,12 @@ class AWBWEnv(gym.Env):
     ) -> float:
         """Φ mode: replace engine sparse terminal ±1.0/0, not stack on it.
 
-        * ``max_turns_tie`` or (legacy) ``max_turns_draw`` → −0.1 (replaces 0.0)
-        * ``max_turns_tiebreak`` win → +0.5 (replaces +1.0)
-        * ``max_turns_tiebreak`` loss with **≥2** property deficit in learner
-          frame (enemy has ≥2 more properties) → −0.5 (replaces −1.0);
-          smaller deficit → keep −1.0
+        * ``max_days_tie`` / legacy ``max_turns_tie`` or ``max_days_draw`` /
+          ``max_turns_draw`` → −0.1 (replaces 0.0)
+        * ``max_days_tiebreak`` / ``max_turns_tiebreak`` win → +0.5 (replaces +1.0)
+        * ``max_days_tiebreak`` / ``max_turns_tiebreak`` loss with **≥1** property deficit in learner
+          frame (enemy has more properties) → −0.5 (replaces −1.0);
+          otherwise → keep −1.0
 
         Captured as ``rest = reward - ls`` and recombined (preserves per-step
         capture shaping in ``rest``). Non-day-cap terminations and ``level``
@@ -2205,11 +2483,11 @@ class AWBWEnv(gym.Env):
         if self._reward_shaping_mode != "phi" or self.state is None or not self.state.done:
             return float(reward)
         wr = self.state.win_reason
-        if wr not in ("max_turns_draw", "max_turns_tie", "max_turns_tiebreak"):
+        if wr not in PHI_DAY_CAP_REASONS:
             return float(reward)
         ls = self._learner_frame_terminal_outcome(acting_seat)
         rest = float(reward) - ls
-        if wr in ("max_turns_draw", "max_turns_tie"):
+        if wr in PHI_DAY_CAP_DRAWLIKE:
             return -0.1 + rest
         w = self.state.winner
         if w is None or int(w) == -1:
@@ -2221,7 +2499,7 @@ class AWBWEnv(gym.Env):
         else:
             p_en = int(self.state.count_properties(en))
             p_me = int(self.state.count_properties(me))
-            if p_en - p_me >= 2:
+            if p_en - p_me >= 1:
                 l_new = -0.5
             else:
                 l_new = -1.0
@@ -2519,6 +2797,7 @@ class AWBWEnv(gym.Env):
             for b in beliefs:
                 b.sync_own_units(self.state)
             self._maybe_spirit_calendar(turn_before)
+            self._maybe_record_neutral_income_snapshot_days()
             return self.state, reward, done
 
         # Pre-step snapshot + optional attack range.
@@ -2617,6 +2896,7 @@ class AWBWEnv(gym.Env):
         for b in beliefs:
             b.sync_own_units(self.state)
 
+        self._maybe_record_neutral_income_snapshot_days()
         return self.state, reward, done
 
     def _maybe_spirit_calendar(self, turn_before: int) -> None:
@@ -2807,10 +3087,14 @@ class AWBWEnv(gym.Env):
             if action is None:
                 action = random.choice(legal)
             acting = int(self.state.active_player)
+            phi_pb, _ = self._phi_power_activation_and_attack_bonus(
+                action, acting, self.state, learner_frame=True
+            )
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
-            dr = self._signed_engine_reward(r_opp, acting)
+            dr = self._signed_engine_reward(r_opp, acting) + phi_pb
             opp_engine_signed += dr
             accumulated_reward += dr
+            self._phi_after_step_record_power_activations(action, acting)
             self._capture_frame(action=action)
             microsteps += 1
         if microsteps > self._max_p1_microsteps:
@@ -2853,10 +3137,14 @@ class AWBWEnv(gym.Env):
                 action = random.choice(legal)
 
             acting = int(self.state.active_player)
+            phi_pb, _ = self._phi_power_activation_and_attack_bonus(
+                action, acting, self.state, learner_frame=True
+            )
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
-            dr = self._signed_engine_reward(r_opp, acting)
+            dr = self._signed_engine_reward(r_opp, acting) + phi_pb
             opp_engine_signed += dr
             accumulated_reward += dr
+            self._phi_after_step_record_power_activations(action, acting)
             self._capture_frame(action=action)
             microsteps += 1
         if microsteps > self._max_p1_microsteps:
@@ -2983,14 +3271,16 @@ class AWBWEnv(gym.Env):
                 for e in self.state.game_log
                 if e.get("type") == "capture"
                 and e.get("player") == 0
-                and e.get("cp_remaining", 20) == 0
+                and (cp := e.get("cp_remaining")) is not None
+                and (cp == 0 or cp == 20)
             ),
             "captures_completed_p1": sum(
                 1
                 for e in self.state.game_log
                 if e.get("type") == "capture"
                 and e.get("player") == 1
-                and e.get("cp_remaining", 20) == 0
+                and (cp := e.get("cp_remaining")) is not None
+                and (cp == 0 or cp == 20)
             ),
             "infantry_builds_p0": sum(
                 1
@@ -3000,6 +3290,7 @@ class AWBWEnv(gym.Env):
                 and str(e.get("unit", "")).upper() == "INFANTRY"
             ),
             "turns": self.state.turn,
+            "days": self.state.turn,
             "win_condition": log_win_reason,
             "losses_hp": self.state.losses_hp.copy(),
 
@@ -3078,6 +3369,21 @@ class AWBWEnv(gym.Env):
             # See definition above.
             "terrain_usage_p0": terrain_usage_p0,
             "property_pressure_end": self._property_pressure_snapshot(),
+            "neutral_income_remaining_by_day_7": self._neutral_income_snapshot_by_day.get(
+                7
+            ),
+            "neutral_income_remaining_by_day_9": self._neutral_income_snapshot_by_day.get(
+                9
+            ),
+            "neutral_income_remaining_by_day_11": self._neutral_income_snapshot_by_day.get(
+                11
+            ),
+            "neutral_income_remaining_by_day_13": self._neutral_income_snapshot_by_day.get(
+                13
+            ),
+            "neutral_income_remaining_by_day_15": self._neutral_income_snapshot_by_day.get(
+                15
+            ),
 
             # Tier 1 (plan p0-capture-architecture-fix): visibility into
             # teacher-mix so we can verify it is firing and slice metrics by mix value.
@@ -3085,6 +3391,15 @@ class AWBWEnv(gym.Env):
             "learner_teacher_overrides": int(getattr(self, "_learner_teacher_overrides", 0)),
             "phi_enemy_property_captures": int(
                 getattr(self, "_phi_enemy_property_captures_ep", 0)
+            ),
+            # Φ COP/SCOP activation counts per engine seat (episode totals).
+            "cop_activations_p0": int(getattr(self, "_episode_cop_by_seat", [0, 0])[0]),
+            "scop_activations_p0": int(
+                getattr(self, "_episode_scop_by_seat", [0, 0])[0]
+            ),
+            "cop_activations_p1": int(getattr(self, "_episode_cop_by_seat", [0, 0])[1]),
+            "scop_activations_p1": int(
+                getattr(self, "_episode_scop_by_seat", [0, 0])[1]
             ),
             # Deprecated: env-side END_TURN gate removed; engine/action.py:_get_select_actions enforces the rule. Field retained for log schema continuity.
             "end_turn_gate_active": False,
@@ -3100,24 +3415,32 @@ class AWBWEnv(gym.Env):
             # 1.8: terminated / truncated / truncation_reason (forced episode caps).
             # 1.9: restart bundle — learner_seat, reward_mode, arch_version, opponent_sampler;
             #      agent_plays now mirrors learner_seat (was always 0).
-            # 1.10: tie_breaker_property_count — learner property lead when step-cap partial win.
+            # 1.10: tie_breaker_property_count — learner property lead when step-cap partial win (≥1).
             # 1.11: winner / win_condition filled from property tiebreak when truncated
             #       and engine left winner unset (env_step_cap_* reasons).
             # 1.13: alive_unit_count, army_value at episode end.
             # 1.14: phi_enemy_property_captures — episode sum of learner→enemy property flips (Φ penalty).
+            # 1.15: neutral_income_remaining_by_day_{7,9,11,13,15} — neutral income tile counts
+            #       at first engine step where ``turn`` equals each milestone (see GAME_LOG_NEUTRAL_INCOME_SNAPSHOT_DAYS).
+            # 1.16: async_rollout_mode — async dual-gradient episodes only: mirror self-play vs hist checkpoint.
+            # 1.17: cop_activations / scop_activations per seat (Φ power-use logging).
             "terminated": bool(self.state.done),
             "truncated": bool(getattr(self, "_log_episode_truncated", False)),
             "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
             "tie_breaker_property_count": getattr(
                 self, "_log_tie_breaker_property_count", None
             ),
-            "log_schema_version": "1.14",
+            # 1.16: async_rollout_mode — dual-gradient mirror vs historical checkpoint episode.
+            "log_schema_version": "1.17",
         }
         sk = getattr(self.state.spirit, "spirit_broken_kind", None)
         if sk is None:
             sk = getattr(self, "_spirit_broken_kind", None)
         if sk is not None:
             log_record["spirit_broken_kind"] = sk
+        arm = getattr(self, "_async_rollout_mode", None)
+        if arm is not None:
+            log_record["async_rollout_mode"] = arm
         log_record.update(getattr(self, "_opening_book_log", {}))
         if self.curriculum_tag:
             log_record["curriculum_tag"] = self.curriculum_tag
@@ -3144,6 +3467,7 @@ class AWBWEnv(gym.Env):
                     "episode_id": int(self._episode_id),
                     "map_id": log_record.get("map_id"),
                     "turns": log_record.get("turns"),
+                    "days": log_record.get("days"),
                     "win_condition": log_record.get("win_condition"),
                     "terminated": bool(self.state.done),
                     "truncated": bool(getattr(self, "_log_episode_truncated", False)),
@@ -3194,6 +3518,7 @@ class AWBWEnv(gym.Env):
                 "winner": log_record.get("winner"),
                 "win_condition": log_record.get("win_condition"),
                 "turns": log_record.get("turns"),
+                "days": log_record.get("days"),
                 "learner_seat": log_record.get("learner_seat"),
                 "opening_player": log_record.get("opening_player"),
                 "opponent_type": log_record.get("opponent_type"),
@@ -3266,6 +3591,7 @@ class AWBWEnv(gym.Env):
                 "p0_co_id": self._episode_info.get("p0_co"),
                 "p1_co_id": self._episode_info.get("p1_co"),
                 "turns": self.state.turn,
+                "days": self.state.turn,
                 "n_actions": n_actions,
                 "p0_env_steps": p0_env_steps,
                 "invalid_action_count": invalid_action_count,

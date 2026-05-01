@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from rl.env import AWBWEnv
@@ -48,6 +49,28 @@ def test_reload_pool_picks_from_refreshed_set(tmp_path: Path) -> None:
     assert str(fourth) not in opp._pool_candidates
     assert opp.reload_pool() == 4
     assert str(fourth) in (opp._pool_candidates or [])
+
+
+def test_reload_pool_tails_to_opponent_newest_k(tmp_path: Path) -> None:
+    base = 10_000
+    for i in range(30):
+        p = tmp_path / f"checkpoint_{i:03d}.zip"
+        p.write_bytes(b"x")
+        os.utime(p, (base + i, base + i))
+    opp = _CheckpointOpponent(str(tmp_path), opponent_pool_newest_k=24)
+    assert opp.reload_pool() == 24
+    cand = opp._pool_candidates or []
+    assert len(cand) == 24
+    names = sorted(Path(x).name for x in cand)
+    assert names[0] == "checkpoint_006.zip"
+    assert names[-1] == "checkpoint_029.zip"
+
+
+def test_reload_pool_newest_k_zero_keeps_all(tmp_path: Path) -> None:
+    for i in range(7):
+        _touch(tmp_path / f"checkpoint_{i}.zip")
+    opp = _CheckpointOpponent(str(tmp_path), opponent_pool_newest_k=0)
+    assert opp.reload_pool() == 7
 
 
 def test_awbw_env_reload_opponent_pool_delegates() -> None:

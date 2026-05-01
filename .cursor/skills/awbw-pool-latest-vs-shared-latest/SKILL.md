@@ -30,28 +30,28 @@ python scripts/symmetric_checkpoint_eval.py `
   --map-id 123858 --tier T3 --co-p0 1 --co-p1 1 `
   --games-first-seat 4 --games-second-seat 3 --seed 0 `
   --max-env-steps 0 `
-  --max-turns 150 `
+  --max-days 150 `
   --json-out logs/promotion_symmetric_pc-b_vs_shared.json
 ```
 
 Adjust `--map-id` / COs / tier if the user’s training matchups differ.
 
-### Why `--max-env-steps 0` and `--max-turns`
+### Why `--max-env-steps 0` and `--max-days`
 
 - **`--max-env-steps 0`** — Unlimited P0 steps per episode (default **100** truncates early and yields no decisive wins).
-- **`--max-turns`** — Raises the engine calendar tiebreak above `engine.game.MAX_TURNS` (100). Implemented on `GameState.max_turns` / `make_initial_state(max_turns=...)`.
+- **`--max-days`** — Raises the engine end-inclusive calendar tiebreak above `engine.game.MAX_TURNS` (100). Implemented on `GameState.max_turns` / `make_initial_state(max_days=...)`. Alias: `--max-turns` (deprecated).
 
 ### After the run
 
 1. Read **`promotion_heuristic_ok`** in stdout or JSON (candidate ahead overall; no all-loss collapse in either seat).
-2. If **`total_decided`** is 0, the eval is **invalid** for promotion — fix caps (raise `--max-turns`, ensure `--max-env-steps 0`) and rerun.
+2. If **`total_decided`** is 0, the eval is **invalid** for promotion — fix caps (raise `--max-days`, ensure `--max-env-steps 0`) and rerun.
 3. **Promote** only if the user asked to promote *and* heuristic is true: back up root `latest.zip`, then `Copy-Item` candidate → `Z:\checkpoints\latest.zip` (or follow their chosen map/CO). Do not overwrite shared `latest` on stats alone.
 
 ## Related code
 
-- `scripts/symmetric_checkpoint_eval.py` — symmetric 1v1; `--max-turns`, `--max-env-steps`.
-- `engine/game.py` — `GameState.max_turns`, `make_initial_state(..., max_turns=...)`.
-- `rl/env.py` — `AWBWEnv(max_turns=...)`.
+- `scripts/symmetric_checkpoint_eval.py` — symmetric 1v1; `--max-days` (`--max-turns` deprecated), `--max-env-steps`.
+- `engine/game.py` — `GameState.max_turns` (calendar day cap), `make_initial_state(..., max_days=...)`.
+- `rl/env.py` — `AWBWEnv(max_turns=...)` (kwarg name unchanged; value is calendar days).
 - `rl/fleet_env.py` — pool layout, `iter_pool_checkpoint_zips`.
 
 ## Do not

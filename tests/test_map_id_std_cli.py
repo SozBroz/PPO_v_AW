@@ -26,9 +26,22 @@ def test_parse_map_id_std_aliases() -> None:
     assert _parse_map_id_cli("std") is None
     assert _parse_map_id_cli("STD") is None
     assert _parse_map_id_cli("gl-std") is None
-    assert _parse_map_id_cli("123858") == 123858
+    assert _parse_map_id_cli("123858") == [123858]
+    assert _parse_map_id_cli("123858, 133665") == [123858, 133665]
     with pytest.raises(SystemExit):
         build_train_argument_parser().parse_args(["--map-id", "not-a-map"])
+
+
+def test_parse_co_csv_cli() -> None:
+    from train import _parse_co_csv_cli, build_train_argument_parser
+
+    assert _parse_co_csv_cli("1") == [1]
+    assert _parse_co_csv_cli("14,12") == [14, 12]
+    assert _parse_co_csv_cli("1, 1, 7") == [1, 7]
+    p = build_train_argument_parser()
+    ns = p.parse_args(["--co-p0", "1,14", "--co-p1", "12"])
+    assert ns.co_p0 == [1, 14]
+    assert ns.co_p1 == [12]
 
 
 def test_build_train_argv_emits_map_id_std_string() -> None:

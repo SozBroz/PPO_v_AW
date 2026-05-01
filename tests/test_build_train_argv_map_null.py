@@ -75,6 +75,24 @@ def test_omit_map_tier_co_when_null() -> None:
     assert "--curriculum-broad-prob" in flat
 
 
+def test_explicit_tier_without_co_omits_co_flags_for_roster_sampling() -> None:
+    fo = _fo()
+    doc = {"args": {"--n-envs": 4, "--tier": "T3"}}
+    argv = fo.build_train_argv_from_proposed_args(doc, repo_root=REPO)
+    flat = " ".join(argv)
+    assert "--tier" in flat
+    assert "--co-p0" not in flat
+    assert "--co-p1" not in flat
+
+
+def test_missing_tier_key_keeps_default_cos() -> None:
+    fo = _fo()
+    doc = {"args": {"--n-envs": 4}}
+    argv = fo.build_train_argv_from_proposed_args(doc, repo_root=REPO)
+    assert argv[argv.index("--co-p0") + 1] == "1"
+    assert argv[argv.index("--co-p1") + 1] == "1"
+
+
 def test_read_state_migrates_old_terminal_name(tmp_path: Path) -> None:
     from tools.curriculum_advisor import read_state, write_state, CurriculumState
 

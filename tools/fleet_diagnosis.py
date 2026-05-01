@@ -123,7 +123,7 @@ def _finished_rows_for_machine(path: Path, machine_id: str) -> list[dict[str, An
         mid = row.get("machine_id")
         if mid is None or str(mid) != str(machine_id):
             continue
-        if "turns" not in row:
+        if "turns" not in row and "days" not in row:
             continue
         out.append(row)
     return out

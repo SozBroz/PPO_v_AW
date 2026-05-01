@@ -83,3 +83,27 @@ def test_demo_row_flat_roundtrip_end_turn_when_legal():
     assert back.action_type == ActionType.END_TURN
 
 
+def test_spawn_std_pool_p1_book_matches_misery_when_co_relaxed():
+    """std_pool_precombat.jsonl has P1 rows for Misery map 123858 (fixture uses co_id 19)."""
+    import uuid
+
+    from server.play_human import P1_OPENING_BOOK_JSONL, _spawn_p1_opening_book_ctl
+
+    if not P1_OPENING_BOOK_JSONL.is_file():
+        pytest.skip("opening book fixture missing")
+    ctl = _spawn_p1_opening_book_ctl(123858, 19, str(uuid.uuid4()))
+    assert ctl is not None
+    assert ctl.book_id
+
+
+def test_spawn_std_pool_p1_book_none_unknown_map():
+    import uuid
+
+    from server.play_human import P1_OPENING_BOOK_JSONL, _spawn_p1_opening_book_ctl
+
+    if not P1_OPENING_BOOK_JSONL.is_file():
+        pytest.skip("opening book fixture missing")
+    ctl = _spawn_p1_opening_book_ctl(424242424, 1, str(uuid.uuid4()))
+    assert ctl is None
+
+

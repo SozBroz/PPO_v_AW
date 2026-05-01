@@ -15,10 +15,11 @@ Example (Misery Andy mirror, ~7 games)::
     --candidate checkpoints/amarriner_bc.zip --baseline checkpoints/latest.zip \\
     --map-id 123858 --tier T3 --co-p0 1 --co-p1 1 \\
     --games-first-seat 4 --games-second-seat 3 --seed 0 \\
-    --max-env-steps 0 --max-turns 150
+    --max-env-steps 0 --max-days 150
 
 Default ``--max-env-steps`` is **10000** P0 steps per game (aligned with fleet training caps); use
-``0`` for unlimited. Use ``--max-turns`` to raise the engine calendar tiebreak above
+``0`` for unlimited. Use ``--max-days`` (alias ``--max-turns``, deprecated) to raise the engine
+end-inclusive calendar tiebreak above
 ``engine.game.MAX_TURNS`` (default 100).
 
 By default all games run **concurrently** (both seating blocks in one pool).
@@ -45,6 +46,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from rl.ai_vs_ai import _MaxCalendarDaysAction
 
 _LOG = logging.getLogger(__name__)
 
@@ -88,11 +91,17 @@ def build_symmetric_checkpoint_eval_parser() -> argparse.ArgumentParser:
         help="Override cap on P1 engine steps per P0 step (default: derived from max-env-steps).",
     )
     ap.add_argument(
+        "--max-days",
         "--max-turns",
+        dest="max_days",
         type=int,
         default=None,
         metavar="N",
-        help="Engine calendar tiebreak: end-of-game property count after N days (default: MAX_TURNS from engine.game, usually 100).",
+        action=_MaxCalendarDaysAction,
+        help=(
+            "End-inclusive engine calendar day cap / property tiebreak "
+            "(default: engine MAX_TURNS, usually 100)."
+        ),
     )
     ap.add_argument(
         "--parallel",
@@ -239,6 +248,8 @@ def _worker_game(payload: dict) -> tuple[int, int, bool, dict]:
     max_env_steps = payload.get("max_env_steps")
     max_p1_microsteps = payload.get("max_p1_microsteps")
     max_turns = payload.get("max_turns")
+    if max_turns is None:
+        max_turns = payload.get("max_days")
 
     turn_heartbeat = bool(payload.get("turn_heartbeat", True))
     mcts_mode = str(payload.get("mcts_mode") or "off").strip().lower()
@@ -448,9 +459,9 @@ def main() -> int:
     max_env_steps = (
         None if args.max_env_steps is None or args.max_env_steps <= 0 else int(args.max_env_steps)
     )
-    if args.max_turns is not None:
-        if int(args.max_turns) < 1:
-            raise SystemExit("--max-turns must be >= 1")
+    if args.max_days is not None:
+        if int(args.max_days) < 1:
+            raise SystemExit("--max-days must be >= 1")
 
     cand_src, base_src = args.candidate.resolve(), args.baseline.resolve()
     if not cand_src.is_file():
@@ -523,7 +534,8 @@ def main() -> int:
                 "deterministic": args.deterministic,
                 "max_env_steps": max_env_steps,
                 "max_p1_microsteps": args.max_p1_microsteps,
-                "max_turns": args.max_turns,
+                "max_turns": args.max_days,
+                "max_days": args.max_days,
                 "turn_heartbeat": bool(args.turn_heartbeat),
                 **mcts_payload,
             }
@@ -589,7 +601,7 @@ def main() -> int:
         print(
             f"[sym] candidate_as_P0 x{args.games_first_seat} "
             f"then candidate_as_P1 x{args.games_second_seat} "
-            f"(max_env_steps={max_env_steps}, max_turns={args.max_turns}, "
+            f"(max_env_steps={max_env_steps}, max_days={args.max_days}, "
             f"parallel={args.parallel}, parallel_workers={workers}, "
             f"parallel_workers_max={_SYMMETRIC_EVAL_MAX_CONCURRENT_WORKERS}, mcts_mode={args.mcts_mode})"
         )
@@ -677,7 +689,8 @@ def main() -> int:
                 "map_id": args.map_id,
                 "tier": args.tier,
                 "max_env_steps": max_env_steps,
-                "max_turns": args.max_turns,
+                "max_turns": args.max_days,
+                "max_days": args.max_days,
                 "max_p1_microsteps": args.max_p1_microsteps,
                 "co_p0": args.co_p0,
                 "co_p1": args.co_p1,

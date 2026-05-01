@@ -86,7 +86,11 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     if n == 0:
         return {"n": 0}
 
-    turns = [int(r["turns"]) for r in records if r.get("turns") is not None]
+    turns = [
+        int(v)
+        for r in records
+        if (v := r.get("days", r.get("turns"))) is not None
+    ]
     winners = [r.get("winner") for r in records]
 
     def _learner_seat(r: dict[str, Any]) -> int:

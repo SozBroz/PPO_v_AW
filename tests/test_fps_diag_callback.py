@@ -141,7 +141,7 @@ def test_fps_diag_callback_jsonl_schema(tmp_path: Path, monkeypatch: pytest.Monk
         verbose=0,
         device="cpu",
         learning_rate=3e-4,
-        gamma=0.99,
+        gamma=0.99925,
         gae_lambda=0.95,
         ent_coef=0.05,
         clip_range=0.2,

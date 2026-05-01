@@ -8,8 +8,16 @@ calculators):
 
   B         = base damage percent (from damage_table.json)
   AV        = attacker value  (100 + CO ATK modifiers; Lash terrain bonus)
-  L         = luck roll (positive component, per CO)
-  LB        = bad luck (negative component; 0 for most COs)
+  L         = good luck (positive component, per CO)
+  LB        = bad luck (subtracted in the attack term; 0 for most COs)
+
+When a CO's configured luck range spans **both** negative and positive
+(`luck_modifiers` low ``< 0`` and high ``> 0``, or Sonja-style symmetric
+``low < 0`` with high ``== 0`` meaning ±|low|), AWBW rolls **two**
+independent uniform digits 0–9: one maps into the bad-luck arm (LB) and one
+into the good-luck arm (L). Extremes remain reachable (e.g. full LB with no L),
+but the distribution is smoother than a single roll mapped across the net span.
+COs with only-positive or only-negative (single-interval) luck still use one roll.
   HPA_bars  = attacker display HP (1–10 bars; ``Unit.display_hp``)
   DV        = defender value  (100 + CO DEF modifiers)
   DTR       = defender terrain defense stars (0–4)
@@ -210,7 +218,7 @@ def calculate_seam_damage(
         return None
 
     unit_class = UNIT_STATS[attacker.unit_type].unit_class
-    av = attacker_co.total_atk(unit_class)
+    av = attacker_co.total_atk_for_unit(attacker.unit_type)
     if attacker_co.co_id == 16:
         if attacker_co.scop_active or attacker_co.cop_active:
             av += attacker_terrain.defense * 10
@@ -230,47 +238,99 @@ def calculate_seam_damage(
 # Luck calculation per CO
 # ---------------------------------------------------------------------------
 
-def _get_luck(co_id: int, roll: int, cop: bool, scop: bool) -> int:
+def _bounded_luck_digit(roll: int) -> int:
+    return max(0, min(int(roll), 9))
+
+
+def _single_roll_net_luck(low: int, high_exclusive: int, roll: int) -> int:
+    """Interpolate one 0–9 digit across inclusive endpoints ``low .. high_exclusive-1``.
+
+    Used when luck is a **single** stochastic degree of freedom (no mixed good+bad arm).
+    Bounds match ``co_data.json``: ``high_exclusive`` is exclusive (``\"0,10\"`` → 0..9).
     """
-    Return the effective luck value for this CO.
-    Positive = good luck (adds to damage), negative = bad luck (subtracts).
+    br = _bounded_luck_digit(roll)
+    span = high_exclusive - low
+    if span <= 1:
+        return low
+    return low + ((span - 1) * br) // 9
 
-    Roll is always in [0, 9] from the caller; COs scale/shift it.
 
-    CO IDs used here must match co_data.json:
-      24 = Nell, 28 = Rachel, 25 = Flak, 26 = Jugger
+def _is_dual_luck_bounds(bounds: tuple[int, int]) -> bool:
+    """True when AWBW uses separate bad-luck and good-luck dice (mixed or symmetric Sonja)."""
+    low, high_ex = bounds
+    return low < 0 and (high_ex > 0 or high_ex == 0)
+
+
+def luck_net_bounds_for_co(co: COState) -> tuple[int, int]:
+    """Min/max net luck contribution ``L - LB`` (inclusive) for ``co``'s active power tier."""
+    bounds = co.luck_bounds()
+    if bounds is None:
+        return 0, 9
+    low, high_ex = bounds
+    if _is_dual_luck_bounds(bounds):
+        if high_ex == 0:
+            cap = -low
+            return -cap, cap
+        return -(-low), high_ex - 1
+    vals = [_single_roll_net_luck(low, high_ex, r) for r in range(10)]
+    return min(vals), max(vals)
+
+
+def _draw_luck_digit(luck_rng: Optional[random.Random]) -> int:
+    if luck_rng is not None:
+        return luck_rng.randint(0, 9)
+    return random.randint(0, 9)
+
+
+def _scale_dual_luck_arm(low: int, high_exclusive: int, roll: int) -> int:
+    """Map one luck digit into one arm: inclusive ``low .. high_exclusive-1``."""
+    return _single_roll_net_luck(low, high_exclusive, roll)
+
+
+def _resolve_attack_luck_terms(
+    attacker_co: COState,
+    luck_roll: Optional[int],
+    luck_roll_bad: Optional[int],
+    luck_rng: Optional[random.Random],
+) -> tuple[int, int]:
+    """Return ``(L, LB)`` good/bad luck percentages for the attack term."""
+    bounds = attacker_co.luck_bounds()
+    if bounds is None:
+        r = luck_roll if luck_roll is not None else _draw_luck_digit(luck_rng)
+        return _bounded_luck_digit(r), 0
+    low, high_ex = bounds
+    if _is_dual_luck_bounds(bounds):
+        rg = luck_roll if luck_roll is not None else _draw_luck_digit(luck_rng)
+        rb = luck_roll_bad if luck_roll_bad is not None else _draw_luck_digit(luck_rng)
+        if high_ex == 0:
+            cap = -low
+            l_val = _scale_dual_luck_arm(0, cap + 1, rg)
+            lb_val = _scale_dual_luck_arm(0, cap + 1, rb)
+        else:
+            l_val = _scale_dual_luck_arm(0, high_ex, rg)
+            lb_val = _scale_dual_luck_arm(0, (-low) + 1, rb)
+        return l_val, lb_val
+    r = luck_roll if luck_roll is not None else _draw_luck_digit(luck_rng)
+    luck_val = _single_roll_net_luck(low, high_ex, r)
+    return max(0, luck_val), max(0, -luck_val)
+
+
+def _get_luck(co: COState, roll: int) -> int:
+    """Legacy net luck from a **single** 0–9 digit (non–dual-luck COs only).
+
+    Dual-luck COs (Sonja / Flak / Jugger day-to-day and powers) raise:
+    use :func:`luck_net_bounds_for_co` or pass ``luck_roll`` and
+    ``luck_roll_bad`` into :func:`calculate_damage`.
     """
-    # Nell: COP ×3 luck (max 29), SCOP ×6 (max 59)
-    if co_id == 24:
-        if scop:
-            return min(roll * 6, 59)
-        if cop:
-            return min(roll * 3, 29)
+    bounds = co.luck_bounds()
+    if bounds is None:
         return min(roll, 9)
-
-    # Rachel: COP ×2 luck (max 19)
-    if co_id == 28:
-        if cop or scop:
-            return min(roll * 2, 19)
-        return min(roll, 9)
-
-    # Flak: negative to positive luck, scaled by power state
-    if co_id == 25:
-        if scop:
-            return roll * 4 - 10
-        if cop:
-            return roll * 2 - 5
-        return roll - 2
-
-    # Jugger: similar extreme variance to Flak but slightly wider
-    if co_id == 26:
-        if scop:
-            return roll * 5 - 10
-        if cop:
-            return roll * 3 - 5
-        return roll * 2 - 3
-
-    return min(roll, 9)
+    low, high_ex = bounds
+    if _is_dual_luck_bounds(bounds):
+        raise ValueError(
+            "dual-luck CO: use luck_net_bounds_for_co or calculate_damage(..., luck_roll=..., luck_roll_bad=...)"
+        )
+    return _single_roll_net_luck(low, high_ex, roll)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +345,7 @@ def calculate_damage(
     attacker_co: COState,
     defender_co: COState,
     luck_roll: Optional[int] = None,
+    luck_roll_bad: Optional[int] = None,
     *,
     counter_amp: float = 1.0,
     luck_rng: Optional[random.Random] = None,
@@ -295,8 +356,9 @@ def calculate_damage(
     Returns damage in HP points (0–100 internal scale), or None if the
     attacker cannot attack the defender (missing table entry).
 
-    luck_roll: explicit 0–9 value for deterministic tests; random if None.
-    luck_rng: when ``luck_roll`` is None and this is set, draw 0–9 from here;
+    luck_roll: explicit 0–9 good-luck digit for deterministic tests; random if None.
+    luck_roll_bad: second digit for dual-luck COs only (bad-luck arm); random if None.
+    luck_rng: when a digit is None and this is set, draws use ``randint(0, 9)`` here;
         otherwise fall back to the process-global ``random`` module (legacy).
     counter_amp: multiplier applied to the raw damage before AWBW rounding.
         Used by ``calculate_counterattack`` to inject Sonja's D2D counter ×1.5
@@ -323,7 +385,7 @@ def calculate_damage(
     def_unit_class = UNIT_STATS[defender.unit_type].unit_class
 
     # --- Attack Value ---
-    av = attacker_co.total_atk(unit_class)
+    av = attacker_co.total_atk_for_unit(attacker.unit_type)
 
     # Lash (co_id=16): terrain stars add to ATK when her power is active
     if attacker_co.co_id == 16:
@@ -337,14 +399,9 @@ def calculate_damage(
     av += _colin_atk_rider(attacker_co)
 
     # --- Luck ---
-    if luck_roll is None:
-        if luck_rng is not None:
-            luck_roll = luck_rng.randint(0, 9)
-        else:
-            luck_roll = random.randint(0, 9)
-    luck_val = _get_luck(attacker_co.co_id, luck_roll, attacker_co.cop_active, attacker_co.scop_active)
-    l_val  = max(0, luck_val)
-    lb_val = max(0, -luck_val)
+    l_val, lb_val = _resolve_attack_luck_terms(
+        attacker_co, luck_roll, luck_roll_bad, luck_rng,
+    )
 
     # AWBW damage uses display HP bars (1–10, ceilinged) on both sides. Using
     # raw internal HP (1–100) for HPD makes ``dtr × hpd`` 10× too large and
@@ -367,7 +424,7 @@ def calculate_damage(
     # § "Reverted: Hidden HP damage rider".
 
     # --- Defense Value ---
-    dv = defender_co.total_def(def_unit_class)
+    dv = defender_co.total_def_for_unit_against(defender.unit_type, attacker.unit_type)
 
     # Terrain defense stars
     dtr = defender_terrain.defense
@@ -411,27 +468,43 @@ def damage_range(
     table entry). Otherwise returns ``(min_dmg, max_dmg)`` on the internal
     0–100 scale with ``0 <= min_dmg <= max_dmg``.
 
-    Implementation note: instead of reimplementing the formula, we sweep
-    every legal ``luck_roll`` in ``[0, 9]`` through ``calculate_damage``
-    (luck is the only stochastic input; everything else is deterministic
-    from these args) and return the observed extremes. This automatically
-    covers Nell's ×6 scaling, Flak/Jugger's negative-luck tails, and any
-    future CO-specific luck curve without duplication.
+    Implementation note: instead of reimplementing the formula, we sweep every
+    legal luck digit through ``calculate_damage`` (one digit for single-luck
+    COs; the Cartesian product ``[0,9]²`` for dual-luck COs such as Sonja /
+    Flak / Jugger). Luck is the only stochastic input; everything else is
+    deterministic from these args.
     """
     if get_base_damage(attacker.unit_type, defender.unit_type) is None:
         return None
 
+    bounds = attacker_co.luck_bounds()
+    dual = bounds is not None and _is_dual_luck_bounds(bounds)
+
     vals: list[int] = []
-    for roll in range(10):
-        d = calculate_damage(
-            attacker, defender,
-            attacker_terrain, defender_terrain,
-            attacker_co, defender_co,
-            luck_roll=roll,
-        )
-        if d is None:
-            return None
-        vals.append(d)
+    if dual:
+        for rg in range(10):
+            for rb in range(10):
+                d = calculate_damage(
+                    attacker, defender,
+                    attacker_terrain, defender_terrain,
+                    attacker_co, defender_co,
+                    luck_roll=rg,
+                    luck_roll_bad=rb,
+                )
+                if d is None:
+                    return None
+                vals.append(d)
+    else:
+        for roll in range(10):
+            d = calculate_damage(
+                attacker, defender,
+                attacker_terrain, defender_terrain,
+                attacker_co, defender_co,
+                luck_roll=roll,
+            )
+            if d is None:
+                return None
+            vals.append(d)
     return min(vals), max(vals)
 
 
@@ -448,6 +521,7 @@ def calculate_counterattack(
     defender_co: COState,
     attack_damage: int,
     luck_roll: Optional[int] = None,
+    luck_roll_bad: Optional[int] = None,
     *,
     luck_rng: Optional[random.Random] = None,
 ) -> Optional[int]:
@@ -465,6 +539,10 @@ def calculate_counterattack(
     counted the forward strike and silently halved the counter damage for
     every non-Sonja engagement. ``counter_unit`` now uses ``defender`` in-
     place for the standard path; Sonja SCOP reverses the reduction.
+
+    Luck mirrors :func:`calculate_damage`: dual-luck COs consume ``luck_roll``
+    (good arm) and ``luck_roll_bad`` (bad arm); omitting either draws from
+    ``luck_rng`` / ``random`` independently (two draws per counter).
     """
     def_stats = UNIT_STATS[defender.unit_type]
 
@@ -502,6 +580,7 @@ def calculate_counterattack(
         defender_terrain, attacker_terrain,
         defender_co, attacker_co,
         luck_roll=luck_roll,
+        luck_roll_bad=luck_roll_bad,
         counter_amp=counter_amp,
         luck_rng=luck_rng,
     )

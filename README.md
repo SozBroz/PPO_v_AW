@@ -8,7 +8,7 @@ Advance Wars engine, AI training pipeline, in-browser replay, and zip export too
 
 ## Reference
 
-**In-repo replay:** run `python -m server.app` and open `/replay/` — games append to `logs/game_log.jsonl` from training (`rl/env`). See `server/routes/replay.py`, `server/static/replay.js`.
+**In-repo replay:** run `python -m server` or `python -m server.app` and open `/replay/` — games append to `logs/game_log.jsonl` from training (`rl/env`). See `server/routes/replay.py`, `server/static/replay.js`.
 
 **Zip export format** (`tools/export_awbw_replay*.py`) targets the same on-disk layout as the open-source [AWBW Replay Player](https://github.com/DeamonHunter/AWBW-Replay-Player) (MIT). We do not ship that C# app; read parsers and JSON on GitHub when debugging. Optional local clone: `git clone --depth 1 … third_party/AWBW-Replay-Player` (still gitignored if present).
 
@@ -55,6 +55,12 @@ Train or copy a MaskablePPO zip into `checkpoints/latest.zip` (or `checkpoint_*.
 
 ```powershell
 python -m server.app
+```
+
+Equivalent: ``python -m server`` from the repo root, or ``scripts\run_play_server.cmd``. Alternatively, with Flask’s CLI (after ``pip install -r requirements.txt`` loads ``python-dotenv`` and `.flaskenv`):
+
+```powershell
+flask run --no-reload --port 5000
 ```
 
 Open `/play/`. The dev server must run **without** the Werkzeug reloader wiping in-memory sessions (`use_reloader=False` is set in `server/app.py`; or use `flask run --no-reload`). API, BC pipeline, post-BC eval, and BUILD/END_TURN caveats are documented in **`docs/play_ui.md`**.

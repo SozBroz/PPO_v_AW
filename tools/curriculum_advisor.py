@@ -598,7 +598,7 @@ def _finished_rows_for_machine(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in _parse_log_lines(path):
-        if "turns" not in row:
+        if "turns" not in row and "days" not in row:
             continue
         if machine_id is not None:
             mid = row.get("machine_id")
@@ -707,7 +707,7 @@ def compute_metrics(
 
         wins.append(1.0 if game_log_row_learner_win(r) else 0.0)
 
-        t = r.get("turns")
+        t = r.get("days", r.get("turns"))
         t_f = _safe_float(t)
         turns.append(t_f)
         early.append(1.0 if t_f < 20.0 else 0.0)

@@ -64,7 +64,7 @@ class SpiritConfig:
 
     p_snowball: float = 0.65
     p_trailer_resign_max: float = 0.35
-    value_margin: float = 0.10
+    value_margin: float = 0.15
     # sigmoid(v / T)
     p_win_temperature: float = 1.0
     # Optional comma-separated tier allow list (empty = all)
@@ -85,7 +85,7 @@ def config_from_env() -> SpiritConfig:
     c = SpiritConfig(
         p_snowball=_read_env_float("AWBW_SPIRIT_P_SNOWBALL", 0.65),
         p_trailer_resign_max=_read_env_float("AWBW_SPIRIT_P_TRAILER_RESIGN", 0.35),
-        value_margin=_read_env_float("AWBW_SPIRIT_VALUE_MARGIN", 0.10),
+        value_margin=_read_env_float("AWBW_SPIRIT_VALUE_MARGIN", 0.15),
         p_win_temperature=max(1e-6, _read_env_float("AWBW_SPIRIT_P_WIN_TEMP", 1.0)),
     )
     raw = (os.environ.get("AWBW_SPIRIT_TIERS", "") or "").strip()
@@ -168,7 +168,7 @@ def snowball_material_holds(m: dict[str, Any], seat: int, cfg: SpiritConfig) -> 
 def resign_crush_holds(
     m: dict[str, Any], seat: int, p_win_seat: float, cfg: SpiritConfig
 ) -> bool:
-    """Trailer S is down ≥2 on props+count; enemy has ≥10% army value lead; pS low."""
+    """Trailer S is down ≥2 on props+count; enemy has ≥15% army value lead; pS low."""
     d_prop, d_count, p0v, p1v = material_margins(m, cfg.value_margin)
     if seat == 0:
         if d_prop > -2 or d_count > -2 or not p1v:

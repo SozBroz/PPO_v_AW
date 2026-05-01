@@ -8,7 +8,7 @@ per-machine rolling-window logic in 10g/10h/11d is impossible; without
 Schema 1.8 added explicit episode-end flags. Schema 1.9 adds ``learner_seat``,
 ``reward_mode``, ``arch_version``, ``opponent_sampler``; ``agent_plays`` mirrors
 ``learner_seat``. Schema 1.10 adds optional ``tie_breaker_property_count`` (int)
-for step-cap property-lead partial wins. Schema 1.11 logs P0 vs P1 property
+for step-cap property-lead partial wins (lead ≥ 1 in the learner frame). Schema 1.11 logs P0 vs P1 property
 tiebreak for env truncation when the engine never set a winner
 (``env_step_cap_tie`` / ``env_step_cap_tiebreak``).
 
@@ -80,7 +80,7 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     monkeypatch.delenv("AWBW_MACHINE_ID", raising=False)
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
-    assert row["log_schema_version"] == "1.14"
+    assert row["log_schema_version"] == "1.17"
     assert len(row.get("alive_unit_count", [])) == 2
     assert len(row.get("army_value", [])) == 2
     assert row.get("tie_breaker_property_count") is None
@@ -98,6 +98,8 @@ def test_log_schema_v17_required_fields_machine_id_unset(
         "from a real id)"
     )
 
+    assert row.get("async_rollout_mode") is None
+
     assert "terrain_usage_p0" in row
     val = row["terrain_usage_p0"]
     assert isinstance(val, float), f"terrain_usage_p0 must be float, got {type(val)}"
@@ -108,6 +110,16 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     assert row.get("truncation_reason") is None
     assert row.get("phi_enemy_property_captures") == 0
 
+    for k in (
+        "neutral_income_remaining_by_day_7",
+        "neutral_income_remaining_by_day_9",
+        "neutral_income_remaining_by_day_11",
+        "neutral_income_remaining_by_day_13",
+        "neutral_income_remaining_by_day_15",
+    ):
+        assert k in row
+        assert row[k] is None
+
 
 def test_log_schema_v17_machine_id_from_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -116,5 +128,48 @@ def test_log_schema_v17_machine_id_from_env(
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
     assert row["machine_id"] == "test-pc"
-    assert row["log_schema_version"] == "1.14"
+    assert row["log_schema_version"] == "1.17"
     assert isinstance(row["terrain_usage_p0"], float)
+
+
+def test_log_async_rollout_mode_written_when_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_path = tmp_path / "game_log.jsonl"
+    monkeypatch.setattr("rl.env.GAME_LOG_PATH", log_path)
+    monkeypatch.delenv("AWBW_SESSION_GAME_COUNTER_DB", raising=False)
+
+    from rl.env import AWBWEnv
+
+    env = AWBWEnv(
+        map_pool=_single_map_pool(),
+        opponent_policy=None,
+        co_p0=1,
+        co_p1=1,
+        tier_name="T3",
+    )
+    env.reset(seed=0)
+    env.set_async_rollout_mode("hist")
+    env.state.done = True
+    env.state.winner = 0
+    env.state.win_reason = "test"
+    env._log_finished_game()
+
+    raw = log_path.read_text(encoding="utf-8").strip()
+    row = json.loads(raw.split("\n\n")[0])
+    assert row["log_schema_version"] == "1.17"
+    assert row.get("async_rollout_mode") == "hist"
+
+
+def test_set_async_rollout_mode_rejects_invalid() -> None:
+    from rl.env import AWBWEnv
+
+    env = AWBWEnv(
+        map_pool=_single_map_pool(),
+        opponent_policy=None,
+        co_p0=1,
+        co_p1=1,
+        tier_name="T3",
+    )
+    with pytest.raises(ValueError):
+        env.set_async_rollout_mode("other")

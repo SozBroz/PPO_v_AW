@@ -7,6 +7,8 @@ Usage:
   python train.py --n-envs 4                  # 4 parallel game workers
   python train.py --device cpu                # force CPU (no GPU)
   python train.py --map-id 133665             # train on one map only
+  python train.py --map-id 123858,133665     # random map each episode from this list
+  python train.py --co-p0 1,14 --co-p1 12    # random CO per seat from lists (with --tier)
   python train.py --map-id std               # GL std map pool (random; same as omitting --map-id)
   python train.py --watch-only                # watch a single random game (debug)
   python train.py --watch-only --map-id 133665 --co-p0 7 --co-p1 1
@@ -21,6 +23,7 @@ Usage:
 """
 import argparse
 import os
+import random
 import signal
 import sys
 from pathlib import Path
@@ -28,25 +31,69 @@ from pathlib import Path
 ROOT = Path(__file__).parent.resolve()
 
 
-def _parse_map_id_cli(value: str) -> int | None:
+def _parse_map_id_cli(value: str) -> list[int] | None:
     """
-    ``--map-id`` as a non-negative int, or the literals ``std`` / ``gl-std`` (case-insensitive)
-    meaning the Global League **std** map pool with per-episode random map — same as omitting
-    ``--map-id`` and distinct from a fixed id (e.g. 123858 Misery).
+    ``--map-id`` as comma-separated non-negative ints, a single int, or ``std`` / ``gl-std``
+    (case-insensitive) for the full Global League **std** pool — same as omitting ``--map-id``.
     """
     s = (value or "").strip()
     if s.lower() in ("std", "gl-std"):
         return None
-    try:
-        n = int(s, 10)
-    except ValueError as e:
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
         raise argparse.ArgumentTypeError(
-            f"invalid --map-id {value!r}: use a non-negative map id, or 'std' / 'gl-std' "
-            f"for the GL std map pool"
-        ) from e
-    if n < 0:
-        raise argparse.ArgumentTypeError(f"--map-id must be non-negative, got {n}")
-    return n
+            f"invalid --map-id {value!r}: use non-negative id(s), comma-separated, "
+            f"or 'std' / 'gl-std'"
+        )
+    out: list[int] = []
+    for p in parts:
+        if p.lower() in ("std", "gl-std"):
+            raise argparse.ArgumentTypeError(
+                f"invalid --map-id segment {p!r}: use 'std' alone for the full pool, not in a list"
+            )
+        try:
+            n = int(p, 10)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"invalid --map-id token {p!r}: expected non-negative integer"
+            ) from e
+        if n < 0:
+            raise argparse.ArgumentTypeError(f"--map-id must be non-negative, got {n}")
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _parse_co_csv_cli(value: str) -> list[int]:
+    """``--co-p0`` / ``--co-p1`` as comma-separated CO ids (order preserved, duplicates dropped)."""
+    s = (value or "").strip()
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("CO list must contain at least one integer id")
+    out: list[int] = []
+    for p in parts:
+        try:
+            n = int(p, 10)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"invalid CO id token {p!r}: expected integer"
+            ) from e
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _parse_capture_move_gate_probability_cli(value: str) -> float:
+    """``--capture-move-gate P`` with P in [0, 1] (fractional probability)."""
+    try:
+        v = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"invalid probability: {value!r}") from e
+    if v < 0.0 or v > 1.0:
+        raise argparse.ArgumentTypeError(
+            f"--capture-move-gate expects P in [0, 1], got {value!r}"
+        )
+    return v
 
 
 def _load_dotenv(path: Path) -> None:
@@ -100,18 +147,31 @@ def _print_native_implementation_diag() -> None:
     print(f"[train] native: encoder={enc}, action={act}, occupancy={occ}")
 
 
+class _MaxCalendarDaysAction(argparse.Action):
+    """``--max-days`` is canonical; ``--max-turns`` warns and sets the same cap."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if option_string == "--max-turns":
+            print(
+                "[train] --max-turns is deprecated; use --max-days "
+                "(same end-inclusive calendar cap).",
+                file=sys.stderr,
+            )
+        setattr(namespace, self.dest, values)
+
+
 def _apply_stage1_narrow_defaults(args: argparse.Namespace) -> None:
     """Fill Phase 1a narrow fields when ``--stage1-narrow`` is set (unset slots only)."""
     if not getattr(args, "stage1_narrow", False):
         return
     if args.map_id is None:
-        args.map_id = 123858
+        args.map_id = [123858]
     if args.tier is None:
         args.tier = "T3"
     if args.co_p0 is None:
-        args.co_p0 = 1
+        args.co_p0 = [1]
     if args.co_p1 is None:
-        args.co_p1 = 1
+        args.co_p1 = [1]
     if args.curriculum_tag is None:
         args.curriculum_tag = "stage1-misery-andy"
     print(
@@ -140,8 +200,9 @@ def _sync_worker_inherited_env_flags(args: argparse.Namespace) -> None:
     else:
         os.environ.pop("AWBW_EGOCENTRIC_EPISODE_PROB", None)
 
-    if args.capture_move_gate:
-        os.environ["AWBW_CAPTURE_MOVE_GATE"] = "1"
+    cmg = float(getattr(args, "capture_move_gate", 0.0) or 0.0)
+    if cmg > 0.0:
+        os.environ["AWBW_CAPTURE_MOVE_GATE"] = str(cmg)
     else:
         os.environ.pop("AWBW_CAPTURE_MOVE_GATE", None)
 
@@ -210,8 +271,8 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         type=_parse_map_id_cli,
         default=None,
         help=(
-            "Fixed map id (int), or 'std' / 'gl-std' for the GL std map pool (random map per "
-            "episode; same as omitting this flag). Default when omitted: same std-pool behavior."
+            "Map id(s): non-negative int or comma-separated list (uniform random each episode). "
+            "Use 'std' / 'gl-std' alone for the full GL std pool (same as omitting this flag)."
         ),
     )
     parser.add_argument(
@@ -227,16 +288,26 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         help="Compute map features from CSV files",
     )
     parser.add_argument(
-        "--co-p0", type=int, default=None,
-        help="Fix P0 CO id (training and watch); default watch-only: 1=Andy",
+        "--co-p0", type=_parse_co_csv_cli, default=None,
+        help=(
+            "P0 CO id(s): comma-separated list (uniform random each episode) or single id. "
+            "Omitted → random CO from the pinned tier roster each episode when --tier is set; "
+            "otherwise tier/co sampling follows map pool rules. Watch-only defaults elsewhere."
+        ),
     )
     parser.add_argument(
-        "--co-p1", type=int, default=None,
-        help="Fix P1 CO id (training and watch); default watch-only: 7=Max",
+        "--co-p1", type=_parse_co_csv_cli, default=None,
+        help=(
+            "P1 CO id(s): same semantics as --co-p0. "
+            "Omitted with --tier draws uniformly from that tier's roster per episode."
+        ),
     )
     parser.add_argument(
         "--tier", type=str, default=None,
-        help='Fixed tier name for training (e.g. T3 for Misery Andy mirror with --co-p0 1 --co-p1 1)',
+        help=(
+            "Pinned GL tier name per sampled map (e.g. T3). Roster is used even if that row "
+            "is disabled on the map JSON; omit CO flags to sample random COs from that roster."
+        ),
     )
     parser.add_argument(
         "--curriculum-broad-prob", type=float, default=0.0,
@@ -258,11 +329,27 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--save-every", type=int, default=50_000,
-        help="Save checkpoint every N steps (default: 50k)",
+        help=(
+            "Save checkpoint_<utc>.zip every N env steps (default: 50k). "
+            "By default --publish-latest-each-save also overwrites latest.zip each tick."
+        ),
     )
     parser.add_argument(
-        "--checkpoint-pool", type=int, default=5,
-        help="Historical checkpoints to rotate as opponent (default: 5)",
+        "--publish-latest-each-save",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After each timed checkpoint_*.zip save, overwrite latest.zip (default: on). "
+            "Use --no-publish-latest-each-save to cut shared-disk writes; latest still saves on exit."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-pool", type=int, default=24,
+        help=(
+            "Opponent samples only among the K newest checkpoint_*.zip files "
+            "(local + fleet when --pool-from-fleet). Use 0 for no cap (all on disk). "
+            "Default: 24."
+        ),
     )
     parser.add_argument(
         "--checkpoint-zip-cap",
@@ -565,13 +652,19 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--capture-move-gate", action="store_true",
+        "--capture-move-gate",
+        nargs="?",
+        const=1.0,
+        default=0.0,
+        metavar="P",
+        type=_parse_capture_move_gate_probability_cli,
         help=(
-            "Restrict infantry/mech MOVE choices to capturable enemy/neutral "
-            "property tiles whenever any are reachable. Closes the "
-            "SELECT-MOVE-WAIT-in-place loophole. Sets AWBW_CAPTURE_MOVE_GATE=1; "
-            "SubprocVecEnv workers inherit. Engine step() bypasses the mask, "
-            "so replays are unaffected."
+            "Infantry/mech MOVE gate near capturable properties: probability P in "
+            "[0,1] that reachable MOVE destinations are restricted to capturable tiles "
+            "(closes SELECT-MOVE-WAIT in place). 0 disables. Omit the value for P=1. "
+            "For 0<P<1 the trial is deterministic from game state+capturable set "
+            "(does not consume combat RNG; redundant legal checks agree). Sets "
+            "AWBW_CAPTURE_MOVE_GATE for workers."
         ),
     )
     parser.add_argument(
@@ -602,6 +695,30 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
             "Hard cap on opponent microsteps per opponent turn; truncates mid-turn "
             "if exceeded. 0 or negative disables the explicit cap (env still derives "
             "a cap from max_env_steps when that is set)."
+        ),
+    )
+    parser.add_argument(
+        "--max-days",
+        "--max-turns",
+        dest="max_days",
+        type=int,
+        default=None,
+        metavar="N",
+        action=_MaxCalendarDaysAction,
+        help=(
+            "End-inclusive engine calendar day cap (``GameState.turn`` / property tiebreak; "
+            "play days 1..N). Omit for engine default (100). Alias ``--max-turns`` (deprecated)."
+        ),
+    )
+    parser.add_argument(
+        "--cop-disable-per-seat-p",
+        type=float,
+        default=None,
+        metavar="P",
+        help=(
+            "Per curriculum episode, each seat that has a COP independently disables "
+            "COP activation with this probability in [0,1] (SCOP unchanged). Omit to read "
+            "AWBW_COP_DISABLE_PER_SEAT_P (default off). Ignored for live snapshot loads."
         ),
     )
     parser.add_argument(
@@ -750,9 +867,26 @@ def main() -> None:
         print("[train] Running engine smoke-test (random policy, single game)...")
         _install_sigint_first_only()
         from rl.self_play import watch_game
-        co_p0 = args.co_p0 if args.co_p0 is not None else 1
-        co_p1 = args.co_p1 if args.co_p1 is not None else 7
-        watch_game(map_id=args.map_id, co_p0=co_p0, co_p1=co_p1)
+
+        def _watch_co(ac: list[int] | None, default: int) -> int:
+            if ac is None:
+                return default
+            if len(ac) == 1:
+                return ac[0]
+            return int(random.choice(ac))
+
+        mid_w: int | None
+        if args.map_id is None:
+            mid_w = None
+        elif len(args.map_id) == 1:
+            mid_w = args.map_id[0]
+        else:
+            mid_w = int(random.choice(args.map_id))
+        watch_game(
+            map_id=mid_w,
+            co_p0=_watch_co(args.co_p0, 1),
+            co_p1=_watch_co(args.co_p1, 7),
+        )
         return
 
     # ── Training ──────────────────────────────────────────────────────────────
@@ -791,8 +925,18 @@ def main() -> None:
         f"(rollout {args.n_steps * args.n_envs:,} env steps/update)"
     )
     print(f"[train] Steps   : {args.iters if args.iters is not None else 'unlimited'}")
-    _map_line = "std (GL pool)" if args.map_id is None else str(int(args.map_id))
+    _map_line = (
+        "std (GL pool)"
+        if args.map_id is None
+        else (
+            str(args.map_id[0])
+            if len(args.map_id) == 1
+            else f"{len(args.map_id)} maps [{','.join(str(x) for x in args.map_id)}]"
+        )
+    )
     print(f"[train] Map     : {_map_line}")
+    if args.max_days is not None:
+        print(f"[train] Days    : max_days={int(args.max_days)} (engine calendar cap)")
     if args.tier or args.co_p0 is not None or args.co_p1 is not None:
         print(
             f"[train] Curriculum: tier={args.tier!r} co_p0={args.co_p0} co_p1={args.co_p1} "
@@ -898,6 +1042,13 @@ def main() -> None:
         None if args.max_p1_microsteps <= 0 else int(args.max_p1_microsteps)
     )
 
+    max_turns = args.max_days
+    if max_turns is not None:
+        max_turns_i = int(max_turns)
+        if max_turns_i < 1:
+            parser.error("--max-days must be >= 1 when provided")
+        max_turns = max_turns_i
+
     live_games_id = list(args.live_games_id) if args.live_games_id else None
     live_learner_seats = None
     if args.live_learner_seats:
@@ -913,6 +1064,7 @@ def main() -> None:
         batch_size=args.batch_size,
         device=device,
         save_every=args.save_every,
+        publish_latest_each_save=bool(args.publish_latest_each_save),
         checkpoint_pool_size=args.checkpoint_pool,
         map_id=args.map_id,
         co_p0=args.co_p0,
@@ -953,6 +1105,7 @@ def main() -> None:
         mcts_max_plan_actions=args.mcts_max_plan_actions,
         max_env_steps=max_env_steps,
         max_p1_microsteps=max_p1_microsteps,
+        max_turns=max_turns,
         live_games_id=live_games_id,
         live_learner_seats=live_learner_seats,
         live_snapshot_dir=args.live_snapshot_dir,
@@ -975,6 +1128,7 @@ def main() -> None:
             else int(args.opening_book_days)
         ),
         opening_book_seed=int(getattr(args, "opening_book_seed", 0) or 0),
+        cop_disable_per_seat_p=getattr(args, "cop_disable_per_seat_p", None),
     )
     _install_sigint_first_only()
     trainer.train()

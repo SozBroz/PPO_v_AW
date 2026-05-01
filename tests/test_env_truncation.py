@@ -1,4 +1,4 @@
-"""Forced episode truncation (max_env_steps) and game_log rows (schema 1.14)."""
+"""Forced episode truncation (max_env_steps) and game_log rows (schema 1.17)."""
 from __future__ import annotations
 
 import json
@@ -67,7 +67,7 @@ def test_max_env_steps_truncates_and_logs(
     assert row["truncated"] is True
     assert row["truncation_reason"] == "max_env_steps"
     assert row["terminated"] is False
-    assert row["log_schema_version"] == "1.14"
+    assert row["log_schema_version"] == "1.17"
     assert "alive_unit_count" in row and "army_value" in row
     assert len(row["alive_unit_count"]) == 2
     assert len(row["army_value"]) == 2
@@ -81,6 +81,6 @@ def test_synthetic_env_cap_property_tiebreak_helper() -> None:
     from rl.env import _synthetic_env_cap_property_tiebreak
 
     assert _synthetic_env_cap_property_tiebreak(5, 5) == (-1, "env_step_cap_tie")
-    assert _synthetic_env_cap_property_tiebreak(5, 6) == (-1, "env_step_cap_tie")
+    assert _synthetic_env_cap_property_tiebreak(5, 6) == (1, "env_step_cap_tiebreak")
     assert _synthetic_env_cap_property_tiebreak(7, 5) == (0, "env_step_cap_tiebreak")
     assert _synthetic_env_cap_property_tiebreak(4, 7) == (1, "env_step_cap_tiebreak")

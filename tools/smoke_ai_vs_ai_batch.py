@@ -2,7 +2,7 @@
 
 Example::
 
-    python tools/smoke_ai_vs_ai_batch.py --runs 10 --max-turns 100 --random
+    python tools/smoke_ai_vs_ai_batch.py --runs 10 --max-days 100 --random
 
 Uses fixed ``--game-id`` ranges so outputs land in ``replays/`` predictably.
 """
@@ -23,7 +23,15 @@ if str(ROOT) not in sys.path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runs", type=int, default=10, help="Number of ai_vs_ai sessions")
-    ap.add_argument("--max-turns", type=int, default=100, dest="max_turns")
+    ap.add_argument(
+        "--max-days",
+        "--max-turns",
+        type=int,
+        default=100,
+        dest="max_days",
+        metavar="N",
+        help="Forwarded to ai_vs_ai (end-inclusive calendar cap).",
+    )
     ap.add_argument("--random", action="store_true", help="Random policy (no checkpoint)")
     ap.add_argument("--game-id-base", type=int, default=950_000, help="First --game-id")
     ap.add_argument("--seed-base", type=int, default=50_000, help="First --seed offset")
@@ -40,8 +48,8 @@ def main() -> int:
             str(ROOT / "rl" / "ai_vs_ai.py"),
             "--no-follow-train",
             "--no-open",
-            "--max-turns",
-            str(args.max_turns),
+            "--max-days",
+            str(args.max_days),
             "--seed",
             str(seed),
             "--game-id",

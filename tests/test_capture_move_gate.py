@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from engine.action import (
     Action,
     ActionStage,
@@ -11,6 +9,7 @@ from engine.action import (
     _get_move_actions,
     get_reachable_tiles,
     get_terrain,
+    parse_capture_move_gate_env_value,
 )
 from engine.unit import UNIT_STATS, UnitType
 from tests.test_engine_awbw_subset import _blank_state, _spawn
@@ -77,6 +76,16 @@ def _move_positions(actions: list) -> set[tuple[int, int]]:
     return {a.move_pos for a in actions if a.move_pos is not None}
 
 
+def test_parse_capture_move_gate_env_value() -> None:
+    assert parse_capture_move_gate_env_value(None) == 0.0
+    assert parse_capture_move_gate_env_value("") == 0.0
+    assert parse_capture_move_gate_env_value("false") == 0.0
+    assert parse_capture_move_gate_env_value("1") == 1.0
+    assert parse_capture_move_gate_env_value("true") == 1.0
+    assert parse_capture_move_gate_env_value("0.75") == 0.75
+    assert parse_capture_move_gate_env_value("75") == 0.75
+
+
 def test_capture_move_gate_unset_matches_full_reachable(monkeypatch):
     monkeypatch.delenv("AWBW_CAPTURE_MOVE_GATE", raising=False)
 
@@ -109,6 +118,70 @@ def test_capture_move_gate_on_restricts_to_capturable_properties(monkeypatch):
 
     moves = _get_move_actions(s, 0)
     assert _move_positions(moves) == expected
+
+
+def test_capture_move_gate_stochastic_second_get_legal_matches_first(monkeypatch):
+    """Stochastic gate must not use luck_rng; repeated MOVE legals stay identical."""
+    monkeypatch.setenv("AWBW_CAPTURE_MOVE_GATE", "0.75")
+
+    def boom(*_a, **_k):
+        raise AssertionError("luck_rng.random must not gate capture moves (use hash trial)")
+
+    s = _blank_state()
+    pos_prop = _find_infantry_adjacent_to_enemy_property(s)
+    assert pos_prop[0] is not None
+    inf_pos, _ = pos_prop
+    inf = _spawn(s, UnitType.INFANTRY, 0, inf_pos)
+    s.step(Action(ActionType.SELECT_UNIT, unit_pos=inf.pos))
+
+    monkeypatch.setattr(s.luck_rng, "random", boom)
+    moves1 = _get_move_actions(s, 0)
+    moves2 = _get_move_actions(s, 0)
+    assert moves1 == moves2
+
+
+def test_capture_move_gate_stochastic_applies_when_trial_restricts(monkeypatch):
+    import engine.action as act
+
+    monkeypatch.setenv("AWBW_CAPTURE_MOVE_GATE", "0.75")
+    monkeypatch.setattr(
+        act, "_stochastic_capture_gate_restrict", lambda *a, **k: True
+    )
+
+    s = _blank_state()
+    pos_prop = _find_infantry_adjacent_to_enemy_property(s)
+    assert pos_prop[0] is not None
+    inf_pos, _ = pos_prop
+    inf = _spawn(s, UnitType.INFANTRY, 0, inf_pos)
+    s.step(Action(ActionType.SELECT_UNIT, unit_pos=inf.pos))
+
+    full = get_reachable_tiles(s, s.selected_unit)
+    expected = _capturable_positions_in_reach(s, 0, full)
+    assert len(expected) >= 1
+
+    moves = _get_move_actions(s, 0)
+    assert _move_positions(moves) == expected
+
+
+def test_capture_move_gate_stochastic_skips_when_trial_passes(monkeypatch):
+    import engine.action as act
+
+    monkeypatch.setenv("AWBW_CAPTURE_MOVE_GATE", "0.75")
+    monkeypatch.setattr(
+        act, "_stochastic_capture_gate_restrict", lambda *a, **k: False
+    )
+
+    s = _blank_state()
+    pos_prop = _find_infantry_adjacent_to_enemy_property(s)
+    assert pos_prop[0] is not None
+    inf_pos, _ = pos_prop
+    inf = _spawn(s, UnitType.INFANTRY, 0, inf_pos)
+    s.step(Action(ActionType.SELECT_UNIT, unit_pos=inf.pos))
+
+    full = get_reachable_tiles(s, s.selected_unit)
+
+    moves = _get_move_actions(s, 0)
+    assert _move_positions(moves) == full
 
 
 def test_capture_move_gate_on_no_capturable_in_reach_unrestricted(monkeypatch):

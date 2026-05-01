@@ -11,6 +11,7 @@ actors poll and reload ``policy.state_dict()`` when the version increases.
 from __future__ import annotations
 
 import multiprocessing as mp
+import math
 import os
 import queue
 import random
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import torch
+from stable_baselines3.common.utils import explained_variance as sb3_explained_variance
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
@@ -55,6 +57,47 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict
 
 if TYPE_CHECKING:
     from rl.self_play import SelfPlayTrainer
+
+
+def _nn_train_log_ratio_diagnostics(
+    log_pi_minus_mu: torch.Tensor,
+    *,
+    rho_floor: float,
+    rho_hi: float = 20.0,
+    kl_sym_abs_cap: float | None = None,
+) -> tuple[float, float, float | None, float, float, float]:
+    """Learner-vs-behaviour log-prob diagnostics for ``nn_train`` (see learner callsite)."""
+    lr = log_pi_minus_mu.detach().float().reshape(-1)
+    if kl_sym_abs_cap is None:
+        raw_sym = (os.environ.get("AWBW_ASYNC_NN_KL_DIAG_ABS") or "2.0").strip()
+        try:
+            kl_sym_abs_cap = float(raw_sym)
+        except ValueError:
+            kl_sym_abs_cap = 2.0
+    kl_sym_abs_cap = max(float(kl_sym_abs_cap), 1e-6)
+
+    lt_sym = lr.clamp(-kl_sym_abs_cap, kl_sym_abs_cap)
+    approx_kl = float(torch.mean(torch.exp(lt_sym) - 1.0 - lt_sym).cpu())
+
+    lr_v = lr.clamp(min=float(rho_floor), max=float(rho_hi))
+    approx_kl_vtrace_log = float(
+        torch.mean(torch.exp(lr_v) - 1.0 - lr_v).cpu()
+    )
+
+    raw_terms = torch.exp(lr) - 1.0 - lr
+    rk = float(raw_terms.mean().cpu())
+    approx_uncapped: float | None = rk if math.isfinite(rk) else None
+    ratio_mean = float(lr.mean().cpu())
+    frac_hi = float((lr >= float(rho_hi)).float().mean().cpu())
+    frac_lo = float((lr <= float(rho_floor)).float().mean().cpu())
+    return (
+        approx_kl,
+        approx_kl_vtrace_log,
+        approx_uncapped,
+        ratio_mean,
+        frac_hi,
+        frac_lo,
+    )
 
 
 def _async_actor_configure_cpu_parallelism() -> int:
@@ -314,6 +357,13 @@ def _dual_gradient_env(env: Any) -> Any:
     return getattr(env, "env", env)
 
 
+def _tag_dual_gradient_rollout_mode(dg_env: Any, mirror_mode: bool) -> None:
+    """Record per-episode async dual-gradient labelling for ``game_log.jsonl``."""
+    fn = getattr(dg_env, "set_async_rollout_mode", None)
+    if callable(fn):
+        fn("mirror" if mirror_mode else "hist")
+
+
 def actor_process_main(
     actor_id: int,
     env_factory: Callable[[], Any],
@@ -386,9 +436,11 @@ def actor_process_main(
             )
             if mirror_mode:
                 obs = dg_env.active_seat_observation()
+            use_mirror_dg = mirror_mode
+            _tag_dual_gradient_rollout_mode(dg_env, mirror_mode)
         else:
             mirror_mode = False
-        use_mirror_dg = bool(dual_gradient_self_play and mirror_mode)
+            use_mirror_dg = False
         if not isinstance(obs, dict):
             raise TypeError("AWBWEnv must return dict observations")
 
@@ -434,9 +486,11 @@ def actor_process_main(
                         )
                         if mirror_mode:
                             obs = dg_env.active_seat_observation()
+                        use_mirror_dg = mirror_mode
+                        _tag_dual_gradient_rollout_mode(dg_env, mirror_mode)
                     else:
                         mirror_mode = False
-                    use_mirror_dg = bool(dual_gradient_self_play and mirror_mode)
+                        use_mirror_dg = False
                 else:
                     obs = (
                         dg_env.active_seat_observation()
@@ -677,12 +731,15 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         fleet_opponent_root=trainer.fleet_opponent_root,
         max_env_steps=trainer.max_env_steps,
         max_p1_microsteps=trainer.max_p1_microsteps,
+        max_turns=getattr(trainer, "max_turns", None),
         opening_book_path=getattr(trainer, "opening_book_path", None),
         opening_book_seat=int(getattr(trainer, "opening_book_seat", 1) or 1),
         opening_book_prob=float(getattr(trainer, "opening_book_prob", 1.0) or 0.0),
         opening_book_strict_co=bool(getattr(trainer, "opening_book_strict_co", False)),
         opening_book_max_day=getattr(trainer, "opening_book_max_day", None),
         opening_book_seed=int(getattr(trainer, "opening_book_seed", 0) or 0),
+        cop_disable_per_seat_p=getattr(trainer, "cop_disable_per_seat_p", None),
+        opponent_pool_newest_k=int(getattr(trainer, "checkpoint_pool_size", 24) or 0),
     )
     n_live = len(getattr(trainer, "live_games_id", None) or [])
     # region agent log
@@ -1036,9 +1093,35 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                     ent_bonus = torch.zeros((), device=device)
                 loss = pi_loss + vf_coef * v_loss - ent_coef * ent_bonus
 
+            # Log-ratios: Schulman surrogate on symmetric ±KL cap (dash-friendly), V-trace
+            # log-clip analogue, uncapped surrogate, and clip hit rates (staleness).
+            with torch.no_grad():
+                (
+                    approx_kl_f,
+                    approx_kl_vtrace_log_f,
+                    approx_kl_uncapped_f,
+                    log_ratio_mean_f,
+                    log_rho_frac_at_hi_f,
+                    log_rho_frac_at_lo_f,
+                ) = _nn_train_log_ratio_diagnostics(
+                    logp_pi_tb - mu_logp_t,
+                    rho_floor=float(rho_floor),
+                )
+
+            pg_d = pg_adv.detach().flatten()
+            advantage_mean_f = float(pg_d.mean().cpu())
+            advantage_std_f = float(pg_d.std(unbiased=False).cpu())
+            vt_d = vs.detach().flatten()
+            return_mean_f = float(vt_d.mean().cpu())
+            vals_np = values_tb.detach().cpu().numpy().reshape(-1)
+            tgt_np = vt_d.cpu().numpy()
+            ev_try = float(np.asarray(sb3_explained_variance(vals_np, tgt_np)).reshape(-1)[0])
+            explained_var_f = ev_try if math.isfinite(ev_try) else None
+
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(pol.parameters(), max_grad_norm)
+            grad_norm_t = nn.utils.clip_grad_norm_(pol.parameters(), max_grad_norm)
+            grad_norm_f = float(grad_norm_t.detach().cpu().item())
             scaler.step(opt)
             scaler.update()
 
@@ -1053,8 +1136,12 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             pi_l = float(pi_loss.detach().cpu())
             v_l = float(v_loss.detach().cpu())
             ent_m = float(ent_bonus.detach().cpu())
+            # entropy_loss aligns with Stable-Baselines3 PPO/A2C: negative mean entropy
+            # (`loss += ent_coef * entropy_loss`).
+            entropy_loss_sb3 = -ent_m
+
             nn_row = {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "training_backend": "async",
                 "learner_update": int(learner_updates),
                 "total_timesteps": int(steps_done),
@@ -1062,6 +1149,22 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                 "policy_loss": pi_l,
                 "value_loss": v_l,
                 "entropy_mean": ent_m,
+                "entropy_loss": entropy_loss_sb3,
+                "entropy_coef": float(ent_coef),
+                # Schulman surrogate on symmetric ±KL cap (SB3-ish scale via ``AWBW_ASYNC_NN_KL_DIAG_ABS``).
+                "approx_kl": approx_kl_f,
+                # Schulman surrogate on IMPALA/V-trace pre-exp clamp [rho_floor, +20].
+                "approx_kl_vtrace_log": approx_kl_vtrace_log_f,
+                # Raw async staleness (omit if non-finite when exp overflows).
+                "approx_kl_uncapped": approx_kl_uncapped_f,
+                "log_ratio_mean": log_ratio_mean_f,
+                "log_rho_frac_at_hi": log_rho_frac_at_hi_f,
+                "log_rho_frac_at_lo": log_rho_frac_at_lo_f,
+                "explained_variance": explained_var_f,
+                "grad_norm": grad_norm_f,
+                "advantage_mean": advantage_mean_f,
+                "advantage_std": advantage_std_f,
+                "return_mean": return_mean_f,
                 "machine_id": os.environ.get("AWBW_MACHINE_ID"),
             }
             nn_row = {k: v for k, v in nn_row.items() if v is not None}
@@ -1134,7 +1237,11 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             if next_save_at is not None and steps_done >= next_save_at:
                 ckpt_stem = new_checkpoint_stem_utc()
                 trainer._save_checkpoint_with_publish(  # noqa: SLF001
-                    model, ckpt_stem, also_publish_as_latest=True
+                    model,
+                    ckpt_stem,
+                    also_publish_as_latest=bool(
+                        getattr(trainer, "publish_latest_each_save", True)
+                    ),
                 )
                 print(f"[async_impala] Saved {ckpt_stem}.zip (env_steps~{steps_done:,})")
                 while next_save_at is not None and steps_done >= next_save_at:
@@ -1182,6 +1289,9 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
 
     except KeyboardInterrupt:
         print("\n[async_impala] KeyboardInterrupt - saving latest...")
+        trainer._save_checkpoint_with_publish(model, "latest", also_publish_as_latest=False)  # noqa: SLF001
+    else:
+        print("\n[async_impala] Saving latest.zip after completed run...")
         trainer._save_checkpoint_with_publish(model, "latest", also_publish_as_latest=False)  # noqa: SLF001
     finally:
         stop_event.set()

@@ -102,7 +102,7 @@ def _run_symmetric_eval(
     json_out: Path,
     repo_root: Path,
     max_env_steps: int | None,
-    max_turns: int | None,
+    max_days: int | None,
 ) -> dict:
     """Invoke ``scripts/symmetric_checkpoint_eval.py --mcts-mode off`` and return parsed JSON.
 
@@ -138,8 +138,8 @@ def _run_symmetric_eval(
     ]
     if max_env_steps is not None:
         cmd += ["--max-env-steps", str(int(max_env_steps))]
-    if max_turns is not None:
-        cmd += ["--max-turns", str(int(max_turns))]
+    if max_days is not None:
+        cmd += ["--max-days", str(int(max_days))]
     subprocess.run(cmd, check=True, cwd=str(repo_root))
     return json.loads(Path(json_out).read_text(encoding="utf-8"))
 
@@ -193,10 +193,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Forwarded to symmetric eval; 0 = unlimited (Slice E default — runs to natural end).",
     )
     ap.add_argument(
+        "--max-days",
         "--max-turns",
+        dest="max_days",
         type=int,
         default=None,
-        help="Forwarded to symmetric eval (engine calendar tiebreak).",
+        help="Forwarded to symmetric eval (end-inclusive calendar tiebreak).",
     )
     return ap
 
@@ -270,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                 json_out=sym_json,
                 repo_root=REPO_ROOT,
                 max_env_steps=max_env_steps,
-                max_turns=args.max_turns,
+                max_days=args.max_days,
             )
         except subprocess.CalledProcessError as exc:
             print(

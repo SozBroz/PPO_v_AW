@@ -13,8 +13,11 @@ Training loop
 -------------
 - MaskablePPO (sb3_contrib) against rotating historical checkpoints
 - Logs every completed game to logs/game_log.jsonl
-- Saves a checkpoint every `save_every` env steps
-- Rotating opponent pool: keeps the last `checkpoint_pool_size` checkpoints (in-memory tail).
+- Saves `checkpoint_<timestamp>.zip` every `save_every` env steps and, by default,
+  overwrites `latest.zip` on the same tick so restarts always pick up the freshest zip.
+- Opponent checkpoints: `--checkpoint-pool` caps how many newest merged zips workers sample
+  (`checkpoint_pool_size`; default 24). Full history may remain on disk up to `checkpoint_zip_cap`
+  (default 100).
 - On-disk `checkpoint_*.zip` retention: `checkpoint_zip_cap` (default 100) prunes oldest (by mtime).
 """
 from __future__ import annotations
@@ -35,13 +38,18 @@ import tempfile
 import time
 import weakref
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from engine.action import Action, ActionStage, ActionType, get_legal_actions
 from engine.game import GameState
 from engine.unit import UnitType
 
-from rl.env import SESSION_GAME_COUNTER_DB_ENV, effective_track_per_worker_times
+from rl.env import (
+    SESSION_GAME_COUNTER_DB_ENV,
+    effective_track_per_worker_times,
+    coerce_map_id_filter,
+    coerce_co_selection,
+)
 from rl.paths import GAME_LOG_PATH, LOGS_DIR
 from rl.train_reconfig_log import append_train_reconfig_line
 
@@ -225,6 +233,7 @@ def log_game(
         "p1_co": p1_co,
         "winner": winner,
         "turns": turns,
+        "days": turns,
         "funds_end": funds_end,
         "n_actions": n_actions,
         "timestamp": time.time(),
@@ -259,6 +268,53 @@ def _append_nn_train_line(record: dict) -> None:
         fh.write(json.dumps(record) + "\n")
 
 
+# Last total grad norm observed from ``torch.nn.utils.clip_grad_norm_`` (PPO/sync + async IMPALA learner).
+_nn_train_last_clip_grad_norm: float | None = None
+_orig_torch_clip_grad_norm_: Any = None
+
+
+def _ensure_torch_clip_grad_norm_hook_for_nn_train() -> None:
+    """Capture last grad L2 norm from ``clip_grad_norm_`` for nn_train logs (same hook as learner)."""
+    global _orig_torch_clip_grad_norm_
+    global _nn_train_last_clip_grad_norm
+    if _orig_torch_clip_grad_norm_ is not None:
+        return
+    import torch.nn.utils as nu
+
+    _orig_torch_clip_grad_norm_ = nu.clip_grad_norm_
+
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        global _nn_train_last_clip_grad_norm
+        ret = _orig_torch_clip_grad_norm_(*args, **kwargs)
+        try:
+            if hasattr(ret, "detach"):
+                _nn_train_last_clip_grad_norm = float(ret.detach().float().cpu().item())
+            else:
+                _nn_train_last_clip_grad_norm = float(ret)
+        except Exception:
+            pass
+        return ret
+
+    nu.clip_grad_norm_ = _wrapped  # type: ignore[assignment]
+
+
+def _nn_train_rollout_buffer_stats(model: Any) -> dict[str, float]:
+    """Means/std from rollout data about to be trained on (outgoing rollout at ``on_rollout_end``)."""
+    rb = getattr(model, "rollout_buffer", None)
+    out: dict[str, float] = {}
+    if rb is None:
+        return out
+    adv = getattr(rb, "advantages", None)
+    ret = getattr(rb, "returns", None)
+    if adv is not None and getattr(adv, "size", 0):
+        flat = np.asarray(adv).reshape(-1).astype(np.float64, copy=False)
+        out["advantage_mean"] = float(np.mean(flat))
+        out["advantage_std"] = float(np.std(flat))
+    if ret is not None and getattr(ret, "size", 0):
+        out["return_mean"] = float(np.mean(np.asarray(ret).reshape(-1)))
+    return out
+
+
 def _nn_train_row_from_sb3_model(model: Any, *, rollout_iteration: int) -> dict | None:
     """Build an ``nn_train`` JSON row from SB3 logger scalars (after at least one ``train()``)."""
     logger = getattr(model, "logger", None)
@@ -271,6 +327,8 @@ def _nn_train_row_from_sb3_model(model: Any, *, rollout_iteration: int) -> dict 
         if v is None:
             return None
         return float(v)
+
+    _ensure_torch_clip_grad_norm_hook_for_nn_train()
 
     row: dict[str, Any] = {
         "schema_version": "1.0",
@@ -286,6 +344,12 @@ def _nn_train_row_from_sb3_model(model: Any, *, rollout_iteration: int) -> dict 
         "clip_fraction": num("train/clip_fraction"),
         "machine_id": os.environ.get("AWBW_MACHINE_ID"),
     }
+    gn = num("train/grad_norm")
+    if gn is not None:
+        row["grad_norm"] = gn
+    elif _nn_train_last_clip_grad_norm is not None:
+        row["grad_norm"] = float(_nn_train_last_clip_grad_norm)
+    row.update(_nn_train_rollout_buffer_stats(model))
     nu = ntv.get("train/n_updates")
     if nu is not None:
         row["n_updates"] = int(nu)
@@ -511,6 +575,54 @@ def pick_capture_greedy_flat(state: GameState, mask: np.ndarray) -> int:
 _VALID_COLD_OPPONENTS = ("random", "greedy_capture", "greedy_mix", "end_turn")
 
 
+def _gather_opponent_checkpoint_path_strings(
+    checkpoint_dir: str,
+    *,
+    pool_from_fleet: bool,
+    fleet_opponent_root: str | None,
+) -> list[str]:
+    """
+    Local ``checkpoint_dir`` ``checkpoint_*.zip`` plus optional fleet-wide tree.
+
+    Returned paths are deduplicated (realpath), chronological (mtime, name)
+    ascending — same ordering as ``sorted_checkpoint_zip_paths``.
+    """
+    from rl.fleet_env import iter_fleet_opponent_checkpoint_zips, sorted_checkpoint_zip_paths
+
+    merged: list[Path] = []
+    merged.extend(sorted_checkpoint_zip_paths(Path(checkpoint_dir)))
+    if pool_from_fleet:
+        root = fleet_opponent_root or checkpoint_dir
+        for s in iter_fleet_opponent_checkpoint_zips(Path(root)):
+            merged.append(Path(s))
+
+    seen: set[str] = set()
+    uniq: list[Path] = []
+    for p in merged:
+        try:
+            rp = os.path.normcase(os.path.abspath(str(p)))
+        except OSError:
+            rp = os.path.normcase(str(p))
+        if rp in seen:
+            continue
+        seen.add(rp)
+        try:
+            if not p.is_file():
+                continue
+        except OSError:
+            continue
+        uniq.append(p)
+    uniq.sort(key=lambda x: (x.stat().st_mtime, x.name))
+    return [str(x) for x in uniq]
+
+
+def _tail_newest_checkpoint_paths(paths: list[str], newest_k: int) -> list[str]:
+    k = int(newest_k)
+    if k <= 0 or len(paths) <= k:
+        return paths
+    return list(paths[-k:])
+
+
 def _passive_cold_action(state: GameState, mask: np.ndarray) -> int | None:
     """Pick an action that keeps the active player passive this microstep.
 
@@ -606,9 +718,11 @@ class _CheckpointOpponent:
         fleet_opponent_root: Optional[str] = None,
         inference_device: str = "cpu",
         gpu_infer_semaphore: Any = None,
+        opponent_pool_newest_k: int = 24,
     ) -> None:
         self._dir = checkpoint_dir
         self._fleet_opponent_root = fleet_opponent_root
+        self._opponent_pool_newest_k = int(opponent_pool_newest_k)
         self._refresh_every = refresh_every
         self._opponent_mix = max(0.0, min(1.0, float(opponent_mix)))
         self._pool_from_fleet = bool(pool_from_fleet)
@@ -639,17 +753,15 @@ class _CheckpointOpponent:
         self._env_ref = weakref.ref(env)
 
     def _load_random(self) -> None:
-        import glob as _glob
-
         if self._pool_candidates is not None:
             ckpts = list(self._pool_candidates)
         else:
-            ckpts = sorted(_glob.glob(os.path.join(self._dir, "checkpoint_*.zip")))
-            if self._pool_from_fleet:
-                from rl.fleet_env import iter_fleet_opponent_checkpoint_zips
-
-                root = self._fleet_opponent_root or self._dir
-                ckpts = sorted(set(ckpts + iter_fleet_opponent_checkpoint_zips(Path(root))))
+            merged = _gather_opponent_checkpoint_path_strings(
+                self._dir,
+                pool_from_fleet=self._pool_from_fleet,
+                fleet_opponent_root=self._fleet_opponent_root,
+            )
+            ckpts = _tail_newest_checkpoint_paths(merged, self._opponent_pool_newest_k)
         if not ckpts:
             self._model = None
             return
@@ -785,17 +897,15 @@ class _CheckpointOpponent:
         different zip; we do not force-evict mid-call (would race rollout
         collection).
         """
-        import glob as _glob
-
         if zip_paths is not None:
             self._pool_candidates = list(zip_paths)
             return len(self._pool_candidates)
-        ckpts = sorted(_glob.glob(os.path.join(self._dir, "checkpoint_*.zip")))
-        if self._pool_from_fleet:
-            from rl.fleet_env import iter_fleet_opponent_checkpoint_zips
-
-            root = self._fleet_opponent_root or self._dir
-            ckpts = sorted(set(ckpts + iter_fleet_opponent_checkpoint_zips(Path(root))))
+        merged = _gather_opponent_checkpoint_path_strings(
+            self._dir,
+            pool_from_fleet=self._pool_from_fleet,
+            fleet_opponent_root=self._fleet_opponent_root,
+        )
+        ckpts = _tail_newest_checkpoint_paths(merged, self._opponent_pool_newest_k)
         self._pool_candidates = ckpts
         return len(ckpts)
 
@@ -1053,6 +1163,7 @@ class _PicklableEnvFactory:
         "fleet_opponent_root",
         "max_env_steps",
         "max_p1_microsteps",
+        "max_turns",
         "live_snapshot_path",
         "live_games_id",
         "live_learner_seat",
@@ -1067,14 +1178,16 @@ class _PicklableEnvFactory:
         "opening_book_strict_co",
         "opening_book_max_day",
         "opening_book_seed",
+        "cop_disable_per_seat_p",
+        "opponent_pool_newest_k",
     )
 
     def __init__(
         self,
         map_pool: list[dict],
         checkpoint_dir: str,
-        co_p0: int | None = None,
-        co_p1: int | None = None,
+        co_p0: int | Sequence[int] | None = None,
+        co_p1: int | Sequence[int] | None = None,
         tier_name: str | None = None,
         curriculum_broad_prob: float = 0.0,
         curriculum_tag: str | None = None,
@@ -1084,6 +1197,7 @@ class _PicklableEnvFactory:
         fleet_opponent_root: str | None = None,
         max_env_steps: int | None = None,
         max_p1_microsteps: int | None = None,
+        max_turns: int | None = None,
         live_snapshot_path: str | None = None,
         live_games_id: int | None = None,
         live_learner_seat: int = 0,
@@ -1098,6 +1212,8 @@ class _PicklableEnvFactory:
         opening_book_strict_co: bool = False,
         opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
+        cop_disable_per_seat_p: float | None = None,
+        opponent_pool_newest_k: int = 24,
     ) -> None:
         self.map_pool = map_pool
         self.checkpoint_dir = checkpoint_dir
@@ -1112,6 +1228,7 @@ class _PicklableEnvFactory:
         self.fleet_opponent_root = fleet_opponent_root
         self.max_env_steps = max_env_steps
         self.max_p1_microsteps = max_p1_microsteps
+        self.max_turns = max_turns
         self.live_snapshot_path = live_snapshot_path
         self.live_games_id = live_games_id
         self.live_learner_seat = live_learner_seat
@@ -1126,6 +1243,14 @@ class _PicklableEnvFactory:
         self.opening_book_strict_co = bool(opening_book_strict_co)
         self.opening_book_max_day = opening_book_max_day
         self.opening_book_seed = int(opening_book_seed)
+        if cop_disable_per_seat_p is None:
+            self.cop_disable_per_seat_p = None
+        else:
+            _cdp = float(cop_disable_per_seat_p)
+            if _cdp < 0.0 or _cdp > 1.0:
+                raise ValueError("cop_disable_per_seat_p must be in [0, 1]")
+            self.cop_disable_per_seat_p = _cdp
+        self.opponent_pool_newest_k = int(opponent_pool_newest_k)
 
     def __call__(self) -> Any:
         _install_subproc_worker_excepthook()
@@ -1152,6 +1277,7 @@ class _PicklableEnvFactory:
             fleet_opponent_root=self.fleet_opponent_root,
             inference_device=opp_dev,
             gpu_infer_semaphore=self.gpu_infer_semaphore,
+            opponent_pool_newest_k=self.opponent_pool_newest_k,
         )
         env = AWBWEnv(
             map_pool=self.map_pool,
@@ -1164,6 +1290,7 @@ class _PicklableEnvFactory:
             curriculum_tag=tag,
             max_env_steps=self.max_env_steps,
             max_p1_microsteps=self.max_p1_microsteps,
+            max_turns=self.max_turns,
             live_snapshot_path=self.live_snapshot_path,
             live_games_id=self.live_games_id,
             live_fallback_curriculum=self.live_fallback_curriculum,
@@ -1174,6 +1301,7 @@ class _PicklableEnvFactory:
             opening_book_max_day=self.opening_book_max_day,
             opening_book_seed=self.opening_book_seed + int(self.worker_index),
             opening_book_force_mask_for_learner=True,
+            cop_disable_per_seat_p=self.cop_disable_per_seat_p,
         )
         opponent.attach_env(env)
         return ActionMasker(env, _mask_fn)
@@ -1182,8 +1310,8 @@ class _PicklableEnvFactory:
 def _make_env_factory(
     map_pool: list[dict],
     checkpoint_dir: str,
-    co_p0: int | None = None,
-    co_p1: int | None = None,
+    co_p0: int | Sequence[int] | None = None,
+    co_p1: int | Sequence[int] | None = None,
     tier_name: str | None = None,
     curriculum_broad_prob: float = 0.0,
     curriculum_tag: str | None = None,
@@ -1193,6 +1321,7 @@ def _make_env_factory(
     fleet_opponent_root: str | None = None,
     max_env_steps: int | None = None,
     max_p1_microsteps: int | None = None,
+    max_turns: int | None = None,
     live_snapshot_path: str | None = None,
     live_games_id: int | None = None,
     live_learner_seat: int = 0,
@@ -1207,6 +1336,8 @@ def _make_env_factory(
     opening_book_strict_co: bool = False,
     opening_book_max_day: int | None = None,
     opening_book_seed: int = 0,
+    cop_disable_per_seat_p: float | None = None,
+    opponent_pool_newest_k: int = 24,
 ) -> Callable[[], Any]:
     """Return a picklable zero-arg env factory (SubprocVecEnv, async IMPALA actors)."""
     return _PicklableEnvFactory(
@@ -1223,6 +1354,7 @@ def _make_env_factory(
         fleet_opponent_root=fleet_opponent_root,
         max_env_steps=max_env_steps,
         max_p1_microsteps=max_p1_microsteps,
+        max_turns=max_turns,
         live_snapshot_path=live_snapshot_path,
         live_games_id=live_games_id,
         live_learner_seat=live_learner_seat,
@@ -1237,6 +1369,8 @@ def _make_env_factory(
         opening_book_strict_co=opening_book_strict_co,
         opening_book_max_day=opening_book_max_day,
         opening_book_seed=opening_book_seed,
+        cop_disable_per_seat_p=cop_disable_per_seat_p,
+        opponent_pool_newest_k=opponent_pool_newest_k,
     )
 
 
@@ -1265,6 +1399,8 @@ def _build_diagnostics_callback():
         from stable_baselines3.common.callbacks import BaseCallback  # type: ignore[import]
     except ImportError:
         return None
+
+    _ensure_torch_clip_grad_norm_hook_for_nn_train()
 
     class _Cb(BaseCallback):  # type: ignore[misc]
         def __init__(self) -> None:
@@ -1463,6 +1599,14 @@ def _build_diagnostics_callback():
                     json_row["train_approx_kl"] = nn_pack["approx_kl"]
                 if "clip_fraction" in nn_pack:
                     json_row["train_clip_fraction"] = nn_pack["clip_fraction"]
+                if "grad_norm" in nn_pack:
+                    json_row["train_grad_norm"] = nn_pack["grad_norm"]
+                if "advantage_mean" in nn_pack:
+                    json_row["train_advantage_mean"] = nn_pack["advantage_mean"]
+                if "advantage_std" in nn_pack:
+                    json_row["train_advantage_std"] = nn_pack["advantage_std"]
+                if "return_mean" in nn_pack:
+                    json_row["train_return_mean"] = nn_pack["return_mean"]
                 if "n_updates" in nn_pack:
                     json_row["train_n_updates"] = nn_pack["n_updates"]
                 try:
@@ -1512,12 +1656,18 @@ class SelfPlayTrainer:
         if VRAM is tight, then ``n_steps``.
     save_every : int
         Save checkpoint every N total steps.
+    publish_latest_each_save : bool
+        If True (default), each ``checkpoint_*.zip`` save also overwrites ``latest.zip``.
+        Disable to reduce shared-disk traffic (``latest`` still written on exit).
     checkpoint_pool_size : int
-        Max historical checkpoints held as opponent candidates.
-    map_id : int | None
-        If set, restrict training to this single map.
-    co_p0, co_p1, tier_name
-        Optional fixed COs and tier for narrow curriculum (see ``AWBWEnv``).
+        Opponent draws only from this many newest ``checkpoint_*.zip`` snapshots
+        (merged local dir + fleet when ``pool_from_fleet``); ``<= 0`` means no cap.
+    map_id : int | Sequence[int] | None
+        If set, restrict training to this map id or uniform-random choice among a
+        list each episode. ``None`` uses the full GL std pool.
+    co_p0, co_p1 : int | Sequence[int] | None
+        Optional CO roster per seat: each episode samples uniformly (singleton
+        fixes the CO). ``None`` uses the tier's ``co_ids``.
     curriculum_broad_prob
         Per-episode probability of sampling full random matchups (mixture).
     curriculum_tag
@@ -1570,10 +1720,11 @@ class SelfPlayTrainer:
         batch_size: int = 256,
         device: str = "auto",
         save_every: int = 50_000,
-        checkpoint_pool_size: int = 5,
-        map_id: Optional[int] = None,
-        co_p0: Optional[int] = None,
-        co_p1: Optional[int] = None,
+        publish_latest_each_save: bool = True,
+        checkpoint_pool_size: int = 24,
+        map_id: Optional[int | Sequence[int]] = None,
+        co_p0: Optional[int | Sequence[int]] = None,
+        co_p1: Optional[int | Sequence[int]] = None,
         tier_name: Optional[str] = None,
         curriculum_broad_prob: float = 0.0,
         curriculum_tag: Optional[str] = None,
@@ -1610,6 +1761,7 @@ class SelfPlayTrainer:
         mcts_max_plan_actions: int = 256,
         max_env_steps: int | None = 10000,
         max_p1_microsteps: int | None = 4000,
+        max_turns: int | None = None,
         live_games_id: list[int] | None = None,
         live_learner_seats: list[int] | None = None,
         live_snapshot_dir: Path | str | None = None,
@@ -1621,7 +1773,7 @@ class SelfPlayTrainer:
         async_learner_forward_chunk: int | None = None,
         async_clip_rho: float = 1.0,
         async_clip_pg_rho: float = 1.0,
-        async_gamma: float = 0.99,
+        async_gamma: float = 0.99925,
         async_learning_rate: float = 3e-4,
         async_vf_coef: float = 0.5,
         async_max_grad_norm: float = 0.5,
@@ -1636,6 +1788,7 @@ class SelfPlayTrainer:
         opening_book_strict_co: bool = False,
         opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
+        cop_disable_per_seat_p: float | None = None,
     ) -> None:
         tb = str(training_backend or "sync").strip().lower()
         if tb not in ("sync", "async"):
@@ -1652,10 +1805,11 @@ class SelfPlayTrainer:
         self.n_steps = n_steps
         self.batch_size = batch_size
         self.save_every = save_every
+        self.publish_latest_each_save = bool(publish_latest_each_save)
         self.checkpoint_pool_size = checkpoint_pool_size
-        self.map_id_filter = map_id
-        self.co_p0 = co_p0
-        self.co_p1 = co_p1
+        self.map_id_filter = coerce_map_id_filter(map_id)
+        self.co_p0 = coerce_co_selection(co_p0)
+        self.co_p1 = coerce_co_selection(co_p1)
         self.tier_name = tier_name
         self.curriculum_broad_prob = curriculum_broad_prob
         self.curriculum_tag = curriculum_tag
@@ -1706,6 +1860,13 @@ class SelfPlayTrainer:
             int(opening_book_max_day) if opening_book_max_day is not None else None
         )
         self.opening_book_seed = int(opening_book_seed)
+        if cop_disable_per_seat_p is None:
+            self.cop_disable_per_seat_p = None
+        else:
+            _cdp_sp = float(cop_disable_per_seat_p)
+            if _cdp_sp < 0.0 or _cdp_sp > 1.0:
+                raise ValueError("cop_disable_per_seat_p must be in [0, 1]")
+            self.cop_disable_per_seat_p = _cdp_sp
         self.fleet_cfg = fleet_cfg
         self.opponent_refresh_rollouts = max(0, int(opponent_refresh_rollouts))
         self.hot_reload_enabled = bool(hot_reload_enabled)
@@ -1730,6 +1891,13 @@ class SelfPlayTrainer:
 
         self.max_env_steps = _cap_or_none(max_env_steps)
         self.max_p1_microsteps = _cap_or_none(max_p1_microsteps)
+        if max_turns is not None:
+            _mt = int(max_turns)
+            if _mt < 1:
+                raise ValueError(f"max_turns must be >= 1 when set; got {_mt}")
+            self.max_turns = _mt
+        else:
+            self.max_turns = None
         self.live_games_id: list[int] = [int(x) for x in (live_games_id or [])]
         n_live = len(self.live_games_id)
         if n_live and n_envs < n_live:
@@ -1842,9 +2010,12 @@ class SelfPlayTrainer:
 
         self.map_pool = load_map_pool()
         if self.map_id_filter is not None:
-            self.map_pool = [m for m in self.map_pool if m["map_id"] == self.map_id_filter]
+            allowed = set(self.map_id_filter)
+            self.map_pool = [m for m in self.map_pool if m["map_id"] in allowed]
             if not self.map_pool:
-                raise ValueError(f"No maps found with map_id={self.map_id_filter}")
+                raise ValueError(
+                    f"No maps found with map_id in {sorted(allowed)}"
+                )
 
         from rl.fleet_env import (
             prune_checkpoint_zip_curated,
@@ -1938,6 +2109,7 @@ class SelfPlayTrainer:
             fleet_opponent_root=self.fleet_opponent_root,
             max_env_steps=self.max_env_steps,
             max_p1_microsteps=self.max_p1_microsteps,
+            max_turns=self.max_turns,
             opening_book_path=self.opening_book_path,
             opening_book_seat=self.opening_book_seat,
             opening_book_seats=self.opening_book_seats,
@@ -1945,6 +2117,8 @@ class SelfPlayTrainer:
             opening_book_strict_co=self.opening_book_strict_co,
             opening_book_max_day=self.opening_book_max_day,
             opening_book_seed=self.opening_book_seed,
+            opponent_pool_newest_k=self.checkpoint_pool_size,
+            cop_disable_per_seat_p=self.cop_disable_per_seat_p,
         )
         if self.n_envs > 1:
             from stable_baselines3.common.vec_env import SubprocVecEnv  # type: ignore[import]
@@ -2053,6 +2227,7 @@ class SelfPlayTrainer:
                 cold_opponent=self.cold_opponent,
                 fleet_opponent_root=self.fleet_opponent_root,
                 inference_device=opp_dev,
+                opponent_pool_newest_k=self.checkpoint_pool_size,
             )
             env = AWBWEnv(
                 map_pool=self.map_pool,
@@ -2065,6 +2240,7 @@ class SelfPlayTrainer:
                 curriculum_tag=ctag,
                 max_env_steps=self.max_env_steps,
                 max_p1_microsteps=self.max_p1_microsteps,
+                max_turns=self.max_turns,
                 live_snapshot_path=lpath,
                 live_games_id=lgid,
                 opening_book_path=(self.opening_book_path if n_live == 0 else None),
@@ -2074,6 +2250,7 @@ class SelfPlayTrainer:
                 opening_book_max_day=self.opening_book_max_day,
                 opening_book_seed=self.opening_book_seed,
                 opening_book_force_mask_for_learner=True,
+                cop_disable_per_seat_p=self.cop_disable_per_seat_p,
             )
             opponent.attach_env(env)
             return ActionMasker(env, _mask_fn)
@@ -2438,9 +2615,12 @@ class SelfPlayTrainer:
     ) -> Path:
         """Phase 10a: route saves through the publisher when enabled.
 
-        Default path (publisher None): preserves pre-Phase-10a semantics —
-        direct ``_atomic_model_save`` to the shared checkpoint_dir. No
-        behavior change.
+        Default path (publisher None): ``_atomic_model_save`` to the shared
+        checkpoint_dir. When ``also_publish_as_latest`` is True, also writes
+        ``latest.zip`` (second full save). Scheduled saves pass
+        ``publish_latest_each_save`` (default True) so ``latest`` tracks the
+        newest ``checkpoint_*.zip``; stem ``"latest"`` passes False here to
+        avoid double-writing.
 
         Publisher path: write to local mirror, enqueue async copy to
         shared. Returns the LOCAL path so callers can stat it for size
@@ -2564,7 +2744,7 @@ class SelfPlayTrainer:
 
         # ── PPO hyperparameters (batch_size / n_steps tunable via train.py) ───
         # ent_coef=0.05 drives aggressive early exploration (decay manually later)
-        # gamma=0.99 slightly lower than 0.995 to propagate win signal faster
+        # gamma=0.99925 — long horizon (games often ≫1k learner steps; critic still bootstraps).
 
         from rl.network import AWBWFeaturesExtractor  # type: ignore[import]
         policy_kwargs = dict(
@@ -2630,7 +2810,7 @@ class SelfPlayTrainer:
                 n_steps=self.n_steps,
                 batch_size=self.batch_size,
                 n_epochs=10,
-                gamma=0.99,
+                gamma=0.99925,
                 gae_lambda=0.95,
                 ent_coef=self.ent_coef,
                 clip_range=0.2,
@@ -2725,7 +2905,9 @@ class SelfPlayTrainer:
 
                     ckpt_stem = new_checkpoint_stem_utc()
                     self._save_checkpoint_with_publish(
-                        model, ckpt_stem, also_publish_as_latest=True
+                        model,
+                        ckpt_stem,
+                        also_publish_as_latest=self.publish_latest_each_save,
                     )
                     print(f"[self_play] Saved {ckpt_stem}.zip")
 
@@ -2764,11 +2946,17 @@ class SelfPlayTrainer:
                     all_ck = sorted_checkpoint_zip_paths(self.checkpoint_dir)
                     self.checkpoints = all_ck[-tail:] if tail else all_ck
         except KeyboardInterrupt:
-                print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
-                saved = self._save_checkpoint_with_publish(
-                    model, "latest", also_publish_as_latest=False
-                )
-                print(f"[self_play] Saved -> {saved}")
+            print("\n[self_play] Stopped by user (KeyboardInterrupt). Saving latest checkpoint…")
+            saved = self._save_checkpoint_with_publish(
+                model, "latest", also_publish_as_latest=False
+            )
+            print(f"[self_play] Saved -> {saved}")
+        else:
+            print("\n[self_play] Saving latest.zip after completed run …")
+            saved = self._save_checkpoint_with_publish(
+                model, "latest", also_publish_as_latest=False
+            )
+            print(f"[self_play] Saved -> {saved}")
         finally:
             mgr = self._gpu_pool_manager
             if mgr is not None:

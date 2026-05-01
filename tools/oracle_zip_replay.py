@@ -5579,6 +5579,10 @@ def _apply_oracle_action_json_body(
 
     if kind == "Build":
         gu = _global_unit(obj)
+        if not isinstance(gu, dict):
+            raise UnsupportedOracleAction(
+                "Build (no unit path): unit/newUnit/global missing or null"
+            )
         r, c = int(gu["units_y"]), int(gu["units_x"])
         ut = _name_to_unit_type(str(gu["units_name"]))
         pid = int(gu["units_players_id"])

@@ -209,10 +209,9 @@ def test_phi_telescoping_over_short_trajectory(
     catches any drift in snapshot ordering (e.g. forgetting to refund chip
     on terminal, or computing Φ on wrong state).
 
-    To isolate the shaping component we:
-      - run a few P0 steps (END_TURN spam)
-      - assert the episode does not terminate within the window
-      - confirm reward stream over the window equals Φ(s_final) − Φ(s_initial)
+    Verifies the **pure potential** slice: ``Σ phi_potential_delta`` equals
+    ``Φ(s_final) − Φ(s_initial)``. Full ``reward`` also includes non-potential
+    terms (power-use bonus, kill bonus, …) and is not expected to telescope.
     """
     # Make sure the random opponent doesn't end the game in two turns.
     rng = random_module.Random(0)
@@ -226,21 +225,26 @@ def test_phi_telescoping_over_short_trajectory(
     # bail out (terminal Φ:=0 makes the invariant trivially hold but we're
     # testing the non-terminal telescoping path explicitly).
     total_reward = 0.0
+    total_phi_pd = 0.0
     steps_taken = 0
     for _ in range(3):
-        _obs, reward, terminated, truncated, _info = env.step(0)
+        _obs, reward, terminated, truncated, info = env.step(0)
         total_reward += reward
+        total_phi_pd += float(
+            (info.get("reward_components") or {}).get("phi_potential_delta", 0.0)
+        )
         steps_taken += 1
         if terminated or truncated:
             break
 
     if not env.state.done:
         phi_final = env._compute_phi(env.state)
-        assert total_reward == pytest.approx(
+        assert total_phi_pd == pytest.approx(
             phi_final - phi_initial, rel=1e-6, abs=1e-9
         ), (
-            f"Telescoping broken: Σreward={total_reward}, "
-            f"Φ_T−Φ_0={phi_final - phi_initial}"
+            f"Φ potential telescoping broken: Σphi_potential_delta={total_phi_pd}, "
+            f"Φ_T−Φ_0={phi_final - phi_initial}; "
+            f"Σreward={total_reward} (includes non-potential terms e.g. power/kill bonuses)"
         )
     else:
         # Terminal hit: trajectory shaping = engine_terminal_reward + (0 − Φ_pre_terminal).
@@ -336,3 +340,71 @@ def test_seam_attack_yields_zero_engine_reward_and_unchanged_phi(
     assert r_eng == 0.0
     assert not done
     assert phi_env._compute_phi(state) == pytest.approx(phi_before, rel=1e-9, abs=1e-9)
+
+
+def test_phi_cop_scop_activation_bonus_learner_frame(phi_env) -> None:
+    """COP/SCOP activation shaping is signed into learner coordinates."""
+    from rl.env import PHI_VON_BOLT_SCOP_REF_THRESHOLD
+
+    env = phi_env
+    st = env.state
+    assert int(env._learner_seat) == 0
+    # Andy: COP 3★, SCOP 6★ → thresholds 27k / 54k vs Von Bolt ref 90k
+    vb_ref = PHI_VON_BOLT_SCOP_REF_THRESHOLD
+    assert st.co_states[0]._cop_threshold / vb_ref == pytest.approx(0.3)
+    assert st.co_states[0]._scop_threshold / vb_ref == pytest.approx(0.6)
+    cop = Action(ActionType.ACTIVATE_COP)
+    scop = Action(ActionType.ACTIVATE_SCOP)
+    b0, rc0 = env._phi_power_activation_and_attack_bonus(cop, 0, st, learner_frame=True)
+    assert rc0["phi_power_bonus_meter_scale_vs_vb_scop"] == pytest.approx(0.3)
+    assert b0 == pytest.approx(0.09 * 0.3)
+    assert rc0["phi_cop_activation_bonus"] == pytest.approx(b0)
+    b1, rc1 = env._phi_power_activation_and_attack_bonus(cop, 1, st, learner_frame=True)
+    assert b1 == pytest.approx(-0.09 * 0.3)
+    assert rc1["phi_power_bonus_meter_scale_vs_vb_scop"] == pytest.approx(0.3)
+    s0, rcs = env._phi_power_activation_and_attack_bonus(scop, 0, st, learner_frame=True)
+    assert rcs["phi_power_bonus_meter_scale_vs_vb_scop"] == pytest.approx(0.6)
+    assert s0 == pytest.approx(0.18 * 0.6)
+    assert rcs["phi_scop_activation_bonus"] == pytest.approx(s0)
+
+
+def test_phi_scop_bonus_adder_cheaper_than_hawke() -> None:
+    from engine.co import make_co_state
+
+    from rl.env import PHI_SCOP_ACTIVATION_BONUS, PHI_VON_BOLT_SCOP_REF_THRESHOLD
+
+    adder = make_co_state(11)
+    hawke = make_co_state(12)
+    von_bolt = make_co_state(30)
+    ref = PHI_VON_BOLT_SCOP_REF_THRESHOLD
+    b_adder = PHI_SCOP_ACTIVATION_BONUS * (float(adder._scop_threshold) / ref)
+    b_hawke = PHI_SCOP_ACTIVATION_BONUS * (float(hawke._scop_threshold) / ref)
+    b_von_bolt = PHI_SCOP_ACTIVATION_BONUS * (float(von_bolt._scop_threshold) / ref)
+    assert b_adder < b_hawke
+    assert b_hawke < b_von_bolt
+    assert b_von_bolt == pytest.approx(PHI_SCOP_ACTIVATION_BONUS)
+
+
+def test_phi_attack_while_power_active_bonus(phi_env) -> None:
+    """Attacks after COP/SCOP (pre-step co flags) add a small Φ bonus."""
+    env = phi_env
+    st = env.state
+    st.co_states[0].cop_active = True
+    atk = Action(ActionType.ATTACK, unit_pos=(0, 0), move_pos=(0, 0), target_pos=(0, 0))
+    b, rc = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
+    assert b == pytest.approx(0.001)
+    assert rc["phi_power_turn_attack_bonus"] == pytest.approx(0.001)
+    st.co_states[0].cop_active = False
+    st.co_states[0].scop_active = True
+    b2, _ = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
+    assert b2 == pytest.approx(0.001)
+
+
+def test_phi_episode_power_activation_counters(phi_env) -> None:
+    env = phi_env
+    env._episode_cop_by_seat = [0, 0]
+    env._episode_scop_by_seat = [0, 0]
+    env._phi_after_step_record_power_activations(Action(ActionType.ACTIVATE_COP), 0)
+    env._phi_after_step_record_power_activations(Action(ActionType.ACTIVATE_SCOP), 1)
+    assert env._episode_cop_by_seat == [1, 0]
+    assert env._episode_scop_by_seat == [0, 1]

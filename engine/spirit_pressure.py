@@ -47,7 +47,7 @@ class SpiritPlayConfig:
     # Hard (crushing) — ratio is actor_value / opponent_value
     income_property_lead: int = 3
     unit_count_lead: int = 3
-    unit_value_ratio: float = 1.12
+    unit_value_ratio: float = 1.15
     # Soft hold
     soft_income_property_lead: int = 1
     soft_unit_count_lead: int = 1
@@ -62,7 +62,7 @@ class SpiritPlayConfig:
     unit_value_ratio_weight: float = 2.0
     funds_weight: float = 0.00002
     # Gates (shared with RL diag naming)
-    value_margin: float = 0.12  # army value lead threshold (1 + margin); resign + diag
+    value_margin: float = 0.15  # army value lead threshold (1 + margin); resign + diag
     allowed_tiers: frozenset[str] = field(default_factory=frozenset)
     require_std_map: bool = True
 
@@ -73,7 +73,7 @@ def spirit_play_config_from_env() -> SpiritPlayConfig:
         required_own_turn_streak=max(1, _read_int("AWBW_SPIRIT_REQUIRED_STREAK", 3)),
         income_property_lead=max(0, _read_int("AWBW_SPIRIT_INCOME_LEAD", 3)),
         unit_count_lead=max(0, _read_int("AWBW_SPIRIT_UNIT_COUNT_LEAD", 3)),
-        unit_value_ratio=max(1.0, _read_float("AWBW_SPIRIT_UNIT_VALUE_RATIO", 1.12)),
+        unit_value_ratio=max(1.0, _read_float("AWBW_SPIRIT_UNIT_VALUE_RATIO", 1.15)),
         soft_income_property_lead=max(0, _read_int("AWBW_SPIRIT_SOFT_INCOME_LEAD", 1)),
         soft_unit_count_lead=max(0, _read_int("AWBW_SPIRIT_SOFT_UNIT_COUNT_LEAD", 1)),
         soft_unit_value_ratio=max(1.0, _read_float("AWBW_SPIRIT_SOFT_UNIT_VALUE_RATIO", 1.06)),
@@ -84,7 +84,7 @@ def spirit_play_config_from_env() -> SpiritPlayConfig:
         unit_count_weight=_read_float("AWBW_SPIRIT_W_COUNT", 0.35),
         unit_value_ratio_weight=_read_float("AWBW_SPIRIT_W_RATIO", 2.0),
         funds_weight=_read_float("AWBW_SPIRIT_W_FUNDS", 0.00002),
-        value_margin=_read_float("AWBW_SPIRIT_VALUE_MARGIN", 0.12),
+        value_margin=_read_float("AWBW_SPIRIT_VALUE_MARGIN", 0.15),
     )
     raw = (os.environ.get("AWBW_SPIRIT_TIERS", "") or "").strip()
     if raw:

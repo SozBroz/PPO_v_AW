@@ -24,6 +24,12 @@ def test_tie_breaker_counts_when_winner_null() -> None:
 
 def test_tie_breaker_requires_min_lead() -> None:
     assert not game_log_row_learner_win(
+        {"learner_seat": 0, "winner": None, "tie_breaker_property_count": 0}
+    )
+
+
+def test_tie_breaker_counts_lead_one() -> None:
+    assert game_log_row_learner_win(
         {"learner_seat": 0, "winner": None, "tie_breaker_property_count": 1}
     )
 

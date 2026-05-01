@@ -71,7 +71,19 @@ def test_sets_capture_gate_when_flag_on(monkeypatch) -> None:
     p = build_train_argument_parser()
     args = p.parse_args(["--capture-move-gate"])
     _sync_worker_inherited_env_flags(args)
-    assert os.environ.get("AWBW_CAPTURE_MOVE_GATE") == "1"
+    assert os.environ.get("AWBW_CAPTURE_MOVE_GATE") == "1.0"
+
+
+def test_sets_capture_gate_fraction(monkeypatch) -> None:
+    import os
+
+    monkeypatch.delenv("AWBW_CAPTURE_MOVE_GATE", raising=False)
+    from train import _sync_worker_inherited_env_flags, build_train_argument_parser
+
+    p = build_train_argument_parser()
+    args = p.parse_args(["--capture-move-gate", "0.75"])
+    _sync_worker_inherited_env_flags(args)
+    assert os.environ.get("AWBW_CAPTURE_MOVE_GATE") == "0.75"
 
 
 def test_clears_deprecated_phi_enemy_property_capture_penalty(monkeypatch) -> None:

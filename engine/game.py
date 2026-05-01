@@ -13,6 +13,7 @@ from collections import Counter
 from typing import Callable, Optional, Union
 
 from engine.unit import Unit, UnitType, UNIT_STATS, idle_start_of_day_fuel_drain
+from engine.unit_cap import alive_owned_unit_count
 from engine.terrain import get_terrain, property_terrain_id_after_owner_change
 from engine.co import COState, make_co_state_safe
 from engine.map_loader import MapData, PropertyState
@@ -130,17 +131,17 @@ class GameState:
     selected_move_pos: Optional[tuple[int, int]]
     done:              bool
     winner:            Optional[int]           # 0, 1, or -1 (draw)
-    win_reason:        Optional[str]           # e.g. hq_capture; max_turns_draw; max_turns_tiebreak
+    win_reason:        Optional[str]           # e.g. hq_capture; max_days_draw; max_days_tiebreak
     game_log:          list[dict]              # append-only action history (resolved actions only)
     tier_name:         str
-    max_turns:         int = field(default=MAX_TURNS)  # calendar tiebreak after this day count (see _end_turn)
+    max_turns:         int = field(default=MAX_TURNS)  # calendar day cap (end-inclusive; see _end_turn)
     full_trace:        list[dict] = field(default_factory=list)  # every action incl. SELECT/END_TURN
 
     # Luck rolls for combat (0–9) must use this RNG, not the module-level ``random``
     # module, so parallel games / subprocesses cannot steal each other's sequence
     # (and ``ai_vs_ai --seed`` reproduces full games including combat).
     luck_rng:          _random_mod.Random = field(default_factory=_random_mod.Random)
-    
+
     # Economic tracking (Phase A logging requirements)
     gold_spent:        list[int] = field(default_factory=lambda: [0, 0])  # [p0, p1] cumulative
     losses_hp:         list[int] = field(default_factory=lambda: [0, 0])  # [p0, p1] HP lost
@@ -309,6 +310,16 @@ class GameState:
         uid = self.next_unit_id
         self.next_unit_id += 1
         return uid
+
+    @property
+    def day(self) -> int:
+        """1-based calendar day; alias of :attr:`turn` (full day = P0 + P1 player-turns)."""
+        return self.turn
+
+    @property
+    def max_days(self) -> int:
+        """End-inclusive calendar day limit; alias of :attr:`max_turns`."""
+        return self.max_turns
 
     # ------------------------------------------------------------------
     # Lookups
@@ -577,13 +588,13 @@ class GameState:
                 p1_props = self.count_properties(1)
                 if p0_props > p1_props:
                     self.winner = 0
-                    self.win_reason = "max_turns_tiebreak"
+                    self.win_reason = "max_days_tiebreak"
                 elif p1_props > p0_props:
                     self.winner = 1
-                    self.win_reason = "max_turns_tiebreak"
+                    self.win_reason = "max_days_tiebreak"
                 else:
                     self.winner = -1
-                    self.win_reason = "max_turns_draw"
+                    self.win_reason = "max_days_draw"
                 return
 
         # Start of opponent's turn: reset moved flags, consume idle fuel, crash units.
@@ -805,10 +816,9 @@ class GameState:
 
         # Sensei COP: spawn Mech on every owned base without a unit
         elif co.co_id == 13 and cop:
-            # Count only alive units for unit limit check
-            alive_units = [u for u in self.units[player] if u.is_alive]
+            # Unit limit includes cargo aboard transports (not on ``units[player]`` rows).
             for prop in self.properties:
-                if len(alive_units) >= self.map_data.unit_limit:
+                if alive_owned_unit_count(self.units[player]) >= self.map_data.unit_limit:
                     break
                 if prop.owner == player and prop.is_base:
                     if self.get_unit_at(prop.row, prop.col) is None:
@@ -826,7 +836,6 @@ class GameState:
                             unit_id=self._allocate_unit_id(),
                         )
                         self.units[player].append(mech)
-                        alive_units.append(mech)
 
         # Drake: deal HP damage + fuel drain to enemy air units
         elif co.co_id == 5:
@@ -1552,7 +1561,9 @@ class GameState:
                 reduced = float(old_cp - max(prop.capture_points, 0))
                 shaping += _CAPTURE_SHAPING_PROGRESS * (reduced / 20.0)
 
+        capture_flip_completed = False
         if prop.capture_points <= 0:
+            capture_flip_completed = True
             if contest and not _PHI_SHAPING_ACTIVE:
                 shaping += _CAPTURE_SHAPING_COMPLETE
             prop.owner = unit.player
@@ -1568,12 +1579,15 @@ class GameState:
                 prop.terrain_id = new_tid
 
         self._finish_action(unit)
+        # game_log: cp_remaining is capture progress *on the contested tile* before the
+        # post-flip reset (0 = this action completed the flip). Legacy rows used 20 here
+        # after reset; rl.env._log_finished_game accepts both.
         self.game_log.append({
             "type":         "capture",
             "player":       unit.player,
             "from":         action.unit_pos,
             "to":           list(action.move_pos),
-            "cp_remaining": prop.capture_points,
+            "cp_remaining": 0 if capture_flip_completed else prop.capture_points,
         })
         return shaping
 
@@ -2241,9 +2255,8 @@ class GameState:
                 raise IllegalActionError("BUILD: factory tile occupied")
             return
 
-        # Count only alive units for unit limit check
-        alive_units = [u for u in self.units[player] if u.is_alive]
-        if len(alive_units) >= self.map_data.unit_limit:
+        # Unit limit includes cargo aboard transports (see ``alive_owned_unit_count``).
+        if alive_owned_unit_count(self.units[player]) >= self.map_data.unit_limit:
             if oracle_strict:
                 raise IllegalActionError("BUILD: unit limit reached")
             return
@@ -2983,6 +2996,7 @@ def make_initial_state(
     *,
     replay_first_mover: Optional[int] = None,
     max_turns: Optional[int] = None,
+    max_days: Optional[int] = None,
     luck_seed: Optional[int] = None,
     spirit_map_is_std: Optional[bool] = True,
 ) -> GameState:
@@ -2994,7 +3008,8 @@ def make_initial_state(
 
     Uses make_co_state_safe so it works even before co_data.json is generated.
 
-    ``max_turns`` overrides the engine day cap (default ``MAX_TURNS``). Must be >= 1.
+    ``max_days`` (preferred) or ``max_turns`` (deprecated alias) set the end-inclusive
+    calendar day cap (default ``MAX_TURNS``). Pass at most one of them; must be >= 1.
 
     ``luck_seed`` seeds :attr:`GameState.luck_rng` for combat luck when not ``None``;
     otherwise a fresh :class:`random.Random` is used (isolated from other games).
@@ -3002,9 +3017,18 @@ def make_initial_state(
     ``spirit_map_is_std`` gates spirit-broken when ``AWBW_SPIRIT_REQUIRE_STD`` is on;
     :class:`AWBWEnv` overwrites from the map pool. Default ``True`` for standalone engine/tests.
     """
-    mt = MAX_TURNS if max_turns is None else int(max_turns)
+    if max_turns is not None and max_days is not None:
+        if int(max_turns) != int(max_days):
+            raise ValueError("make_initial_state: pass only one of max_turns and max_days")
+        mt = int(max_turns)
+    elif max_days is not None:
+        mt = int(max_days)
+    elif max_turns is not None:
+        mt = int(max_turns)
+    else:
+        mt = MAX_TURNS
     if mt < 1:
-        raise ValueError(f"max_turns must be >= 1, got {mt}")
+        raise ValueError(f"max_days/max_turns must be >= 1, got {mt}")
     props = _copy_mod.deepcopy(map_data.properties)
     units = specs_to_initial_units(map_data.predeployed_specs)
 
