@@ -627,3 +627,72 @@ def _income_share_for(state: GameState, observer: int) -> float:
     if n_income <= 0:
         return 0.0
     return float(state.count_income_properties(observer)) / float(n_income)
+
+
+# ── Component export for step-by-step visualization ─────────────────────────
+# Channel layout reference (77 spatial channels, 16 scalars):
+#
+#  0-13:  unit presence me        (14 types, observer-coordinate)
+# 14-27:  unit presence enemy     (14 types)
+# 28-29:  hp_lo, hp_hi            (belief interval)
+# 30-44:  terrain one-hot         (15 categories)
+# 45-49:  neutral property        (5 types)
+# 50-54:  me property             (5 types)
+# 55-59:  enemy property          (5 types)
+# 60:     capture progress me     (chips toward enemy props)
+# 61:     capture progress enemy  (chips toward me props)
+# 62:     neutral income mask     (owner None, income-contributing)
+# 63-68:  influence planes        (threat/reach/capture-ETA me × 3, enemy × 3)
+# 69:     defense stars           (/4, map-static)
+# 70-76:  unit modifiers          (move/atk/def/luck/indirect)
+
+CHANNEL_GROUPS = {
+    "units_me":         (0, 14),
+    "units_enemy":      (14, 28),
+    "hp":               (28, 30),
+    "terrain":          (30, 45),
+    "property_neutral": (45, 50),
+    "property_me":      (50, 55),
+    "property_enemy":   (55, 60),
+    "capture":          (60, 62),
+    "neutral_income":   (62, 63),
+    "influence":        (63, 69),
+    "defense_stars":    (69, 70),
+    "unit_modifiers":   (70, 77),
+}
+
+SCALAR_LABELS = [
+    "funds_me", "funds_enemy",
+    "co_power_bar_me", "co_power_bar_enemy",
+    "cop_active_me", "scop_active_me",
+    "cop_active_enemy", "scop_active_enemy",
+    "turn_norm", "my_turn",
+    "co_id_me", "co_id_enemy",
+    "weather_rain", "weather_snow", "weather_turns_norm",
+    "me_income_share",
+]
+
+
+def encode_state_components(
+    state: GameState,
+    *,
+    observer: int = 0,
+    belief: "BeliefState | None" = None,
+) -> dict[str, np.ndarray]:
+    """Encode a full observation and return it as named component groups.
+
+    Returns a dict with:
+      - spatial keys matching CHANNEL_GROUPS (each a numpy slice)
+      - "scalars" as named dict with SCALAR_LABELS keys
+
+    Intended for step-by-step visualization tools that log per-step NN inputs.
+    """
+    spatial, scalars = encode_state(state, observer=observer, belief=belief)
+    components: dict[str, np.ndarray] = {}
+    for name, (lo, hi) in CHANNEL_GROUPS.items():
+        components[name] = spatial[:, :, lo:hi].copy()
+    scalar_dict: dict[str, float] = {}
+    for label, val in zip(SCALAR_LABELS, scalars):
+        scalar_dict[label] = float(val)
+    components["scalars_dict"] = scalar_dict
+    return components

@@ -110,6 +110,20 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     assert row.get("truncation_reason") is None
     assert row.get("phi_enemy_property_captures") == 0
 
+    prb = row.get("phi_reward_breakdown") or {}
+    for seat in ("p0", "p1"):
+        bucket = prb.get(seat) or {}
+        for key in (
+            "phi_potential_delta",
+            "power_activation",
+            "attack_stats_advantage",
+            "power_bonus",
+            "designed_desires_checkpoint",
+            "capture_interrupt",
+            "enemy_property_loss",
+        ):
+            assert key in bucket, f"phi_reward_breakdown.{seat} missing {key!r}"
+
     for k in (
         "neutral_income_remaining_by_day_7",
         "neutral_income_remaining_by_day_9",

@@ -343,28 +343,24 @@ def test_seam_attack_yields_zero_engine_reward_and_unchanged_phi(
 
 
 def test_phi_cop_scop_activation_bonus_learner_frame(phi_env) -> None:
-    """COP/SCOP activation shaping is signed into learner coordinates."""
-    from rl.env import PHI_VON_BOLT_SCOP_REF_THRESHOLD
+    """COP has no Φ bonus; SCOP bonus is 5% of nominal (meter-scaled)."""
+    from rl.env import PHI_SCOP_ACTIVATION_BONUS, PHI_VON_BOLT_SCOP_REF_THRESHOLD
 
     env = phi_env
     st = env.state
     assert int(env._learner_seat) == 0
-    # Andy: COP 3★, SCOP 6★ → thresholds 27k / 54k vs Von Bolt ref 90k
     vb_ref = PHI_VON_BOLT_SCOP_REF_THRESHOLD
     assert st.co_states[0]._cop_threshold / vb_ref == pytest.approx(0.3)
     assert st.co_states[0]._scop_threshold / vb_ref == pytest.approx(0.6)
     cop = Action(ActionType.ACTIVATE_COP)
     scop = Action(ActionType.ACTIVATE_SCOP)
-    b0, rc0 = env._phi_power_activation_and_attack_bonus(cop, 0, st, learner_frame=True)
-    assert rc0["phi_power_bonus_meter_scale_vs_vb_scop"] == pytest.approx(0.3)
-    assert b0 == pytest.approx(0.09 * 0.3)
-    assert rc0["phi_cop_activation_bonus"] == pytest.approx(b0)
-    b1, rc1 = env._phi_power_activation_and_attack_bonus(cop, 1, st, learner_frame=True)
-    assert b1 == pytest.approx(-0.09 * 0.3)
-    assert rc1["phi_power_bonus_meter_scale_vs_vb_scop"] == pytest.approx(0.3)
-    s0, rcs = env._phi_power_activation_and_attack_bonus(scop, 0, st, learner_frame=True)
+    b0, _b_act0, rc0, _pa0, _as0 = env._phi_power_activation_and_attack_bonus(cop, 0, st, learner_frame=True)
+    assert b0 == 0.0 and _b_act0 == 0.0 and rc0 == {}
+    b1, _b_act1, rc1, _pa1, _as1 = env._phi_power_activation_and_attack_bonus(cop, 1, st, learner_frame=True)
+    assert b1 == 0.0 and _b_act1 == 0.0 and rc1 == {}
+    s0, _s_act, rcs, _pas, _sas = env._phi_power_activation_and_attack_bonus(scop, 0, st, learner_frame=True)
     assert rcs["phi_power_bonus_meter_scale_vs_vb_scop"] == pytest.approx(0.6)
-    assert s0 == pytest.approx(0.18 * 0.6)
+    assert s0 == pytest.approx(PHI_SCOP_ACTIVATION_BONUS * 0.6 * 0.05)
     assert rcs["phi_scop_activation_bonus"] == pytest.approx(s0)
 
 
@@ -385,19 +381,82 @@ def test_phi_scop_bonus_adder_cheaper_than_hawke() -> None:
     assert b_von_bolt == pytest.approx(PHI_SCOP_ACTIVATION_BONUS)
 
 
-def test_phi_attack_while_power_active_bonus(phi_env) -> None:
-    """Attacks after COP/SCOP (pre-step co flags) add a small Φ bonus."""
+def test_phi_attack_stats_advantage_bonus(phi_env) -> None:
+    """ATTACK shaping uses strike stats advantage (not COP/SCOP gating)."""
     env = phi_env
     st = env.state
+    atk = Action(ActionType.ATTACK, unit_pos=(0, 0), move_pos=(0, 0), target_pos=(0, 3))
+    b0, _ba0, rc0, _, _ = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
+    assert "phi_attack_stats_advantage_mult" in rc0
+    assert "phi_power_turn_attack_bonus" not in rc0
+    mult0 = float(rc0["phi_attack_stats_advantage_mult"])
+    if mult0 > 0:
+        assert b0 == pytest.approx(0.001 * mult0)
+        assert rc0["phi_attack_stats_advantage_bonus"] == pytest.approx(0.001 * mult0)
+    else:
+        assert b0 == pytest.approx(0.0)
     st.co_states[0].cop_active = True
-    atk = Action(ActionType.ATTACK, unit_pos=(0, 0), move_pos=(0, 0), target_pos=(0, 0))
-    b, rc = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
-    assert b == pytest.approx(0.001)
-    assert rc["phi_power_turn_attack_bonus"] == pytest.approx(0.001)
+    b1, _ba1, rc1, _, _ = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
+    mult1 = float(rc1["phi_attack_stats_advantage_mult"])
+    if mult1 > 0:
+        assert b1 == pytest.approx(0.001 * mult1)
     st.co_states[0].cop_active = False
     st.co_states[0].scop_active = True
-    b2, _ = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
-    assert b2 == pytest.approx(0.001)
+    b2, _ba2, rc2, _, _ = env._phi_power_activation_and_attack_bonus(atk, 0, st, learner_frame=True)
+    mult2 = float(rc2["phi_attack_stats_advantage_mult"])
+    if mult2 > 0:
+        assert b2 == pytest.approx(0.001 * mult2)
+
+
+def test_designed_desires_checkpoint_penalty_sum() -> None:
+    from rl.env import AWBWEnv, PHI_DESIGNED_DESIRES_MAP_ID
+
+    env = object.__new__(AWBWEnv)
+    env._reward_shaping_mode = "phi"
+    env._episode_info = {"map_id": PHI_DESIGNED_DESIRES_MAP_ID}
+    env._designed_desires_checkpoint_misses = 0
+
+    class _St:
+        def count_properties(self, p: int) -> int:
+            return 3
+
+    env.state = _St()
+    assert AWBWEnv._designed_desires_checkpoint_penalty_sum_for_turn_bump(
+        env, 5, 6, 0
+    ) == pytest.approx(-0.1)
+    assert AWBWEnv._designed_desires_checkpoint_penalty_sum_for_turn_bump(
+        env, 6, 7, 0
+    ) == pytest.approx(-0.01)
+    assert env._designed_desires_checkpoint_misses == 2
+
+
+def test_designed_desires_shaping_active_only_phi_and_map() -> None:
+    from rl.env import AWBWEnv, PHI_DESIGNED_DESIRES_MAP_ID
+
+    env = object.__new__(AWBWEnv)
+    env._reward_shaping_mode = "level"
+    env._episode_info = {"map_id": PHI_DESIGNED_DESIRES_MAP_ID}
+    assert not AWBWEnv._designed_desires_shaping_active(env)
+    env._reward_shaping_mode = "phi"
+    env._episode_info = {"map_id": 1}
+    assert not AWBWEnv._designed_desires_shaping_active(env)
+
+
+def test_reward_contract_seat_local_includes_designed_desires_stack() -> None:
+    from types import SimpleNamespace
+
+    from rl.env import AWBWEnv
+
+    env = SimpleNamespace(_learner_seat=0, _pairwise_zero_sum_reward=True)
+    contract = AWBWEnv._reward_contract_info(
+        env,
+        competitive_learner=0.22,
+        common_learner=-0.01,
+        seat_local_learner=-0.05 + (-0.1),
+        final_reward=0.06,
+    )
+    assert contract["seat_local_by_seat"] == pytest.approx([-0.15, 0.0])
+    assert contract["training_reward"] == pytest.approx(0.06)
 
 
 def test_phi_episode_power_activation_counters(phi_env) -> None:

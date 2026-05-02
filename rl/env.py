@@ -48,7 +48,7 @@ from engine.map_loader import MapData, load_map
 from engine.action import Action, ActionStage, ActionType, get_legal_actions
 from engine.unit import UnitType, UNIT_STATS
 from engine.terrain import get_terrain
-from engine.combat import damage_range
+from engine.combat import damage_range, _colin_atk_rider, _kindle_atk_rider
 from engine.belief import BeliefState
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
@@ -274,7 +274,8 @@ PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
 # Φ: one-time bonus for removing an enemy unit on the learner’s engine step,
 # in the same value units as the army line (α × cost × hp/100), scaled
 # with ``_phi_alpha`` so it tracks profile/env overrides.
-PHI_ENEMY_KILL_BONUS_FRAC = 0.3
+# Halved vs historical 0.3 (phi reshape): explicit combat kill chip only, not α.
+PHI_ENEMY_KILL_BONUS_FRAC = 0.15
 # Φ: CO power usage (per acting player; standard step maps to learner frame via
 # ``_signed_engine_reward``). Attack bonus uses pre-step ``state`` so only
 # attacks *after* COP/SCOP activation on that turn qualify (``cop_active`` /
@@ -282,6 +283,7 @@ PHI_ENEMY_KILL_BONUS_FRAC = 0.3
 # Base Φ bonuses before meter scaling (see ``PHI_VON_BOLT_SCOP_REF_THRESHOLD``).
 PHI_COP_ACTIVATION_BONUS = 0.09
 PHI_SCOP_ACTIVATION_BONUS = 0.18
+# Legacy flat attack-under-power chip (replaced by stats-advantage shaping).
 PHI_POWER_TURN_ATTACK_BONUS = 0.001
 # Von Bolt (co_id 30): 10★ SCOP, no COP — ``data/co_data.json``. Activation
 # bonuses multiply by (this power's ``_cop_threshold`` / ``_scop_threshold``)
@@ -299,6 +301,17 @@ PHI_DAY_CAP_DRAWLIKE = frozenset(
 )
 PHI_DAY_CAP_TIEBREAK = frozenset({"max_days_tiebreak", "max_turns_tiebreak"})
 PHI_DAY_CAP_REASONS = PHI_DAY_CAP_DRAWLIKE | PHI_DAY_CAP_TIEBREAK
+
+# Designed Desires curriculum: per-seat owned property counts (includes comm
+# towers) must reach (p0_target, p1_target) by calendar entry to this day.
+PHI_DESIGNED_DESIRES_MAP_ID: int = 171596
+PHI_DESIGNED_DESIRES_CHECKPOINTS: dict[int, tuple[int, int]] = {
+    6: (7, 8),
+    7: (9, 10),
+    8: (12, 11),
+    9: (14, 16),
+    12: (17, 17),
+}
 
 
 def _env_truthy(name: str) -> bool:
@@ -1082,7 +1095,7 @@ class AWBWEnv(gym.Env):
             except ValueError:
                 return default
 
-        self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, p_alpha)
+        self._phi_alpha: float = _read_float(PHI_ALPHA_ENV, p_alpha) * 0.5
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
         self._phi_gamma: float = _read_float(PHI_GAMMA_ENV, p_gamma)
@@ -1560,6 +1573,22 @@ class AWBWEnv(gym.Env):
         # Episode COP/SCOP activation counts by engine seat (for game_log.jsonl).
         self._episode_cop_by_seat: list[int] = [0, 0]
         self._episode_scop_by_seat: list[int] = [0, 0]
+        # Episode reward component accumulators (for game_log breakdown).
+        # Each tracks cumulative reward received by seat [p0, p1].
+        self._episode_reward_army_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_property_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_capture_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_income_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_kill_bonus_cumulative: list[float] = [0.0, 0.0]
+        # SCOP/COP tap shaping (COP Φ bonus is 0) vs strike stats-advantage chip.
+        self._episode_reward_power_activation_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_attack_stats_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_power_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_sparse_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_designed_desires_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_capture_interrupt_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_enemy_property_loss_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_phi_potential_delta_cumulative: list[float] = [0.0, 0.0]
         # Snapshot opponent reload count at episode start so we can
         # report per-episode reloads in the log record.
         self._opponent_reloads_at_start: int = int(
@@ -1604,6 +1633,11 @@ class AWBWEnv(gym.Env):
         self._capture_frame(action=None)
 
         self._maybe_record_neutral_income_snapshot_days()
+
+        self._designed_desires_checkpoint_misses = 0
+        self._dd_prev_calendar_turn_at_step_end = int(
+            getattr(self.state, "turn", 0) or 0
+        )
 
         return self._get_obs(observer=self._learner_seat), dict(self._episode_info)
 
@@ -1708,6 +1742,8 @@ class AWBWEnv(gym.Env):
         # capturer → cp resets sequence is captured as a single ΔΦ on this step.
         if self._reward_shaping_mode == "phi":
             phi_before = self._compute_phi(self.state)
+            # Store Φ component breakdown for later delta calculation
+            self._phi_before_components = self._compute_phi_components_for_seat(self.state, int(self._learner_seat))
             # Snapshot learner's capture progress before learner action (for interrupt detection)
             pre_action_capture_progress = self._get_learner_capture_progress()
             en_s = int(self._enemy_seat)
@@ -1727,8 +1763,10 @@ class AWBWEnv(gym.Env):
             phi_prop_pre_cells = None
 
         acting = int(self.state.active_player)
-        phi_power_b, phi_power_rc = self._phi_power_activation_and_attack_bonus(
-            action, acting, self.state, learner_frame=True
+        phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag, _phi_as_mag = (
+            self._phi_power_activation_and_attack_bonus(
+                action, acting, self.state, learner_frame=True
+            )
         )
         self.state, reward, done = self._engine_step_with_belief(action)
         reward = self._signed_engine_reward(reward, acting)
@@ -1738,16 +1776,35 @@ class AWBWEnv(gym.Env):
         if phi_power_b != 0.0:
             reward += phi_power_b
             rc.update(phi_power_rc)
+            # Credit powers to the **activating engine seat** (unsigned magnitude).
+            if hasattr(self, "_episode_reward_power_cumulative"):
+                self._episode_reward_power_activation_cumulative[acting] += float(
+                    _phi_pa_mag
+                )
+                self._episode_reward_attack_stats_cumulative[acting] += float(
+                    _phi_as_mag
+                )
+                self._episode_reward_power_cumulative[acting] += float(
+                    _phi_pa_mag + _phi_as_mag
+                )
         self._phi_after_step_record_power_activations(action, acting)
         if self.state is not None and self.state.done:
             rb = reward
             reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
             rc["phi_max_turn_sparse_terminal_adjust"] = float(reward - rb)
+            # Track sparse terminal reward for learner seat
+            if hasattr(self, "_episode_reward_sparse_cumulative"):
+                learner = int(self._learner_seat)
+                self._episode_reward_sparse_cumulative[learner] += reward - rb
         kb = 0.0
         if pre_enemy_alive is not None and self.state is not None:
             kb = float(self._phi_enemy_kill_one_time_bonus(pre_enemy_alive))
             reward += kb
             rc["phi_enemy_kill_one_time_bonus"] = kb
+            # Track kill bonus for learner seat
+            if hasattr(self, "_episode_reward_kill_bonus_cumulative"):
+                learner = int(self._learner_seat)
+                self._episode_reward_kill_bonus_cumulative[learner] += kb
         self._capture_frame(action=action)
 
         if (
@@ -1779,7 +1836,7 @@ class AWBWEnv(gym.Env):
                 for u in self.state.units[en]
                 if u.is_alive
             )
-            lv_army = float((v_me - v_en) * 2e-6)
+            lv_army = float((v_me - v_en) * 1e-6)
             reward += lv_army
             rc["level_dense_army_value_diff"] = lv_army
 
@@ -1793,6 +1850,23 @@ class AWBWEnv(gym.Env):
                 reward, _opp_eng = self._run_random_opponent(reward)
             _p1_delta = time.perf_counter() - _t_p1
         rc["opponent_engine_signed_microsteps"] = float(_opp_eng)
+
+        dd_pen_v = 0.0
+        if self.state is not None:
+            cur_dd = int(self.state.turn)
+            prev_dd = int(self._dd_prev_calendar_turn_at_step_end)
+            if self._designed_desires_shaping_active() and cur_dd > prev_dd:
+                dd_pen_v = self._designed_desires_checkpoint_penalty_sum_for_turn_bump(
+                    prev_dd, cur_dd, int(self._learner_seat)
+                )
+            self._dd_prev_calendar_turn_at_step_end = cur_dd
+        if dd_pen_v != 0.0:
+            reward += dd_pen_v
+            if hasattr(self, "_episode_reward_designed_desires_cumulative"):
+                self._episode_reward_designed_desires_cumulative[
+                    int(self._learner_seat)
+                ] += float(dd_pen_v)
+        rc["phi_designed_desires_checkpoint_penalty"] = float(dd_pen_v)
 
         terminated = bool(self.state.done)
         p1_cap_trunc = bool(self._p1_truncated_mid_turn)
@@ -1819,6 +1893,39 @@ class AWBWEnv(gym.Env):
             pd = phi_after - phi_before
             rc["phi_potential_delta"] = float(pd)
             reward += pd
+            if hasattr(self, "_episode_reward_phi_potential_delta_cumulative"):
+                self._episode_reward_phi_potential_delta_cumulative[
+                    int(self._learner_seat)
+                ] += float(pd)
+            
+            # Track Φ component deltas for learner seat.
+            # Unlike the training reward (which zeros Φ at termination so
+            # the agent doesn't bank useless potential), the component
+            # breakdown *must* use the actual state Φ so accumulated deltas
+            # converge to phi_final (not zero).  Otherwise the final step
+            # delta 0 - phi_before_components wipes every accumulator clean.
+            if hasattr(self, "_episode_reward_army_cumulative"):
+                learner = int(self._learner_seat)
+                phi_before_components = getattr(self, "_phi_before_components", None)
+                if phi_before_components is not None:
+                    phi_after_components = self._compute_phi_components_for_seat(
+                        self.state, learner
+                    )
+                    d_army = phi_after_components["army"] - phi_before_components["army"]
+                    d_prop = phi_after_components["property"] - phi_before_components["property"]
+                    d_cap = phi_after_components["capture"] - phi_before_components["capture"]
+                    d_inc = phi_after_components["income"] - phi_before_components["income"]
+                    enemy = 1 - learner
+                    # Learner-frame ΔΦ components; opponent seat moves the
+                    # negated component delta (antisymmetric split across seats).
+                    self._episode_reward_army_cumulative[learner] += d_army
+                    self._episode_reward_army_cumulative[enemy] -= d_army
+                    self._episode_reward_property_cumulative[learner] += d_prop
+                    self._episode_reward_property_cumulative[enemy] -= d_prop
+                    self._episode_reward_capture_cumulative[learner] += d_cap
+                    self._episode_reward_capture_cumulative[enemy] -= d_cap
+                    self._episode_reward_income_cumulative[learner] += d_inc
+                    self._episode_reward_income_cumulative[enemy] -= d_inc
             # Explicit penalty for learner capture progress that was lost (interrupted/reset).
             # If learner started a capture (pre→mid progress increased) but opponent killed the
             # capturer or it got reset, apply -κ × lost_progress penalty.
@@ -1831,6 +1938,13 @@ class AWBWEnv(gym.Env):
                     kappa_loss = float(-(self._phi_kappa * lost))
                     reward -= self._phi_kappa * lost
             rc["phi_capture_interrupt_penalty"] = float(kappa_loss)
+            if (
+                kappa_loss != 0.0
+                and hasattr(self, "_episode_reward_capture_interrupt_cumulative")
+            ):
+                self._episode_reward_capture_interrupt_cumulative[
+                    int(self._learner_seat)
+                ] += float(kappa_loss)
 
         phi_prop_loss_n = 0
         phi_prop_pen = 0.0
@@ -1849,6 +1963,13 @@ class AWBWEnv(gym.Env):
                 )
                 reward += phi_prop_pen
                 self._phi_enemy_property_captures_ep += int(phi_prop_loss_n)
+        if (
+            phi_prop_pen != 0.0
+            and hasattr(self, "_episode_reward_enemy_property_loss_cumulative")
+        ):
+            self._episode_reward_enemy_property_loss_cumulative[
+                int(self._learner_seat)
+            ] += float(phi_prop_pen)
         rc["phi_enemy_property_loss_penalty"] = float(phi_prop_pen)
 
         trunc_pen_v = 0.0
@@ -1897,6 +2018,7 @@ class AWBWEnv(gym.Env):
         if self._reward_shaping_mode != "phi":
             rc.setdefault("phi_potential_delta", 0.0)
             rc.setdefault("phi_capture_interrupt_penalty", 0.0)
+        rc.setdefault("phi_designed_desires_checkpoint_penalty", 0.0)
         rc.setdefault("phi_max_turn_sparse_terminal_adjust", 0.0)
         rc.setdefault("level_dense_property_margin", 0.0)
         rc.setdefault("level_dense_army_value_diff", 0.0)
@@ -1967,7 +2089,7 @@ class AWBWEnv(gym.Env):
                 0.0, float(rc.get("phi_max_turn_sparse_terminal_adjust", 0.0))
             )
         common_reward_v = float(time_cost_adj + trunc_pen_v + draw_common_v)
-        seat_local_reward_v = float(hoard_pen_v)
+        seat_local_reward_v = float(hoard_pen_v + dd_pen_v)
         competitive_reward_v = float(reward - common_reward_v - seat_local_reward_v)
         reward_contract = self._reward_contract_info(
             competitive_learner=competitive_reward_v,
@@ -2213,11 +2335,14 @@ class AWBWEnv(gym.Env):
                 "reward_components": {},
             }
 
-        phi_before = (
-            self._compute_phi_for_seat(self.state, acting)
-            if self._reward_shaping_mode == "phi"
-            else 0.0
-        )
+        phi_before_components_dg: dict[str, float] | None = None
+        if self._reward_shaping_mode == "phi":
+            phi_before = self._compute_phi_for_seat(self.state, acting)
+            phi_before_components_dg = self._compute_phi_components_for_seat(
+                self.state, acting
+            )
+        else:
+            phi_before = 0.0
         pre_capture_progress = (
             self._capture_progress_for_seat(self.state, acting)
             if self._reward_shaping_mode == "phi"
@@ -2241,8 +2366,10 @@ class AWBWEnv(gym.Env):
             else None
         )
 
-        phi_power_b, phi_power_rc = self._phi_power_activation_and_attack_bonus(
-            action, acting, self.state, learner_frame=False
+        phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag_dg, _phi_as_mag_dg = (
+            self._phi_power_activation_and_attack_bonus(
+                action, acting, self.state, learner_frame=False
+            )
         )
         self.state, reward, _done = self._engine_step_with_belief(action)
         # ``GameState.step`` reports engine reward in acting-player coordinates.
@@ -2254,6 +2381,16 @@ class AWBWEnv(gym.Env):
         if phi_power_b != 0.0:
             reward += phi_power_b
             rc.update(phi_power_rc)
+            if hasattr(self, "_episode_reward_power_cumulative"):
+                self._episode_reward_power_activation_cumulative[acting] += float(
+                    _phi_pa_mag_dg
+                )
+                self._episode_reward_attack_stats_cumulative[acting] += float(
+                    _phi_as_mag_dg
+                )
+                self._episode_reward_power_cumulative[acting] += float(
+                    _phi_pa_mag_dg + _phi_as_mag_dg
+                )
         self._phi_after_step_record_power_activations(action, acting)
         if self.state is not None and self.state.done:
             rb = reward
@@ -2261,6 +2398,8 @@ class AWBWEnv(gym.Env):
                 reward, acting
             )
             rc["phi_max_turn_sparse_terminal_adjust"] = float(reward - rb)
+            if hasattr(self, "_episode_reward_sparse_cumulative"):
+                self._episode_reward_sparse_cumulative[acting] += float(reward - rb)
         else:
             rc.setdefault("phi_max_turn_sparse_terminal_adjust", 0.0)
         kb = 0.0
@@ -2270,6 +2409,8 @@ class AWBWEnv(gym.Env):
             )
             reward += kb
         rc["phi_enemy_kill_one_time_bonus"] = kb
+        if kb != 0.0 and hasattr(self, "_episode_reward_kill_bonus_cumulative"):
+            self._episode_reward_kill_bonus_cumulative[acting] += kb
 
         self._capture_frame(action=action)
 
@@ -2287,6 +2428,10 @@ class AWBWEnv(gym.Env):
             pd = phi_after - phi_before
             reward += pd
             rc["phi_potential_delta"] = float(pd)
+            if hasattr(self, "_episode_reward_phi_potential_delta_cumulative"):
+                self._episode_reward_phi_potential_delta_cumulative[acting] += float(
+                    pd
+                )
             kappa_loss = 0.0
             if pre_capture_progress is not None:
                 post_progress = (
@@ -2299,6 +2444,45 @@ class AWBWEnv(gym.Env):
                     kappa_loss = float(-(self._phi_kappa * lost))
                     reward -= self._phi_kappa * lost
             rc["phi_capture_interrupt_penalty"] = float(kappa_loss)
+            if (
+                kappa_loss != 0.0
+                and hasattr(self, "_episode_reward_capture_interrupt_cumulative")
+            ):
+                self._episode_reward_capture_interrupt_cumulative[acting] += float(
+                    kappa_loss
+                )
+            # Φ-component episode totals for ``phi_reward_breakdown`` (mirror / DG path).
+            if hasattr(self, "_episode_reward_army_cumulative") and (
+                phi_before_components_dg is not None
+            ):
+                phi_after_components_dg = self._compute_phi_components_for_seat(
+                    self.state, acting
+                )
+                d_a = (
+                    phi_after_components_dg["army"]
+                    - phi_before_components_dg["army"]
+                )
+                d_p = (
+                    phi_after_components_dg["property"]
+                    - phi_before_components_dg["property"]
+                )
+                d_c = (
+                    phi_after_components_dg["capture"]
+                    - phi_before_components_dg["capture"]
+                )
+                d_i = (
+                    phi_after_components_dg["income"]
+                    - phi_before_components_dg["income"]
+                )
+                oth = 1 - acting
+                self._episode_reward_army_cumulative[acting] += d_a
+                self._episode_reward_army_cumulative[oth] -= d_a
+                self._episode_reward_property_cumulative[acting] += d_p
+                self._episode_reward_property_cumulative[oth] -= d_p
+                self._episode_reward_capture_cumulative[acting] += d_c
+                self._episode_reward_capture_cumulative[oth] -= d_c
+                self._episode_reward_income_cumulative[acting] += d_i
+                self._episode_reward_income_cumulative[oth] -= d_i
         else:
             rc.setdefault("phi_potential_delta", 0.0)
             rc.setdefault("phi_capture_interrupt_penalty", 0.0)
@@ -2320,7 +2504,31 @@ class AWBWEnv(gym.Env):
                 )
                 reward += phi_prop_pen
                 self._phi_enemy_property_captures_ep += int(phi_prop_loss_n)
+        if (
+            phi_prop_pen != 0.0
+            and hasattr(self, "_episode_reward_enemy_property_loss_cumulative")
+        ):
+            self._episode_reward_enemy_property_loss_cumulative[acting] += float(
+                phi_prop_pen
+            )
         rc["phi_enemy_property_loss_penalty"] = float(phi_prop_pen)
+
+        dd_pen_v = 0.0
+        if self.state is not None:
+            cur_dd = int(self.state.turn)
+            prev_dd = int(self._dd_prev_calendar_turn_at_step_end)
+            if self._designed_desires_shaping_active() and cur_dd > prev_dd:
+                dd_pen_v = self._designed_desires_checkpoint_penalty_sum_for_turn_bump(
+                    prev_dd, cur_dd, int(acting)
+                )
+            self._dd_prev_calendar_turn_at_step_end = cur_dd
+        if dd_pen_v != 0.0:
+            reward += dd_pen_v
+            if hasattr(self, "_episode_reward_designed_desires_cumulative"):
+                self._episode_reward_designed_desires_cumulative[acting] += float(
+                    dd_pen_v
+                )
+        rc["phi_designed_desires_checkpoint_penalty"] = float(dd_pen_v)
 
         trunc_pen_v = 0.0
         if truncated and not terminated:
@@ -2452,6 +2660,81 @@ class AWBWEnv(gym.Env):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _designed_desires_shaping_active(self) -> bool:
+        if self._reward_shaping_mode != "phi":
+            return False
+        try:
+            mid = int(self._episode_info.get("map_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        return mid == PHI_DESIGNED_DESIRES_MAP_ID
+
+    def _designed_desires_checkpoint_penalty_sum_for_turn_bump(
+        self, prev_turn: int, new_turn: int, seat: int
+    ) -> float:
+        """Accumulate miss penalties when ``GameState.turn`` advances past checkpoints."""
+        total = 0.0
+        st = self.state
+        if st is None:
+            return total
+        seat_i = int(seat) & 1
+        for day in range(int(prev_turn) + 1, int(new_turn) + 1):
+            tup = PHI_DESIGNED_DESIRES_CHECKPOINTS.get(day)
+            if tup is None:
+                continue
+            need = int(tup[seat_i])
+            if int(st.count_properties(seat_i)) >= need:
+                continue
+            self._designed_desires_checkpoint_misses += 1
+            if self._designed_desires_checkpoint_misses == 1:
+                total -= 0.1
+            else:
+                total -= 0.01
+        return float(total)
+
+    def _phi_strike_av_bonus(self, unit: Any, co: Any, terrain: Any) -> int:
+        """Attack value (AWBW %% points) for Φ stats chip; mirrors ``calculate_damage`` riders."""
+        av = int(co.total_atk_for_unit(unit.unit_type))
+        if co.co_id == 16 and (co.scop_active or co.cop_active):
+            av += int(terrain.defense) * 10
+        av += int(_kindle_atk_rider(co, terrain))
+        av += int(_colin_atk_rider(co))
+        return av
+
+    def _phi_strike_def_bonus_portion(
+        self, unit: Any, co: Any, terrain: Any, foe_type: UnitType
+    ) -> float:
+        """Defense side of stats advantage: CO DEF − 100 plus 10 × terrain stars (surface)."""
+        dv = int(co.total_def_for_unit_against(unit.unit_type, foe_type))
+        dtr = 0 if unit.is_submerged else int(terrain.defense)
+        return float(dv - 100 + dtr * 10)
+
+    def _phi_attack_stats_advantage_mult(
+        self, state: GameState, action: Action
+    ) -> float:
+        if action.action_type != ActionType.ATTACK or action.target_pos is None:
+            return 0.0
+        att = state.get_unit_at(*action.unit_pos) if action.unit_pos else None
+        dfd = state.get_unit_at(*action.target_pos)
+        if att is None or dfd is None or not att.is_alive or not dfd.is_alive:
+            return 0.0
+        move_r, move_c = (action.move_pos if action.move_pos else action.unit_pos)
+        tr, tc = action.target_pos
+        att_terrain = get_terrain(state.map_data.terrain[move_r][move_c])
+        def_terrain = get_terrain(state.map_data.terrain[tr][tc])
+        att_co = state.co_states[att.player]
+        dfd_co = state.co_states[dfd.player]
+        att_av = self._phi_strike_av_bonus(att, att_co, att_terrain)
+        def_hypo_av = self._phi_strike_av_bonus(dfd, dfd_co, def_terrain)
+        atk_term = 0.9 * ((att_av - 100) - (def_hypo_av - 100))
+        def_bonus_def = self._phi_strike_def_bonus_portion(
+            dfd, dfd_co, def_terrain, att.unit_type
+        )
+        def_bonus_att = self._phi_strike_def_bonus_portion(
+            att, att_co, att_terrain, dfd.unit_type
+        )
+        return float(atk_term + (def_bonus_def - def_bonus_att))
+
     def _signed_engine_reward(self, r_engine: float, acting_seat: int) -> float:
         """Map engine reward (acting player's perspective) into learner coordinates."""
         if int(acting_seat) == int(self._learner_seat):
@@ -2465,45 +2748,61 @@ class AWBWEnv(gym.Env):
         state: GameState,
         *,
         learner_frame: bool,
-    ) -> tuple[float, dict[str, float]]:
-        """Φ-mode COP/SCOP activation and same-turn attack-under-power bonuses.
+    ) -> tuple[float, float, dict[str, float], float, float]:
+        """Φ-mode COP/SCOP tap bonuses and attack stats-advantage micro-bonus.
 
         ``state`` must be the **pre-step** game state. ``learner_frame``: when
         True (``step()`` / opponent autoplay), return bonus signed into learner
         coordinates; when False (``step_active_seat_once``), return acting-seat
         frame.
+
+        COP activation shaping is disabled; SCOP bonus is 5%% of the nominal
+        value (95%% reduction). ATTACK adds ``0.001 × max(0, mult)`` where
+        ``mult`` compares strike AV/DV ingredients (see
+        :meth:`_phi_attack_stats_advantage_mult`).
+
+        Returns
+        ``(bonus_for_reward, bonus_acting_seat, rc, power_activation_mag, attack_stats_mag)``
+        where the last two are **unsigned** acting-seat magnitudes for
+        ``phi_reward_breakdown`` (``power_activation_mag`` is SCOP taps only here;
+        ``attack_stats_mag`` is the strike chip). ``bonus_acting_seat`` equals their
+        sum.
         """
         if self._reward_shaping_mode != "phi":
-            return 0.0, {}
+            return 0.0, 0.0, {}, 0.0, 0.0
         a = int(acting)
         co = state.co_states[a]
         b_act = 0.0
         key: str | None = None
         rc_extra: dict[str, float] = {}
+        pow_act_mag = 0.0
+        atk_stats_mag = 0.0
         vb_ref = float(PHI_VON_BOLT_SCOP_REF_THRESHOLD)
         if action.action_type == ActionType.ACTIVATE_COP:
-            scale = float(co._cop_threshold) / vb_ref
-            b_act = float(PHI_COP_ACTIVATION_BONUS) * scale
-            key = "phi_cop_activation_bonus"
-            rc_extra["phi_power_bonus_meter_scale_vs_vb_scop"] = float(scale)
-        elif action.action_type == ActionType.ACTIVATE_SCOP:
+            return 0.0, 0.0, {}, 0.0, 0.0
+        if action.action_type == ActionType.ACTIVATE_SCOP:
             scale = float(co._scop_threshold) / vb_ref
-            b_act = float(PHI_SCOP_ACTIVATION_BONUS) * scale
+            b_act = float(PHI_SCOP_ACTIVATION_BONUS) * scale * 0.05
+            pow_act_mag = float(b_act)
             key = "phi_scop_activation_bonus"
             rc_extra["phi_power_bonus_meter_scale_vs_vb_scop"] = float(scale)
         elif action.action_type == ActionType.ATTACK:
-            if co.cop_active or co.scop_active:
-                b_act = float(PHI_POWER_TURN_ATTACK_BONUS)
-                key = "phi_power_turn_attack_bonus"
+            mult = self._phi_attack_stats_advantage_mult(state, action)
+            rc_extra["phi_attack_stats_advantage_mult"] = float(mult)
+            if mult <= 0.0:
+                return 0.0, 0.0, rc_extra, 0.0, 0.0
+            b_act = 0.001 * float(mult)
+            atk_stats_mag = float(b_act)
+            key = "phi_attack_stats_advantage_bonus"
         if b_act == 0.0 or key is None:
-            return 0.0, {}
+            return 0.0, 0.0, (rc_extra if rc_extra else {}), 0.0, 0.0
         if learner_frame:
             b = float(self._signed_engine_reward(b_act, a))
         else:
             b = b_act
         out: dict[str, float] = {key: float(b)}
         out.update(rc_extra)
-        return b, out
+        return b, float(b_act), out, float(pow_act_mag), float(atk_stats_mag)
 
     def _phi_after_step_record_power_activations(
         self, action: Action, acting: int
@@ -2672,6 +2971,35 @@ class AWBWEnv(gym.Env):
             + self._phi_kappa * (cap_me - cap_en)
             + self._phi_gamma * self._income_saturation(state, me, en)
         )
+
+    def _compute_phi_components_for_seat(self, state: GameState, observer_seat: int) -> dict[str, float]:
+        """Break down Φ(s) into its components from ``observer_seat`` coordinates."""
+        me = int(observer_seat)
+        en = 1 - me
+
+        v_me = sum(
+            UNIT_STATS[u.unit_type].cost * u.hp / 100
+            for u in state.units[me]
+            if u.is_alive
+        )
+        v_en = sum(
+            UNIT_STATS[u.unit_type].cost * u.hp / 100
+            for u in state.units[en]
+            if u.is_alive
+        )
+
+        p_me = state.count_properties(me)
+        p_en = state.count_properties(en)
+
+        cap_me = self._capture_progress_for_seat(state, me)
+        cap_en = self._capture_progress_for_seat(state, en)
+
+        return {
+            "army": self._phi_alpha * (v_me - v_en),
+            "property": self._phi_beta * (p_me - p_en),
+            "capture": self._phi_kappa * (cap_me - cap_en),
+            "income": self._phi_gamma * self._income_saturation(state, me, en),
+        }
 
     def _get_learner_capture_progress(self) -> float:
         """Compute learner's partial capture progress (chip sum) toward enemy properties.
@@ -3355,13 +3683,25 @@ class AWBWEnv(gym.Env):
             if action is None:
                 action = random.choice(legal)
             acting = int(self.state.active_player)
-            phi_pb, _ = self._phi_power_activation_and_attack_bonus(
-                action, acting, self.state, learner_frame=True
+            phi_pb, phi_pb_act, _, phi_pa_m, phi_as_m = (
+                self._phi_power_activation_and_attack_bonus(
+                    action, acting, self.state, learner_frame=True
+                )
             )
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
             dr = self._signed_engine_reward(r_opp, acting) + phi_pb
             opp_engine_signed += dr
             accumulated_reward += dr
+            if phi_pb_act != 0.0 and hasattr(self, "_episode_reward_power_cumulative"):
+                self._episode_reward_power_activation_cumulative[acting] += float(
+                    phi_pa_m
+                )
+                self._episode_reward_attack_stats_cumulative[acting] += float(
+                    phi_as_m
+                )
+                self._episode_reward_power_cumulative[acting] += float(
+                    phi_pa_m + phi_as_m
+                )
             self._phi_after_step_record_power_activations(action, acting)
             self._capture_frame(action=action)
             microsteps += 1
@@ -3405,13 +3745,25 @@ class AWBWEnv(gym.Env):
                 action = random.choice(legal)
 
             acting = int(self.state.active_player)
-            phi_pb, _ = self._phi_power_activation_and_attack_bonus(
-                action, acting, self.state, learner_frame=True
+            phi_pb, phi_pb_act, _, phi_pa_m, phi_as_m = (
+                self._phi_power_activation_and_attack_bonus(
+                    action, acting, self.state, learner_frame=True
+                )
             )
             self.state, r_opp, done_opp = self._engine_step_with_belief(action)
             dr = self._signed_engine_reward(r_opp, acting) + phi_pb
             opp_engine_signed += dr
             accumulated_reward += dr
+            if phi_pb_act != 0.0 and hasattr(self, "_episode_reward_power_cumulative"):
+                self._episode_reward_power_activation_cumulative[acting] += float(
+                    phi_pa_m
+                )
+                self._episode_reward_attack_stats_cumulative[acting] += float(
+                    phi_as_m
+                )
+                self._episode_reward_power_cumulative[acting] += float(
+                    phi_pa_m + phi_as_m
+                )
             self._phi_after_step_record_power_activations(action, acting)
             self._capture_frame(action=action)
             microsteps += 1
@@ -3515,6 +3867,7 @@ class AWBWEnv(gym.Env):
                 self.state.count_properties(1),
             )
 
+
         # Build comprehensive log record per LOGGING_PLAN.md Phase A (game_id added in _append_game_log_line)
         log_record = {
             # High-signal outcome fields first
@@ -3601,6 +3954,47 @@ class AWBWEnv(gym.Env):
             "pairwise_zero_sum_reward": bool(
                 getattr(self, "_pairwise_zero_sum_reward", False)
             ),
+            # Φ reward breakdown — cumulative per **engine seat** (P0 / P1).
+            # Φ components use antisymmetric updates each learner step; power
+            # bonuses credit the activating seat (including opponent micro-steps).
+            # ``power_bonus`` = ``power_activation`` + ``attack_stats_advantage`` (backward compatible).
+            "phi_reward_breakdown": {
+                "p0": {
+                    "army": float(getattr(self, "_episode_reward_army_cumulative", [0.0, 0.0])[0]),
+                    "property": float(getattr(self, "_episode_reward_property_cumulative", [0.0, 0.0])[0]),
+                    "capture": float(getattr(self, "_episode_reward_capture_cumulative", [0.0, 0.0])[0]),
+                    "income": float(getattr(self, "_episode_reward_income_cumulative", [0.0, 0.0])[0]),
+                    "phi_potential_delta": float(getattr(self, "_episode_reward_phi_potential_delta_cumulative", [0.0, 0.0])[0]),
+                    "kill_bonus": float(getattr(self, "_episode_reward_kill_bonus_cumulative", [0.0, 0.0])[0]),
+                    "power_activation": float(getattr(self, "_episode_reward_power_activation_cumulative", [0.0, 0.0])[0]),
+                    "attack_stats_advantage": float(getattr(self, "_episode_reward_attack_stats_cumulative", [0.0, 0.0])[0]),
+                    "power_bonus": float(getattr(self, "_episode_reward_power_cumulative", [0.0, 0.0])[0]),
+                    "designed_desires_checkpoint": float(getattr(self, "_episode_reward_designed_desires_cumulative", [0.0, 0.0])[0]),
+                    "capture_interrupt": float(getattr(self, "_episode_reward_capture_interrupt_cumulative", [0.0, 0.0])[0]),
+                    "enemy_property_loss": float(getattr(self, "_episode_reward_enemy_property_loss_cumulative", [0.0, 0.0])[0]),
+                    "sparse_terminal": float(getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[0]),
+                },
+                "p1": {
+                    "army": float(getattr(self, "_episode_reward_army_cumulative", [0.0, 0.0])[1]),
+                    "property": float(getattr(self, "_episode_reward_property_cumulative", [0.0, 0.0])[1]),
+                    "capture": float(getattr(self, "_episode_reward_capture_cumulative", [0.0, 0.0])[1]),
+                    "income": float(getattr(self, "_episode_reward_income_cumulative", [0.0, 0.0])[1]),
+                    "phi_potential_delta": float(getattr(self, "_episode_reward_phi_potential_delta_cumulative", [0.0, 0.0])[1]),
+                    "kill_bonus": float(getattr(self, "_episode_reward_kill_bonus_cumulative", [0.0, 0.0])[1]),
+                    "power_activation": float(getattr(self, "_episode_reward_power_activation_cumulative", [0.0, 0.0])[1]),
+                    "attack_stats_advantage": float(getattr(self, "_episode_reward_attack_stats_cumulative", [0.0, 0.0])[1]),
+                    "power_bonus": float(getattr(self, "_episode_reward_power_cumulative", [0.0, 0.0])[1]),
+                    "designed_desires_checkpoint": float(getattr(self, "_episode_reward_designed_desires_cumulative", [0.0, 0.0])[1]),
+                    "capture_interrupt": float(getattr(self, "_episode_reward_capture_interrupt_cumulative", [0.0, 0.0])[1]),
+                    "enemy_property_loss": float(getattr(self, "_episode_reward_enemy_property_loss_cumulative", [0.0, 0.0])[1]),
+                    "sparse_terminal": float(getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[1]),
+                },
+            },
+            # Final Φ potential values at game end
+            "phi_final": {
+                "p0": float(self._compute_phi_for_seat(self.state, 0) if self.state is not None else 0.0),
+                "p1": float(self._compute_phi_for_seat(self.state, 1) if self.state is not None else 0.0),
+            },
             "arch_version": (os.environ.get("AWBW_ARCH_VERSION", "wave2") or "wave2").strip(),
             "opponent_sampler": (
                 "pfsp"
