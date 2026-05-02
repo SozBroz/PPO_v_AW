@@ -1792,10 +1792,14 @@ class AWBWEnv(gym.Env):
             rb = reward
             reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
             rc["phi_max_turn_sparse_terminal_adjust"] = float(reward - rb)
-            # Track sparse terminal reward for learner seat
+            # Φ day-cap replacement only (not engine HQ ±1). Antisymmetric in
+            # (P0,P1) so both seats see the opposite adjustment.
             if hasattr(self, "_episode_reward_sparse_cumulative"):
                 learner = int(self._learner_seat)
-                self._episode_reward_sparse_cumulative[learner] += reward - rb
+                enemy = 1 - learner
+                dphi = float(reward - rb)
+                self._episode_reward_sparse_cumulative[learner] += dphi
+                self._episode_reward_sparse_cumulative[enemy] -= dphi
         kb = 0.0
         if pre_enemy_alive is not None and self.state is not None:
             kb = float(self._phi_enemy_kill_one_time_bonus(pre_enemy_alive))
@@ -2399,7 +2403,10 @@ class AWBWEnv(gym.Env):
             )
             rc["phi_max_turn_sparse_terminal_adjust"] = float(reward - rb)
             if hasattr(self, "_episode_reward_sparse_cumulative"):
-                self._episode_reward_sparse_cumulative[acting] += float(reward - rb)
+                oth = 1 - int(acting)
+                dphi = float(reward - rb)
+                self._episode_reward_sparse_cumulative[acting] += dphi
+                self._episode_reward_sparse_cumulative[oth] -= dphi
         else:
             rc.setdefault("phi_max_turn_sparse_terminal_adjust", 0.0)
         kb = 0.0
@@ -2823,6 +2830,29 @@ class AWBWEnv(gym.Env):
         if wi == -1:
             return 0.0
         return 1.0 if wi == int(observer_seat) else -1.0
+
+    @staticmethod
+    def _engine_terminal_sparse_pair_for_log_winner(
+        winner: int | None,
+    ) -> tuple[float, float]:
+        """Canonical engine-style terminal sparse ±1 for (P0, P1) from row ``winner``.
+
+        Uses the same ``winner`` encoding as game_log (0 / 1 / -1 draw / None unknown).
+        Truncation tiebreak rows should set ``log_winner`` before calling.
+        """
+        if winner is None:
+            return (0.0, 0.0)
+        try:
+            w = int(winner)
+        except (TypeError, ValueError):
+            return (0.0, 0.0)
+        if w == -1:
+            return (0.0, 0.0)
+        if w == 0:
+            return (1.0, -1.0)
+        if w == 1:
+            return (-1.0, 1.0)
+        return (0.0, 0.0)
 
     def _learner_frame_terminal_outcome(self, acting_seat: int) -> float:
         """Sparse win/lose/draw from a terminal step, learner frame; excludes capture shaping.
@@ -3867,6 +3897,9 @@ class AWBWEnv(gym.Env):
                 self.state.count_properties(1),
             )
 
+        eng_sparse_p0, eng_sparse_p1 = self._engine_terminal_sparse_pair_for_log_winner(
+            log_winner
+        )
 
         # Build comprehensive log record per LOGGING_PLAN.md Phase A (game_id added in _append_game_log_line)
         log_record = {
@@ -3954,10 +3987,16 @@ class AWBWEnv(gym.Env):
             "pairwise_zero_sum_reward": bool(
                 getattr(self, "_pairwise_zero_sum_reward", False)
             ),
+            # Canonical ±1/0 terminal outcome from ``log_winner`` (engine or
+            # env step-cap synthetic tiebreak). Not Φ-shaped — see ``phi_reward_breakdown``.
+            "engine_terminal_sparse_by_seat": [eng_sparse_p0, eng_sparse_p1],
             # Φ reward breakdown — cumulative per **engine seat** (P0 / P1).
             # Φ components use antisymmetric updates each learner step; power
             # bonuses credit the activating seat (including opponent micro-steps).
             # ``power_bonus`` = ``power_activation`` + ``attack_stats_advantage`` (backward compatible).
+            # ``sparse_terminal`` / ``phi_day_cap_terminal_replacement``: only the
+            # **Φ day-cap replacement** delta (antisymmetric), not HQ ±1.
+            # ``engine_sparse_terminal``: copy of ``engine_terminal_sparse_by_seat`` for this seat.
             "phi_reward_breakdown": {
                 "p0": {
                     "army": float(getattr(self, "_episode_reward_army_cumulative", [0.0, 0.0])[0]),
@@ -3973,6 +4012,10 @@ class AWBWEnv(gym.Env):
                     "capture_interrupt": float(getattr(self, "_episode_reward_capture_interrupt_cumulative", [0.0, 0.0])[0]),
                     "enemy_property_loss": float(getattr(self, "_episode_reward_enemy_property_loss_cumulative", [0.0, 0.0])[0]),
                     "sparse_terminal": float(getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[0]),
+                    "phi_day_cap_terminal_replacement": float(
+                        getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[0]
+                    ),
+                    "engine_sparse_terminal": float(eng_sparse_p0),
                 },
                 "p1": {
                     "army": float(getattr(self, "_episode_reward_army_cumulative", [0.0, 0.0])[1]),
@@ -3988,6 +4031,10 @@ class AWBWEnv(gym.Env):
                     "capture_interrupt": float(getattr(self, "_episode_reward_capture_interrupt_cumulative", [0.0, 0.0])[1]),
                     "enemy_property_loss": float(getattr(self, "_episode_reward_enemy_property_loss_cumulative", [0.0, 0.0])[1]),
                     "sparse_terminal": float(getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[1]),
+                    "phi_day_cap_terminal_replacement": float(
+                        getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[1]
+                    ),
+                    "engine_sparse_terminal": float(eng_sparse_p1),
                 },
             },
             # Final Φ potential values at game end
@@ -4086,6 +4133,8 @@ class AWBWEnv(gym.Env):
             #       at first engine step where ``turn`` equals each milestone (see GAME_LOG_NEUTRAL_INCOME_SNAPSHOT_DAYS).
             # 1.16: async_rollout_mode — async dual-gradient episodes only: mirror self-play vs hist checkpoint.
             # 1.17: cop_activations / scop_activations per seat (Φ power-use logging).
+            # 1.18: engine_terminal_sparse_by_seat — canonical ±1/0 winner sparse;
+            #       phi_reward_breakdown.*.engine_sparse_terminal / phi_day_cap_terminal_replacement.
             "terminated": bool(self.state.done),
             "truncated": bool(getattr(self, "_log_episode_truncated", False)),
             "truncation_reason": getattr(self, "_log_episode_truncation_reason", None),
@@ -4093,7 +4142,7 @@ class AWBWEnv(gym.Env):
                 self, "_log_tie_breaker_property_count", None
             ),
             # 1.16: async_rollout_mode — dual-gradient mirror vs historical checkpoint episode.
-            "log_schema_version": "1.17",
+            "log_schema_version": "1.18",
         }
         sk = getattr(self.state.spirit, "spirit_broken_kind", None)
         if sk is None:
