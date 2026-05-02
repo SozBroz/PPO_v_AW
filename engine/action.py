@@ -27,12 +27,16 @@ from engine.terrain import get_terrain, INF_PASSABLE
 from engine.weather import effective_move_cost
 
 import os as _os
+from engine.commander_wars_capture import advisor_capture_destinations
 
 # Opt-in RL training: when set (see _get_move_actions), infantry/mech MOVE
 # masks are restricted to capturable enemy/neutral property tiles when any
 # exist in range. Default OFF — replays call step() directly and never hit
 # get_legal_actions, so they are unaffected.
 _CAPTURE_MOVE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
+_CAPTURE_MOVE_GATE_STYLE_ENV = "AWBW_CAPTURE_MOVE_GATE_STYLE"
+_CAPTURE_MOVE_GATE_TOP_K_ENV = "AWBW_CAPTURE_MOVE_GATE_TOP_K"
+_CAPTURE_MOVE_GATE_MARGIN_ENV = "AWBW_CAPTURE_MOVE_GATE_MARGIN"
 
 
 def parse_capture_move_gate_env_value(raw: str | None) -> float:
@@ -73,8 +77,7 @@ def _stochastic_capture_gate_restrict(
     state: GameState,
     player: int,
     unit: Unit,
-    capturable: set[tuple[int, int]],
-) -> bool:
+    capturable: set[tuple[int, int]]) -> bool:
     """
     Deterministic pseudo-random Bernoulli trial for 0<P<1.
 
@@ -741,24 +744,44 @@ def _get_move_actions(
     # must agree on repeated get_legal_actions calls).
     gate_prob = parse_capture_move_gate_env_value(_os.environ.get(_CAPTURE_MOVE_GATE_ENV))
     if gate_prob > 0.0 and UNIT_STATS[unit.unit_type].can_capture:
-        capturable: set[tuple[int, int]] = set()
-        for pos in reachable:
-            tid = state.map_data.terrain[pos[0]][pos[1]]
-            if not get_terrain(tid).is_property:
-                continue
-            prop = state.get_property_at(*pos)
-            if prop is None or prop.is_comm_tower or prop.is_lab:
-                continue
-            if prop.owner is not None and prop.owner == player:
-                continue
-            capturable.add(pos)
+        style = (_os.environ.get(_CAPTURE_MOVE_GATE_STYLE_ENV) or "any").strip().lower()
+        if style in ("commander", "commander_wars", "cw", "normalai", "normal_ai"):
+         try:
+          top_k = int(_os.environ.get(_CAPTURE_MOVE_GATE_TOP_K_ENV) or "1")
+         except ValueError:
+          top_k = 1
+         try:
+          margin = float(_os.environ.get(_CAPTURE_MOVE_GATE_MARGIN_ENV) or "0.0")
+         except ValueError:
+          margin = 0.0
+         capturable = advisor_capture_destinations(
+          state,
+          player,
+          unit,
+          reachable,
+          top_k=max(1, top_k),
+          score_margin=max(0.0, margin),
+         )
+        else:
+         capturable: set[tuple[int, int]] = set()
+         for pos in reachable:
+          tid = state.map_data.terrain[pos[0]][pos[1]]
+          if not get_terrain(tid).is_property:
+           continue
+          prop = state.get_property_at(*pos)
+          if prop is None or prop.is_comm_tower or prop.is_lab:
+           continue
+          if prop.owner is not None and prop.owner == player:
+           continue
+          capturable.add(pos)
+
         if capturable:
             if gate_prob >= 1.0:
-                reachable = capturable
+                    reachable = capturable
             elif _stochastic_capture_gate_restrict(
-                gate_prob, state, player, unit, capturable
-            ):
-                reachable = capturable
+                    gate_prob, state, player, unit, capturable
+                ):
+                    reachable = capturable
     # ``reachable`` is a set — iterate in deterministic (row, col) order so
     # ``rng.choice(get_legal_actions(...))`` and RL masks are stable across
     # PYTHONHASHSEED / process boundaries (ai_vs_ai + replay exports).

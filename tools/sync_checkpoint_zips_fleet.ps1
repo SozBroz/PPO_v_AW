@@ -26,8 +26,7 @@ if (-not $RepoRoot) {
     $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 }
 
-$localCheckpointDir = Join-Path $RepoRoot 'checkpoints'
-$localPoolRemote = Join-Path $RepoRoot (Join-Path 'checkpoints' (Join-Path 'pool' $RemoteMachineId))
+$localPoolRemote = Join-Path $RepoRoot 'checkpoints'
 
 $logDir = Join-Path $RepoRoot 'logs'
 if (-not (Test-Path $logDir)) {
@@ -201,7 +200,7 @@ if ($Direction -eq 'Pull' -or $Direction -eq 'Both') {
 }
 
 if ($Direction -eq 'Push' -or $Direction -eq 'Both') {
-    $remotePoolWin = Join-Path $RemoteCheckpointDir (Join-Path 'pool' $LocalMachineId)
+    $remotePoolWin = $RemoteCheckpointDir 
     if (-not $DryRun) {
         Ensure-RemoteDir -SshTarget $RemoteSsh -RemoteDirWin $remotePoolWin
     }
