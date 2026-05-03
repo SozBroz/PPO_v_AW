@@ -71,6 +71,7 @@ import copy
 import gzip
 import io
 import json
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,7 +84,8 @@ from engine.unit import Unit, UnitType, UNIT_STATS
 
 from tools.export_awbw_replay import (
     P0_PLAYER_ID, P1_PLAYER_ID,
-    _AWBW_UNIT_NAMES, _awbw_move_type,
+    _AWBW_VIEWER_UNIT_NAMES,
+    _awbw_move_type,
 )
 
 
@@ -136,6 +138,10 @@ def _unit_to_json(
     The keys mirror what `_serialize_unit` writes into the PHP state zip.
     Fields: id / players_id / name / position / hp / fuel / ammo / range /
     cost / movement_type / moved / fired / capture / cargo slots.
+
+    ``units_name`` / ``units_symbol`` use ``_AWBW_VIEWER_UNIT_NAMES`` (not PHP
+    snapshot spellings): the desktop Replay Player resolves types via
+    ``Units.json`` keys (e.g. ``Missile`` not ``Missiles``, ``Rocket`` not ``Rockets``).
     """
     stats = UNIT_STATS[unit.unit_type]
     short_range = stats.min_range if stats.max_ammo != 0 else 0
@@ -143,11 +149,37 @@ def _unit_to_json(
     if stats.max_ammo == 0:
         short_range = 0
         long_range = 0
+    vn = _AWBW_VIEWER_UNIT_NAMES.get(unit.unit_type, stats.name)
+    # #region agent log
+    if unit.unit_type == UnitType.MISSILES:
+        try:
+            with open(
+                r"d:\awbw\debug-153502.log", "a", encoding="utf-8"
+            ) as _agent_df:
+                _agent_df.write(
+                    json.dumps(
+                        {
+                            "sessionId": "153502",
+                            "hypothesisId": "H1",
+                            "location": "export_awbw_replay_actions.py:_unit_to_json",
+                            "message": "missiles_units_name_symbol_for_viewer_stream",
+                            "data": {
+                                "units_name": vn,
+                                "units_symbol": vn,
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+    # #endregion
     return {
         "units_id":              unit.unit_id,
         "units_games_id":        0,
         "units_players_id":      player_id,
-        "units_name":            _AWBW_UNIT_NAMES.get(unit.unit_type, stats.name),
+        "units_name":            vn,
         "units_movement_points": stats.move_range,
         "units_vision":          stats.vision,
         "units_fuel":            unit.fuel,
@@ -157,7 +189,7 @@ def _unit_to_json(
         "units_short_range":     short_range,
         "units_long_range":      long_range,
         "units_second_weapon":   "N",
-        "units_symbol":          _AWBW_UNIT_NAMES.get(unit.unit_type, stats.name),
+        "units_symbol":          vn,
         "units_cost":            stats.cost,
         "units_movement_type":   _awbw_move_type(unit.unit_type),
         "units_x":               unit.pos[1],

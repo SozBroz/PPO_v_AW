@@ -572,6 +572,30 @@ def pick_capture_greedy_flat(state: GameState, mask: np.ndarray) -> int:
     return int(random.choice(best))
 
 
+def pick_capture_greedy_candidate_idx(
+    state: GameState, mask: np.ndarray, candidates: list
+) -> int:
+    """Pick a masked candidate row with capture-first heuristics (P0 learner-greedy)."""
+    from rl.candidate_actions import MAX_CANDIDATES
+
+    best_score = -1e18
+    best: list[int] = []
+    for i, cand in enumerate(candidates):
+        if i >= MAX_CANDIDATES or not mask[i]:
+            continue
+        act = cand.terminal_action
+        sc = _greedy_action_score(state, act)
+        if sc > best_score:
+            best_score = sc
+            best = [i]
+        elif sc == best_score:
+            best.append(i)
+    if not best:
+        legal_idx = np.where(mask)[0]
+        return int(np.random.choice(legal_idx)) if len(legal_idx) > 0 else 0
+    return int(random.choice(best))
+
+
 _VALID_COLD_OPPONENTS = ("random", "greedy_capture", "greedy_mix", "end_turn")
 
 
@@ -842,8 +866,82 @@ class _CheckpointOpponent:
         """
         return self._model is not None
 
+    def _candidate_legal_indices(self, mask: np.ndarray) -> np.ndarray:
+        return np.where(mask)[0]
+
+    def _candidate_greedy_action(self, mask: np.ndarray) -> int | None:
+        env = self._env_ref() if self._env_ref is not None else None
+        cands = getattr(env, "_candidate_list_cache", None) if env is not None else None
+        legal = np.where(mask)[0]
+        if cands is None or len(legal) == 0:
+            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+        best_score = -1e18
+        best: list[int] = []
+        for idx in legal:
+            i = int(idx)
+            if i >= len(cands):
+                continue
+            cand = cands[i]
+            label = str(getattr(cand, "label", ""))
+            preview = getattr(cand, "preview", None)
+            score = 0.0
+            if label == "MOVE_CAPTURE":
+                score += 10000.0
+                if preview is not None and len(preview) > 10:
+                    score += 500.0 * float(preview[10])  # completes now
+                    score += 100.0 * float(preview[8])  # progress
+            elif label == "MOVE_ATTACK":
+                score += 2000.0
+                if preview is not None and len(preview) > 23:
+                    score += 4000.0 * float(preview[21])
+                    score += 2000.0 * float(preview[20])
+                    score += 3000.0 * float(preview[17])
+                    score -= 3500.0 * float(preview[22])
+                    score -= 2000.0 * float(preview[19])
+            elif label == "MOVE_WAIT":
+                score += 500.0
+            elif label.startswith("MOVE_"):
+                score += 300.0
+            else:
+                score += 100.0
+            if score > best_score:
+                best_score = score
+                best = [i]
+            elif score == best_score:
+                best.append(i)
+        return int(random.choice(best)) if best else (int(np.random.choice(legal)) if len(legal) > 0 else 0)
+
+    def _candidate_passive_action(self, mask: np.ndarray) -> int | None:
+        env = self._env_ref() if self._env_ref is not None else None
+        cands = getattr(env, "_candidate_list_cache", None) if env is not None else None
+        legal = np.where(mask)[0]
+        if cands is None or len(legal) == 0:
+            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+        for desired in ("END_TURN", "SELECT_UNIT", "MOVE_WAIT"):
+            opts = [
+                int(i)
+                for i in legal
+                if int(i) < len(cands) and str(getattr(cands[int(i)], "label", "")) == desired
+            ]
+            if opts:
+                return int(random.choice(opts))
+        return int(np.random.choice(legal)) if len(legal) > 0 else 0
+
     def _cold_action(self, mask: np.ndarray) -> int:
         """Pick an action under the configured cold-opponent policy."""
+        if len(mask) == 4096:
+            if self._cold_opponent == "end_turn":
+                v = self._candidate_passive_action(mask)
+                return int(v) if v is not None else 0
+            if self._cold_opponent in ("greedy_capture", "greedy_mix"):
+                if self._cold_opponent == "greedy_mix" and random.random() >= 0.5:
+                    legal = np.where(mask)[0]
+                    return int(np.random.choice(legal)) if len(legal) > 0 else 0
+                v = self._candidate_greedy_action(mask)
+                return int(v) if v is not None else 0
+            legal = np.where(mask)[0]
+            return int(np.random.choice(legal)) if len(legal) > 0 else 0
+
         if self._cold_opponent == "end_turn":
             # END_TURN flat=0 is only legal once every friendly unit has
             # moved this turn (engine forces unit activity; see
@@ -2746,11 +2844,17 @@ class SelfPlayTrainer:
         # ent_coef=0.05 drives aggressive early exploration (decay manually later)
         # gamma=0.99925 — long horizon (games often ≫1k learner steps; critic still bootstraps).
 
-        from rl.network import AWBWFeaturesExtractor  # type: ignore[import]
+        from rl.network import AWBWCandidateFeaturesExtractor as _AWBWExtractor  # type: ignore[import]
+
+        _features_dim = 512
+        print(
+            "[self_play] using padded candidate-action observation/action space "
+            f"(max_candidates=4096, features_dim={_features_dim})."
+        )
         policy_kwargs = dict(
-            features_extractor_class=AWBWFeaturesExtractor,
-            features_extractor_kwargs=dict(features_dim=256),
-            net_arch=[],  # AWBWFeaturesExtractor already includes 2 FC layers
+            features_extractor_class=_AWBWExtractor,
+            features_extractor_kwargs=dict(features_dim=_features_dim),
+            net_arch=[],  # extractor already includes FC layers
         )
 
         latest_path = self.checkpoint_dir / "latest.zip"

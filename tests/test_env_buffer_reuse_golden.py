@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS
+from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,4 +177,4 @@ def test_reset_map_id_override_no_crash_and_fixed_obs_shape(
     obs, _info = env.reset(seed=1, options={"map_id": other_id})
     assert env._episode_info["map_id"] == other_id
     assert obs["spatial"].shape == (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS)
-    assert obs["scalars"].shape[0] == 17
+    assert obs["scalars"].shape[0] == N_SCALARS

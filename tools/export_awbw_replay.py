@@ -14,7 +14,9 @@ from __future__ import annotations
 import copy
 import gzip
 import io
+import json
 import logging
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,17 +111,28 @@ def _awbw_non_property_building_capture(terrain_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# AWBW unit name mapping (must match the viewer's unit database).
+# AWBW unit name mapping — two surfaces (see ``engine/unit_naming.py``).
 #
-# Phase 11Z: derived from the canon in ``engine/unit_naming.py``. Kept as
-# a public dict for backwards compatibility (``tools/oracle_zip_replay``,
-# ``tools/export_awbw_replay_actions``, and external callers import it
-# directly). To add or change a spelling, edit ``engine/unit_naming.py``
-# and not this dict — see ``docs/oracle_exception_audit/
-# phase11z_unit_naming_canon_audit.md``.
+# ``_AWBW_UNIT_NAMES`` is legacy AWBW **PHP** spellings (``Md. Tank``,
+# ``Rockets``, ``Missiles``, …). Kept for ``tools/oracle_zip_replay`` and any
+# tool that expects PHP-round-trip strings.
+#
+# Exported desktop zip snapshots **and** per-action JSON use
+# ``_AWBW_VIEWER_UNIT_NAMES``: the C# Replay Player indexes ``Units.json`` by
+# those keys (e.g. ``Md.Tank``, ``Rocket``, ``Missile``). Using PHP spellings
+# in snapshots crashes ``EndTurnAction.SetupAndUpdate`` →
+# ``GetUnitDataForUnitName`` KeyNotFoundException.
+#
+# Phase 11Z audit doc:
+# ``docs/oracle_exception_audit/phase11z_unit_naming_canon_audit.md``.
 # ---------------------------------------------------------------------------
 _AWBW_UNIT_NAMES: dict[UnitType, str] = {
     ut: from_unit_type(ut, UnitNameSurface.AWBW_PHP) for ut in UnitType
+}
+
+# C# ``AWBWApp.Resources/Json/Units.json`` object keys / live replay payloads.
+_AWBW_VIEWER_UNIT_NAMES: dict[UnitType, str] = {
+    ut: from_unit_type(ut, UnitNameSurface.AWBW_VIEWER) for ut in UnitType
 }
 
 # AWBW movement type strings
@@ -393,10 +406,37 @@ def _serialize_unit(
         short_range = 0
         long_range  = 0
 
+    vn = _AWBW_VIEWER_UNIT_NAMES.get(unit_type, stats.name)
+    # #region agent log
+    if unit_type in (UnitType.ROCKET, UnitType.MISSILES):
+        try:
+            with open(
+                r"d:\awbw\debug-153502.log", "a", encoding="utf-8"
+            ) as _agent_df:
+                _agent_df.write(
+                    json.dumps(
+                        {
+                            "sessionId": "153502",
+                            "hypothesisId": "H2",
+                            "location": "export_awbw_replay.py:_serialize_unit",
+                            "message": "snapshot_awbwunit_name_symbol_for_viewer",
+                            "data": {
+                                "unit_type": unit_type.name,
+                                "name_symbol": vn,
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+    # #endregion
+
     fields = [
         ("id",              _php_long(unit_id)),
         ("players_id",      _php_long(player_id)),
-        ("name",            _php_str(_AWBW_UNIT_NAMES.get(unit_type, stats.name))),
+        ("name",            _php_str(vn)),
         ("movement_points", _php_int(stats.move_range)),
         ("vision",          _php_int(stats.vision)),
         ("fuel",            _php_int(fuel)),
@@ -418,7 +458,7 @@ def _serialize_unit(
         ("cargo2_units_id", _php_long(0)),
         ("carried",         _php_bool_str(False)),
         ("games_id",        _php_long(game_id)),
-        ("symbol",          _php_str(_AWBW_UNIT_NAMES.get(unit_type, stats.name))),
+        ("symbol",          _php_str(vn)),
     ]
     return _php_object("awbwUnit", fields)
 

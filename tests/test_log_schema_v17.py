@@ -1,4 +1,8 @@
-"""Schema 1.11 contract: 1.10 fields plus env-step-cap synthetic ``winner`` / ``win_reason``.
+"""Schema 1.18 contract: 1.17 fields plus engine terminal sparse logging.
+
+Schema **1.18** adds ``engine_terminal_sparse_by_seat`` and per-seat
+``engine_sparse_terminal`` / ``phi_day_cap_terminal_replacement`` in
+``phi_reward_breakdown`` (canonical ±1/0 vs Φ day-cap replacement).
 
 Plan: ``.cursor/plans/train.py_fps_campaign_c26ce6d4.plan.md`` — Phase 10/11
 logging prerequisites. Without ``machine_id`` on every row the orchestrator's
@@ -80,7 +84,7 @@ def test_log_schema_v17_required_fields_machine_id_unset(
     monkeypatch.delenv("AWBW_MACHINE_ID", raising=False)
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
-    assert row["log_schema_version"] == "1.17"
+    assert row["log_schema_version"] == "1.18"
     assert len(row.get("alive_unit_count", [])) == 2
     assert len(row.get("army_value", [])) == 2
     assert row.get("tie_breaker_property_count") is None
@@ -121,8 +125,14 @@ def test_log_schema_v17_required_fields_machine_id_unset(
             "designed_desires_checkpoint",
             "capture_interrupt",
             "enemy_property_loss",
+            "engine_sparse_terminal",
+            "phi_day_cap_terminal_replacement",
         ):
             assert key in bucket, f"phi_reward_breakdown.{seat} missing {key!r}"
+
+    assert row.get("engine_terminal_sparse_by_seat") == [1.0, -1.0]
+    assert row["phi_reward_breakdown"]["p0"]["engine_sparse_terminal"] == 1.0
+    assert row["phi_reward_breakdown"]["p1"]["engine_sparse_terminal"] == -1.0
 
     for k in (
         "neutral_income_remaining_by_day_7",
@@ -142,7 +152,7 @@ def test_log_schema_v17_machine_id_from_env(
     row = _drive_one_log_record(monkeypatch, tmp_path)
 
     assert row["machine_id"] == "test-pc"
-    assert row["log_schema_version"] == "1.17"
+    assert row["log_schema_version"] == "1.18"
     assert isinstance(row["terrain_usage_p0"], float)
 
 
@@ -171,7 +181,7 @@ def test_log_async_rollout_mode_written_when_set(
 
     raw = log_path.read_text(encoding="utf-8").strip()
     row = json.loads(raw.split("\n\n")[0])
-    assert row["log_schema_version"] == "1.17"
+    assert row["log_schema_version"] == "1.18"
     assert row.get("async_rollout_mode") == "hist"
 
 

@@ -105,9 +105,18 @@ def make_maskable_ppo(
     else:
         hp = {**DEFAULT_HYPERPARAMS, **hyperparams}
 
+    from rl.network import AWBWCandidateFeaturesExtractor as _AWBWExtractor  # type: ignore[import]
+
+    policy_kwargs = dict(
+        features_extractor_class=_AWBWExtractor,
+        features_extractor_kwargs=dict(features_dim=512),
+        net_arch=[],
+    )
+
     return MaskablePPO(
         "MultiInputPolicy",
         env,
+        policy_kwargs=policy_kwargs,
         verbose=verbose,
         tensorboard_log=tensorboard_log,
         **hp,

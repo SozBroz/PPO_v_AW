@@ -1,10 +1,10 @@
 """Naval build sanity tests.
 
-AWBW only allows naval units (Black Boat, Lander, Sub, Cruiser, Battleship,
-Carrier, Gunboat) to be produced on **port** tiles. `get_producible_units`
-enforces this directly by tile type. `_apply_build` also rejects BUILD on
-non-factory terrain. These tests lock both in place so future refactors
-cannot silently regress the rule exposed by replay 135015.
+AWBW ports build exactly six naval units: Black Boat, Lander, Submarine,
+Cruiser, Battleship, Carrier. Gunboat is not an AWBW unit (Days of Ruin).
+
+``get_producible_units`` enforces this by tile type; ``_apply_build`` rejects
+BUILD on non-factory terrain.
 """
 from __future__ import annotations
 
@@ -19,9 +19,15 @@ from engine.unit import UnitType
 
 
 NAVAL_TYPES = {
-    UnitType.BLACK_BOAT, UnitType.LANDER, UnitType.SUBMARINE,
-    UnitType.CRUISER, UnitType.BATTLESHIP, UnitType.CARRIER, UnitType.GUNBOAT,
+    UnitType.BLACK_BOAT,
+    UnitType.LANDER,
+    UnitType.SUBMARINE,
+    UnitType.CRUISER,
+    UnitType.BATTLESHIP,
+    UnitType.CARRIER,
 }
+
+_EXPECTED_PORT_NAVAL = frozenset(NAVAL_TYPES)
 
 
 def _state_with_factory(*, terrain_id: int, is_base: bool, is_airport: bool, is_port: bool) -> GameState:
@@ -96,6 +102,17 @@ class TestNavalBuildTerrain(unittest.TestCase):
         self.assertIn(UnitType.BLACK_BOAT, produced,
                       "port must be able to produce Black Boat")
         self.assertIn(UnitType.LANDER, produced)
+
+    def test_port_lists_exactly_six_naval_units_matching_awbw(self) -> None:
+        info = get_terrain(37)
+        produced = set(get_producible_units(info, []))
+        naval_on_port = produced & NAVAL_TYPES
+        self.assertEqual(
+            naval_on_port,
+            _EXPECTED_PORT_NAVAL,
+            f"port naval producibles must be AWBW six-tuple; got {sorted(u.name for u in naval_on_port)}",
+        )
+        self.assertNotIn(UnitType.GUNBOAT, produced)
 
     def test_crafted_black_boat_on_base_rejected(self) -> None:
         """Phase 10M: crafted illegal naval BUILD hits STEP-GATE before `_apply_build`."""

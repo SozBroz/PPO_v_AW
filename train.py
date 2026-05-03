@@ -867,13 +867,16 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cop-disable-per-seat-p",
+        "--cop-disable-per-seat",
+        dest="cop_disable_per_seat_p",
         type=float,
         default=None,
         metavar="P",
         help=(
             "Per curriculum episode, each seat that has a COP independently disables "
             "COP activation with this probability in [0,1] (SCOP unchanged). Omit to read "
-            "AWBW_COP_DISABLE_PER_SEAT_P (default off). Ignored for live snapshot loads."
+            "AWBW_COP_DISABLE_PER_SEAT_P (default off). Ignored for live snapshot loads. "
+            "Alias --cop-disable-per-seat matches fleet proposed_args keys."
         ),
     )
     parser.add_argument(

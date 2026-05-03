@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
+from rl.candidate_actions import CANDIDATE_FEATURE_DIM, MAX_CANDIDATES
 from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS
 
 # --- Flat index layout (must stay aligned with rl/env.py) ---------------------
@@ -96,6 +97,72 @@ class AWBWFeaturesExtractor(BaseFeaturesExtractor):
                 nn.init.zeros_(m.bias)
 
 
+class AWBWCandidateFeaturesExtractor(BaseFeaturesExtractor):
+    """SB3-compatible extractor for the padded candidate-action policy."""
+
+    def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 512) -> None:
+        super().__init__(observation_space, features_dim=features_dim)
+        self.stem = nn.Sequential(
+            nn.Conv2d(N_SPATIAL_CHANNELS, TRUNK_CHANNELS, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.trunk_blocks = nn.ModuleList([_ResBlock128() for _ in range(10)])
+        self.scalar_to_plane = nn.Linear(N_SCALARS, SCALAR_PLANES)
+        self.candidate_mlp = nn.Sequential(
+            nn.Linear(CANDIDATE_FEATURE_DIM, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 64),
+            nn.ReLU(inplace=True),
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(FUSED_CHANNELS + 64, features_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(features_dim, features_dim),
+            nn.ReLU(inplace=True),
+        )
+        self._init_weights()
+
+    def forward(self, observations: dict) -> torch.Tensor:
+        spatial = observations["spatial"]
+        scalars = observations["scalars"]
+        cand = observations.get("candidate_features")
+        cand_mask = observations.get("candidate_mask")
+        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=(spatial.device.type == "cuda")):
+            x = spatial.permute(0, 3, 1, 2).contiguous()
+            x = self.stem(x)
+            for blk in self.trunk_blocks:
+                x = blk(x)
+            b = scalars.shape[0]
+            sp = self.scalar_to_plane(scalars).view(b, SCALAR_PLANES, 1, 1)
+            sp = sp.expand(-1, -1, GRID_SIZE, GRID_SIZE)
+            xf = torch.cat([x, sp], dim=1)
+            board_g = torch.nn.functional.adaptive_avg_pool2d(xf, (1, 1)).flatten(1)
+
+            if cand is None:
+                cand_g = torch.zeros((b, 64), device=spatial.device, dtype=board_g.dtype)
+            else:
+                cand = cand.to(dtype=board_g.dtype)
+                ce = self.candidate_mlp(cand)
+                if cand_mask is not None:
+                    m = cand_mask.to(device=ce.device, dtype=ce.dtype).unsqueeze(-1)
+                    denom = torch.clamp(m.sum(dim=1), min=1.0)
+                    cand_g = (ce * m).sum(dim=1) / denom
+                else:
+                    cand_g = ce.mean(dim=1)
+            g = torch.cat([board_g, cand_g], dim=1)
+        return self.fc(g.float())
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=1.0)
+                nn.init.zeros_(m.bias)
+
+
 class AWBWNet(nn.Module):
     """
     Residual CNN trunk (10×128, full 30×30), scalar broadcast fusion → 144 ch,
@@ -123,6 +190,14 @@ class AWBWNet(nn.Module):
 
         self.linear_scalar_policy = nn.Linear(FUSED_CHANNELS, 16)
 
+        self.candidate_mlp = nn.Sequential(
+            nn.Linear(FUSED_CHANNELS + CANDIDATE_FEATURE_DIM, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, 1),
+        )
+
         self.value_head = nn.Sequential(
             nn.Linear(FUSED_CHANNELS, hidden_size),
             nn.ReLU(inplace=True),
@@ -136,6 +211,8 @@ class AWBWNet(nn.Module):
         spatial: torch.Tensor,
         scalars: torch.Tensor,
         action_mask: torch.Tensor | None = None,
+        candidate_features: torch.Tensor | None = None,
+        candidate_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         x = spatial.permute(0, 3, 1, 2).contiguous()
         x = self.stem(x)
@@ -150,6 +227,24 @@ class AWBWNet(nn.Module):
         xf = torch.cat([x, sp], dim=1)
 
         g = torch.nn.functional.adaptive_avg_pool2d(xf, (1, 1)).flatten(1)
+
+        if candidate_features is not None:
+            cf = candidate_features.float()
+            if (
+                cf.dim() != 3
+                or cf.shape[1] != MAX_CANDIDATES
+                or cf.shape[2] != CANDIDATE_FEATURE_DIM
+            ):
+                raise ValueError(
+                    f"candidate_features must be [B,{MAX_CANDIDATES},{CANDIDATE_FEATURE_DIM}], "
+                    f"got {tuple(cf.shape)}"
+                )
+            gg = g.float().unsqueeze(1).expand(-1, MAX_CANDIDATES, -1)
+            logits = self.candidate_mlp(torch.cat([gg, cf], dim=-1)).squeeze(-1)
+            if candidate_mask is not None:
+                logits = logits.masked_fill(~candidate_mask.bool(), float("-inf"))
+            value = self.value_head(g.float()).squeeze(-1)
+            return logits, value
 
         l_sel = self.conv_select(xf).squeeze(1)
         l_move = self.conv_move(xf).squeeze(1)
@@ -230,6 +325,8 @@ class AWBWNet(nn.Module):
         nn.init.zeros_(self.value_head[-1].bias)
         nn.init.orthogonal_(self.linear_scalar_policy.weight, gain=0.01)
         nn.init.zeros_(self.linear_scalar_policy.bias)
+        nn.init.orthogonal_(self.candidate_mlp[-1].weight, gain=0.01)
+        nn.init.zeros_(self.candidate_mlp[-1].bias)
         for head in (
             self.conv_select,
             self.conv_move,

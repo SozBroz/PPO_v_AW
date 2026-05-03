@@ -925,7 +925,7 @@ Profiles must differ in:
 ---
 
 ## 14. MCTS Rollout Strategy — Staged Integration (ACTIVE)
-
+WARNING: BY THIS POINT WE SHOULD HAVE ALL MAPS/ ALL COs SEMI COMPETENT - NEED TO INTRODUCE SOME NEW TILE SPECIFIC CO INTERACTIONS BEFORE THIS POINT.  ergo kindle, lash, koal,jake need to have their tile dependent bonuses encoded 
 Goal:
 Introduce MCTS without destroying training throughput.
 

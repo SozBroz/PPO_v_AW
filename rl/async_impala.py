@@ -30,7 +30,7 @@ from stable_baselines3.common.utils import explained_variance as sb3_explained_v
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from rl.network import AWBWFeaturesExtractor
+from rl.network import AWBWCandidateFeaturesExtractor
 from rl.vtrace import from_importance_weights
 
 # region agent log
@@ -384,7 +384,7 @@ def actor_process_main(
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     _actor_threads = _async_actor_configure_cpu_parallelism()
 
-    from rl.ckpt_compat import load_maskable_ppo_compat
+    from rl.ckpt_compat import align_maskable_ppo_observation_space_to_awbw_env, load_maskable_ppo_compat
 
     try:
         dev = torch.device(device_str)
@@ -398,6 +398,7 @@ def actor_process_main(
             n_steps=1,
             batch_size=1,
         )
+        align_maskable_ppo_observation_space_to_awbw_env(model)
         try:
             torch.set_num_threads(_actor_threads)
             torch.set_num_interop_threads(1)
@@ -427,6 +428,7 @@ def actor_process_main(
                 local_ver = v
 
         _reload_if_needed()
+        align_maskable_ppo_observation_space_to_awbw_env(model)
         obs, _info = env.reset()
         dg_env = _dual_gradient_env(env)
         if dual_gradient_self_play:
@@ -446,8 +448,11 @@ def actor_process_main(
 
         while not stop_event.is_set():
             _reload_if_needed()
+            align_maskable_ppo_observation_space_to_awbw_env(model)
             spatial_chunks: list[np.ndarray] = []
             scalars_chunks: list[np.ndarray] = []
+            cand_feat_chunks: list[np.ndarray] = []
+            cand_mask_chunks: list[np.ndarray] = []
             mask_chunks: list[np.ndarray] = []
             actions_arr = np.zeros((unroll_len,), dtype=np.int64)
             rewards_arr = np.zeros((unroll_len,), dtype=np.float32)
@@ -471,6 +476,12 @@ def actor_process_main(
                 done = bool(term or trunc)
                 spatial_chunks.append(np.asarray(obs["spatial"], dtype=np.float32))
                 scalars_chunks.append(np.asarray(obs["scalars"], dtype=np.float32))
+                cand_feat_chunks.append(
+                    np.asarray(obs["candidate_features"], dtype=np.float32)
+                )
+                cand_mask_chunks.append(
+                    np.asarray(obs["candidate_mask"], dtype=np.int8)
+                )
                 mask_chunks.append(np.asarray(mask, dtype=np.bool_))
                 actions_arr[t] = act
                 rewards_arr[t] = float(rew)
@@ -510,6 +521,8 @@ def actor_process_main(
                 "actor_id": actor_id,
                 "spatial": np.stack(spatial_chunks, axis=0),
                 "scalars": np.stack(scalars_chunks, axis=0),
+                "candidate_features": np.stack(cand_feat_chunks, axis=0),
+                "candidate_mask": np.stack(cand_mask_chunks, axis=0),
                 "mask": np.stack(mask_chunks, axis=0),
                 "actions": actions_arr,
                 "rewards": rewards_arr,
@@ -517,6 +530,12 @@ def actor_process_main(
                 "mu_logp": mu_logp_arr,
                 "bootstrap_spatial": np.asarray(obs["spatial"], dtype=np.float32),
                 "bootstrap_scalars": np.asarray(obs["scalars"], dtype=np.float32),
+                "bootstrap_candidate_features": np.asarray(
+                    obs["candidate_features"], dtype=np.float32
+                ),
+                "bootstrap_candidate_mask": np.asarray(
+                    obs["candidate_mask"], dtype=np.int8
+                ),
                 "bootstrap_mask": bootstrap_mask,
                 "tail_done": bool(last_done),
             }
@@ -542,6 +561,8 @@ def actor_process_main(
 def _flatten_time_batch(
     spatial: torch.Tensor,
     scalars: torch.Tensor,
+    candidate_features: torch.Tensor,
+    candidate_mask: torch.Tensor,
     mask: torch.Tensor,
     actions: torch.Tensor,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
@@ -549,9 +570,16 @@ def _flatten_time_batch(
     t, b = spatial.shape[:2]
     flat_sp = spatial.reshape(t * b, *spatial.shape[2:])
     flat_sc = scalars.reshape(t * b, scalars.shape[-1])
+    flat_cf = candidate_features.reshape(t * b, *candidate_features.shape[2:])
+    flat_cm = candidate_mask.reshape(t * b, candidate_mask.shape[-1])
     flat_m = mask.reshape(t * b, mask.shape[-1])
     flat_a = actions.reshape(t * b)
-    obs = {"spatial": flat_sp, "scalars": flat_sc}
+    obs = {
+        "spatial": flat_sp,
+        "scalars": flat_sc,
+        "candidate_features": flat_cf,
+        "candidate_mask": flat_cm,
+    }
     return obs, flat_m, flat_a
 
 
@@ -605,6 +633,8 @@ def _evaluate_actions_microbatched(
         e = min(s + chunk, n)
         spatial_s = flat_obs["spatial"][s:e]
         scalars_s = flat_obs["scalars"][s:e]
+        cand_f_s = flat_obs["candidate_features"][s:e]
+        cand_m_s = flat_obs["candidate_mask"][s:e]
         acts_s = flat_actions[s:e]
         mask_s = flat_mask[s:e]
         if use_ckpt:
@@ -612,17 +642,36 @@ def _evaluate_actions_microbatched(
             def _fwd(
                 sp: torch.Tensor,
                 sc: torch.Tensor,
+                cf: torch.Tensor,
+                cm: torch.Tensor,
                 ac: torch.Tensor,
                 ms: torch.Tensor,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-                o = {"spatial": sp, "scalars": sc}
+                o = {
+                    "spatial": sp,
+                    "scalars": sc,
+                    "candidate_features": cf,
+                    "candidate_mask": cm,
+                }
                 return pol.evaluate_actions(o, ac, action_masks=ms)
 
             v, lp, ent = checkpoint(
-                _fwd, spatial_s, scalars_s, acts_s, mask_s, use_reentrant=False
+                _fwd,
+                spatial_s,
+                scalars_s,
+                cand_f_s,
+                cand_m_s,
+                acts_s,
+                mask_s,
+                use_reentrant=False,
             )
         else:
-            obs_c = {"spatial": spatial_s, "scalars": scalars_s}
+            obs_c = {
+                "spatial": spatial_s,
+                "scalars": scalars_s,
+                "candidate_features": cand_f_s,
+                "candidate_mask": cand_m_s,
+            }
             v, lp, ent = pol.evaluate_actions(obs_c, acts_s, action_masks=mask_s)
         val_parts.append(v)
         lp_parts.append(lp)
@@ -660,7 +709,13 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
         gpu_opponent_pool_enabled,
         gpu_opponent_pool_permits,
     )
-    from rl.ckpt_compat import load_maskable_ppo_compat
+    from rl.candidate_actions import MAX_CANDIDATES
+    from rl.ckpt_compat import (
+        align_maskable_ppo_observation_space_to_awbw_env,
+        load_maskable_ppo_compat,
+        scalpel_checkpoint_zip_to_candidate_maskable_ppo_zip,
+    )
+    from rl.network import ACTION_SPACE_SIZE
 
     mp_ctx = mp.get_context("spawn")
     stop_event = mp_ctx.Event()
@@ -673,8 +728,8 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
     q: mp.Queue = mp_ctx.Queue(maxsize=max(2, int(trainer.async_queue_max)))
 
     policy_kwargs = dict(
-        features_extractor_class=AWBWFeaturesExtractor,
-        features_extractor_kwargs=dict(features_dim=256),
+        features_extractor_class=AWBWCandidateFeaturesExtractor,
+        features_extractor_kwargs=dict(features_dim=512),
         net_arch=[],
     )
 
@@ -778,30 +833,32 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                 flush=True,
             )
 
+    load_common = {"env": None, "device": trainer.device}
+    ckpt_phys: Path | None = None
+    reload_kw: dict[str, Any] | None = None
+
     if resume_path.exists():
-        model = load_maskable_ppo_compat(
-            resume_path,
-            env=None,
-            device=trainer.device,
-            # Async learner never uses SB3 vec rollouts; n_envs=1 keeps DictRolloutBuffer
-            # CPU footprint minimal. (Previously n_envs=n_actors wasted RAM for no benefit.)
-            custom_objects={"n_steps": unroll, "n_envs": 1},
-        )
+        reload_kw = {
+            **load_common,
+            "custom_objects": {"n_steps": unroll, "n_envs": 1},
+        }
+        model = load_maskable_ppo_compat(resume_path, **reload_kw)
         model.tensorboard_log = str(LOGS_DIR)
         skeleton_zip = str(resume_path.resolve())
+        ckpt_phys = resume_path.resolve()
     elif trainer.bc_init is not None and trainer.bc_init.is_file():
-        model = load_maskable_ppo_compat(
-            trainer.bc_init,
-            env=None,
-            device=trainer.device,
-            custom_objects={
+        reload_kw = {
+            **load_common,
+            "custom_objects": {
                 "n_steps": unroll,
                 "n_envs": 1,
                 "batch_size": trainer.batch_size,
             },
-        )
+        }
+        model = load_maskable_ppo_compat(trainer.bc_init, **reload_kw)
         model.tensorboard_log = str(LOGS_DIR)
         skeleton_zip = str(Path(trainer.bc_init).resolve())
+        ckpt_phys = Path(trainer.bc_init).resolve()
     else:
         trainer.live_snapshot_dir.mkdir(parents=True, exist_ok=True)
         fkw0 = dict(env_kw)
@@ -836,9 +893,43 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             tensorboard_log=str(LOGS_DIR),
         )
         dummy_env.close()
-        if not skel_zip.is_file():
-            _atomic_model_save(model, skel_zip.parent / skel_zip.stem)
+        _atomic_model_save(model, skel_zip.parent / skel_zip.stem)
         skeleton_zip = str(skel_zip.resolve())
+        ckpt_phys = None
+        reload_kw = None
+
+    # IMPALA envs emit candidate masks (MAX_CANDIDATES). A legacy flat zip still has
+    # Discrete(ACTION_SPACE_SIZE) logits — scalpel once so actors' skeleton matches masks.
+    if ckpt_phys is not None and reload_kw is not None:
+        n_act = int(model.action_space.n)
+        if n_act != int(MAX_CANDIDATES):
+            if n_act != int(ACTION_SPACE_SIZE):
+                raise RuntimeError(
+                    "Async IMPALA uses candidate actions; expected a checkpoint with "
+                    f"action_space.n={MAX_CANDIDATES} (candidate) or {ACTION_SPACE_SIZE} (legacy flat "
+                    "warm-start). "
+                    f"Got n={n_act} from {ckpt_phys}. Use scripts/scalpel_latest_to_candidate_ppo.py "
+                    "or remove/replace this zip."
+                )
+            dst = (ckpt_dir / "_async_scalpeled_resume.zip").resolve()
+            dev_s = (
+                trainer.device
+                if isinstance(trainer.device, str)
+                else str(trainer.device)
+            )
+            print(
+                f"[async_impala] legacy flat checkpoint (n={n_act}) -> scalpel candidate "
+                f"(n={MAX_CANDIDATES}) -> {dst}",
+                flush=True,
+            )
+            scalpel_checkpoint_zip_to_candidate_maskable_ppo_zip(
+                ckpt_phys, dst, features_dim=512, device=dev_s
+            )
+            model = load_maskable_ppo_compat(dst, **reload_kw)
+            model.tensorboard_log = str(LOGS_DIR)
+            skeleton_zip = str(dst)
+
+    align_maskable_ppo_observation_space_to_awbw_env(model)
 
     pol = model.policy
     # MaskablePPO.load restores policy.optimizer (full Adam state on CUDA). We used to
@@ -999,6 +1090,8 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             b = len(chunks)
             spatial = np.stack([c["spatial"] for c in chunks], axis=1)
             scalars = np.stack([c["scalars"] for c in chunks], axis=1)
+            cand_feat = np.stack([c["candidate_features"] for c in chunks], axis=1)
+            cand_mask = np.stack([c["candidate_mask"] for c in chunks], axis=1)
             mask = np.stack([c["mask"] for c in chunks], axis=1)
             actions = np.stack([c["actions"] for c in chunks], axis=1)
             rewards = np.stack([c["rewards"] for c in chunks], axis=1)
@@ -1007,6 +1100,8 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
 
             spatial_t = torch.as_tensor(spatial, device=device, dtype=torch.float32)
             scalars_t = torch.as_tensor(scalars, device=device, dtype=torch.float32)
+            cand_feat_t = torch.as_tensor(cand_feat, device=device, dtype=torch.float32)
+            cand_mask_t = torch.as_tensor(cand_mask, device=device, dtype=torch.float32)
             mask_t = torch.as_tensor(mask, device=device, dtype=torch.bool)
             actions_t = torch.as_tensor(actions, device=device, dtype=torch.long)
             rewards_t = torch.as_tensor(rewards, device=device, dtype=torch.float32)
@@ -1014,7 +1109,7 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
             mu_logp_t = torch.as_tensor(mu_logp, device=device, dtype=torch.float32)
 
             flat_obs, flat_mask, flat_actions = _flatten_time_batch(
-                spatial_t, scalars_t, mask_t, actions_t
+                spatial_t, scalars_t, cand_feat_t, cand_mask_t, mask_t, actions_t
             )
             discounts = gamma * (1.0 - dones_t)
 
@@ -1049,6 +1144,16 @@ def run_impala_training(trainer: SelfPlayTrainer) -> None:
                         ),
                         "scalars": torch.as_tensor(
                             c["bootstrap_scalars"][None, ...],
+                            device=device,
+                            dtype=torch.float32,
+                        ),
+                        "candidate_features": torch.as_tensor(
+                            c["bootstrap_candidate_features"][None, ...],
+                            device=device,
+                            dtype=torch.float32,
+                        ),
+                        "candidate_mask": torch.as_tensor(
+                            c["bootstrap_candidate_mask"][None, ...],
                             device=device,
                             dtype=torch.float32,
                         ),

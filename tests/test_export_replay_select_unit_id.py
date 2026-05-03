@@ -135,9 +135,13 @@ def test_emit_wait_move_json_uses_oracle_pinned_unit_on_stack() -> None:
     assert payload["unit"]["global"]["units_id"] == int(striker.unit_id)
 
 
-def test_emit_missiles_attack_fire_envelope_uses_missiles_name_and_defender_lookup() -> None:
-    """Missiles (AA indirect) Fire JSON must use AWBW ``Missiles`` name and a valid
-    defender block — regressions here crash the desktop replay viewer mid-game.
+def test_emit_missiles_attack_fire_envelope_uses_viewer_missile_name_and_defender_lookup() -> (
+    None
+):
+    """AA Missiles Fire JSON must use C# viewer ``Missile`` (not PHP ``Missiles``).
+
+    The Replay Player indexes ``Units.json`` by site/viewer spelling; ``Missiles``
+    raises ``KeyNotFoundException`` in ``EndTurnAction.SetupAndUpdate``.
     """
     state = _make_state(width=15, height=15)
     aa = _spawn(state, UnitType.MISSILES, 0, (5, 5), unit_id=500)
@@ -159,8 +163,8 @@ def test_emit_missiles_attack_fire_envelope_uses_missiles_name_and_defender_look
     assert payload is not None
     assert payload["action"] == "Fire"
     g = payload["Move"]["unit"]["global"]
-    assert g["units_name"] == "Missiles"
-    assert g["units_symbol"] == "Missiles"
+    assert g["units_name"] == "Missile"
+    assert g["units_symbol"] == "Missile"
     def_hp = payload["Fire"]["combatInfoVision"]["global"]["combatInfo"]["defender"][
         "units_hit_points"
     ]

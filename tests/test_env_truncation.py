@@ -1,4 +1,4 @@
-"""Forced episode truncation (max_env_steps) and game_log rows (schema 1.17)."""
+"""Forced episode truncation (max_env_steps) and game_log rows (schema 1.18)."""
 from __future__ import annotations
 
 import json
@@ -67,7 +67,7 @@ def test_max_env_steps_truncates_and_logs(
     assert row["truncated"] is True
     assert row["truncation_reason"] == "max_env_steps"
     assert row["terminated"] is False
-    assert row["log_schema_version"] == "1.17"
+    assert row["log_schema_version"] == "1.18"
     assert "alive_unit_count" in row and "army_value" in row
     assert len(row["alive_unit_count"]) == 2
     assert len(row["army_value"]) == 2

@@ -2,9 +2,12 @@
 Gymnasium environment for AWBW self-play.
 
 The environment wraps the AWBW game engine and exposes:
-  - observation_space: Dict {'spatial': Box, 'scalars': Box}
-  - action_space: Discrete(ACTION_SPACE_SIZE)
-  - action_masks(): bool array for MaskablePPO compatibility
+  - observation_space: Dict with ``spatial``, ``scalars``, ``candidate_features``, ``candidate_mask``
+    (padded candidate table; action index is the row).
+  - action_space: Discrete(MAX_CANDIDATES). Legacy 35k flat indices remain for opening-book /
+    opponent helpers via internal flat masks only. Joint opening books bypass AWBW_CAPTURE_MOVE_GATE
+    on the learner clock and force a single candidate row so greedy mix cannot override the line.
+  - action_masks(): bool array over candidate rows (MaskablePPO)
 
 By default the trained agent controls engine seat 0; the other seat is stepped
 automatically (checkpoint opponent or random). With ``AWBW_SEAT_BALANCE=1`` the
@@ -23,6 +26,7 @@ from rl import _win_triton_warnings
 _win_triton_warnings.apply()
 
 import collections
+import contextlib
 import math
 import copy
 import json
@@ -53,6 +57,12 @@ from engine.belief import BeliefState
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.network import ACTION_SPACE_SIZE
+from rl.candidate_actions import (
+    MAX_CANDIDATES,
+    CANDIDATE_FEATURE_DIM,
+    CandidateAction,
+    candidate_arrays,
+)
 from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
 from rl.log_timestamp import log_now_iso, log_timestamp_iso
 from rl.heuristic_termination import (
@@ -63,6 +73,21 @@ from rl.heuristic_termination import (
     DEFAULT_DISAGREEMENT_LOG,
 )
 from server.write_watch_state import board_dict
+
+@contextlib.contextmanager
+def _without_capture_move_gate() -> Any:
+    """Disable AWBW_CAPTURE_MOVE_GATE for the block (opening-book legals vs RL gate)."""
+    key = "AWBW_CAPTURE_MOVE_GATE"
+    prev = os.environ.get(key)
+    try:
+        os.environ.pop(key, None)
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
+
 
 ROOT = Path(__file__).parent.parent
 POOL_PATH = ROOT / "data" / "gl_map_pool.json"
@@ -180,6 +205,7 @@ MACHINE_ID_ENV = "AWBW_MACHINE_ID"
 # pickling never aliases buffers that are reused on the next step (helps Windows
 # pipe / multiprocessing stability when ``n_envs`` is high). Set ``0`` to opt out.
 VECENV_OBS_COPY_ENV = "AWBW_VECENV_OBS_COPY"
+# Experimental candidate-action policy interface: fixed padded legal-intent table.
 
 
 def effective_track_per_worker_times() -> bool:
@@ -957,28 +983,43 @@ class AWBWEnv(gym.Env):
 
         self._map_cache: dict[int, MapData] = {}
 
-        # Gymnasium spaces
-        self.observation_space = spaces.Dict(
-            {
-                "spatial": spaces.Box(
-                    low=-10.0,
-                    high=10.0,
-                    shape=(GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS),
-                    dtype=np.float32,
-                ),
-                "scalars": spaces.Box(
-                    low=-1.0,
-                    high=10.0,
-                    shape=(N_SCALARS,),
-                    dtype=np.float32,
-                ),
-            }
-        )
-        self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
+        # Gymnasium spaces. Candidate-action mode is the live action contract:
+        # action index == padded candidate row. Legacy 35k flat remains for helpers.
+        self._candidate_actions_enabled = True
+        obs_spaces: dict[str, Any] = {
+            "spatial": spaces.Box(
+                low=-10.0,
+                high=10.0,
+                shape=(GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS),
+                dtype=np.float32,
+            ),
+            "scalars": spaces.Box(
+                low=-1.0,
+                high=10.0,
+                shape=(N_SCALARS,),
+                dtype=np.float32,
+            ),
+            "candidate_features": spaces.Box(
+                low=-10.0,
+                high=10.0,
+                shape=(MAX_CANDIDATES, CANDIDATE_FEATURE_DIM),
+                dtype=np.float32,
+            ),
+            "candidate_mask": spaces.Box(
+                low=0,
+                high=1,
+                shape=(MAX_CANDIDATES,),
+                dtype=np.int8,
+            ),
+        }
+        self.observation_space = spaces.Dict(obs_spaces)
+        self.action_space = spaces.Discrete(MAX_CANDIDATES)
 
         # Phase 1b (FPS campaign): reuse numpy buffers for mask + obs to cut allocator churn.
         # Golden tests: tests/test_env_buffer_reuse_golden.py, tests/test_phase1b_golden_buffers.py
-        self._action_mask_buf = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
+        self._action_mask_buf = np.zeros(self.action_space.n, dtype=bool)
+        # Legacy flat-action scratch buffer (opening books / flat helpers).
+        self._flat_action_mask_buf = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
         self._spatial_obs_buf = np.zeros(
             (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32
         )
@@ -1262,6 +1303,67 @@ class AWBWEnv(gym.Env):
     def _invalidate_legal_cache(self) -> None:
         self._legal_cache = None
 
+    def _peek_learner_book_flat_safe_ungated(self) -> int | None:
+        """Next booked flat index if legal under MOVE gate *off* (captures gate/book clash)."""
+        mgr = getattr(self, "_opening_book_manager", None)
+        if (
+            mgr is None
+            or self.state is None
+            or int(self.state.active_player) != int(self._learner_seat)
+        ):
+            return None
+        _mout = self._flat_action_mask_buf if self._use_preallocated_buffers else None
+        with _without_capture_move_gate():
+            legal = get_legal_actions(self.state)
+            m = _get_action_mask(self.state, out=_mout, legal=legal)
+        return mgr.peek_book_candidate_flat_safe(
+            seat=int(self._learner_seat),
+            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
+            action_mask=m,
+        )
+
+    def _build_candidate_policy_tensors(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, list]:
+        """Padded candidate features/mask/list; joint opening book bypasses capture MOVE gate."""
+        if self.state is None:
+            zf = np.zeros((MAX_CANDIDATES, CANDIDATE_FEATURE_DIM), dtype=np.float32)
+            zm = np.zeros((MAX_CANDIDATES,), dtype=bool)
+            return zf, zm, []
+        use_ungated = (
+            int(self.state.active_player) == int(self._learner_seat)
+            and self._opening_book_force_mask_for_learner
+        )
+        expected_flat: int | None = None
+        if use_ungated:
+            expected_flat = self._peek_learner_book_flat_safe_ungated()
+        if use_ungated and expected_flat is not None:
+            with _without_capture_move_gate():
+                feats, mask, cands = candidate_arrays(self.state, max_candidates=MAX_CANDIDATES)
+        else:
+            feats, mask, cands = candidate_arrays(self.state, max_candidates=MAX_CANDIDATES)
+        if use_ungated and expected_flat is not None:
+            hit = -1
+            exp = int(expected_flat)
+            for i in range(min(len(cands), MAX_CANDIDATES)):
+                if not mask[i]:
+                    continue
+                if _action_to_flat(cands[i].terminal_action, self.state) == exp:
+                    hit = i
+                    break
+            if hit >= 0:
+                nmask = np.zeros_like(mask)
+                nmask[hit] = True
+                mask = nmask
+            else:
+                # Book line expected a flat that did not appear in ungated enumeration
+                # (truncation, _action_to_flat drift, etc.). Full ungated mask vs gated
+                # step gate caused IllegalActionError; fall back to gated candidates.
+                feats, mask, cands = candidate_arrays(
+                    self.state, max_candidates=MAX_CANDIDATES
+                )
+        return feats, mask, cands
+
     # ── Map helpers ───────────────────────────────────────────────────────────
 
     def _load_map(self, map_id: int) -> MapData:
@@ -1387,6 +1489,7 @@ class AWBWEnv(gym.Env):
         self._spatial_obs_buf.fill(0.0)
         self._scalars_obs_buf.fill(0.0)
         self._action_mask_buf.fill(False)
+        self._flat_action_mask_buf.fill(False)
 
         from rl.live_snapshot import load_live_snapshot_dict  # local: optional dep in workers
 
@@ -1641,6 +1744,21 @@ class AWBWEnv(gym.Env):
 
         return self._get_obs(observer=self._learner_seat), dict(self._episode_info)
 
+    def _decode_candidate_action(
+        self, action_idx: int
+    ) -> CandidateAction | None:
+        """Map padded candidate-mode row index to a :class:`CandidateAction`."""
+        if self.state is None:
+            return None
+        feats, mask, cands = self._build_candidate_policy_tensors()
+        self._candidate_features_cache = feats
+        self._candidate_mask_cache = mask
+        self._candidate_list_cache = cands
+        i = int(action_idx)
+        if i < 0 or i >= MAX_CANDIDATES or not bool(mask[i]):
+            return None
+        return cands[i]
+
     def step(
         self, action_idx: int
     ) -> tuple[dict, float, bool, bool, dict]:
@@ -1676,45 +1794,29 @@ class AWBWEnv(gym.Env):
         # commit logic vs execution mismatch), drifting state until the book
         # line hits ``action_not_legal`` mid-opening (often before the intended
         # calendar horizon).
-        skip_capture_teacher = False
-        mgr_ob = getattr(self, "_opening_book_manager", None)
-        if (
-            mgr_ob is not None
-            and self.state is not None
-            and int(self.state.active_player) == int(self._learner_seat)
-            and float(self._learner_greedy_mix) > 0.0
-        ):
-            _mout_g = self._action_mask_buf if self._use_preallocated_buffers else None
-            _msk_g = _get_action_mask(self.state, out=_mout_g, legal=self._get_legal())
-            if (
-                mgr_ob.peek_book_candidate_flat_safe(
-                    seat=int(self._learner_seat),
-                    calendar_turn=int(getattr(self.state, "turn", 0) or 0),
-                    action_mask=_msk_g,
-                )
-                is not None
-            ):
-                skip_capture_teacher = True
+        skip_capture_teacher = self._peek_learner_book_flat_safe_ungated() is not None
 
         if (
             not skip_capture_teacher
             and self._learner_greedy_mix > 0.0
             and random.random() < self._learner_greedy_mix
         ):
-            from rl.self_play import pick_capture_greedy_flat
-            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
-            mask = _get_action_mask(self.state, out=_mout, legal=self._get_legal())
-            action_idx = pick_capture_greedy_flat(self.state, mask)
+            from rl.self_play import pick_capture_greedy_candidate_idx
+
+            _m = self.action_masks()
+            cands = getattr(self, "_candidate_list_cache", None) or []
+            action_idx = pick_capture_greedy_candidate_idx(self.state, _m, cands)
             self._learner_teacher_overrides += 1
 
         # Env-level opening book for the learner must be PPO-consistent: the
         # action mask is forced to the book action in action_masks(), so here
         # we advance the cursor based on the **executed** flat index after any
         # capture-greedy override above (skipped while a book line is active).
-        self._maybe_commit_learner_opening_book_action(int(action_idx))
+        # Opening-book flat-action commits use the terminal engine action's flat id.
 
         # ── Decode & apply learner action (must be learner's clock) ───────────
-        action = _flat_to_action(action_idx, self.state, legal=self._get_legal())
+        candidate = self._decode_candidate_action(int(action_idx))
+        action = candidate.terminal_action if candidate is not None else None
         if action is None:
             self._invalid_action_count += 1
             obs = self._get_obs(observer=self._learner_seat)
@@ -1731,11 +1833,14 @@ class AWBWEnv(gym.Env):
                 ),
                 "property_pressure": self._property_pressure_snapshot(),
             }
-            # Phase 0a.2: invalid-action early return is still P0 work; account it.
             self._wall_p0_s += time.perf_counter() - _t_step_start
             if _track_step_wall:
                 self._step_times.append(time.perf_counter() - _t_wall_track)
             return obs, float(reward), False, False, info
+
+        self._maybe_commit_learner_opening_book_action(
+            _action_to_flat(action, self.state)
+        )
 
         # Φ-shaping snapshot (plan rl_capture-combat_recalibration). Bracketed
         # around P0 action AND opponent micro-steps so a chip → opponent kills
@@ -1763,31 +1868,49 @@ class AWBWEnv(gym.Env):
             phi_prop_pre_cells = None
 
         acting = int(self.state.active_player)
-        phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag, _phi_as_mag = (
-            self._phi_power_activation_and_attack_bonus(
-                action, acting, self.state, learner_frame=True
-            )
+        assert candidate is not None
+        reward = 0.0
+        sparse_total = 0.0
+        done = False
+        rc = {"learner_engine_signed_sparse_capture": 0.0}
+        # Opening-book candidate lists are built with capture MOVE gate off; engine
+        # step uses the same legality so masks and STEP-GATE agree.
+        _step_capture_ctx: Any = (
+            _without_capture_move_gate()
+            if skip_capture_teacher
+            else contextlib.nullcontext()
         )
-        self.state, reward, done = self._engine_step_with_belief(action)
-        reward = self._signed_engine_reward(reward, acting)
-        rc: dict[str, float] = {
-            "learner_engine_signed_sparse_capture": float(reward),
-        }
-        if phi_power_b != 0.0:
-            reward += phi_power_b
-            rc.update(phi_power_rc)
-            # Credit powers to the **activating engine seat** (unsigned magnitude).
-            if hasattr(self, "_episode_reward_power_cumulative"):
-                self._episode_reward_power_activation_cumulative[acting] += float(
-                    _phi_pa_mag
+        with _step_capture_ctx:
+            for sub in (candidate.first, candidate.second):
+                if sub is None:
+                    continue
+                phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag, _phi_as_mag = (
+                    self._phi_power_activation_and_attack_bonus(
+                        sub, acting, self.state, learner_frame=True
+                    )
                 )
-                self._episode_reward_attack_stats_cumulative[acting] += float(
-                    _phi_as_mag
-                )
-                self._episode_reward_power_cumulative[acting] += float(
-                    _phi_pa_mag + _phi_as_mag
-                )
-        self._phi_after_step_record_power_activations(action, acting)
+                self.state, r_engine, done = self._engine_step_with_belief(sub)
+                r_signed = self._signed_engine_reward(r_engine, acting)
+                sparse_total += r_signed
+                reward += r_signed
+                if phi_power_b != 0.0:
+                    reward += phi_power_b
+                    rc.update(phi_power_rc)
+                    if hasattr(self, "_episode_reward_power_cumulative"):
+                        self._episode_reward_power_activation_cumulative[
+                            acting
+                        ] += float(_phi_pa_mag)
+                        self._episode_reward_attack_stats_cumulative[acting] += float(
+                            _phi_as_mag
+                        )
+                        self._episode_reward_power_cumulative[acting] += float(
+                            _phi_pa_mag + _phi_as_mag
+                        )
+                self._phi_after_step_record_power_activations(sub, acting)
+                if done:
+                    break
+        rc["learner_engine_signed_sparse_capture"] = float(sparse_total)
+        action = candidate.terminal_action
         if self.state is not None and self.state.done:
             rb = reward
             reward = self._apply_phi_sparse_terminal_replacement(reward, acting)
@@ -1811,9 +1934,8 @@ class AWBWEnv(gym.Env):
                 self._episode_reward_kill_bonus_cumulative[learner] += kb
         self._capture_frame(action=action)
 
-        if (
+        if self._first_learner_capture_step is None and (
             action.action_type == ActionType.CAPTURE
-            and self._first_learner_capture_step is None
         ):
             self._first_learner_capture_step = self._p0_env_steps
 
@@ -2253,14 +2375,16 @@ class AWBWEnv(gym.Env):
             if self._use_preallocated_buffers:
                 self._action_mask_buf.fill(False)
                 return self._action_mask_buf
-            return np.zeros(ACTION_SPACE_SIZE, dtype=bool)
-        legal = self._get_legal()
-        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
-        mask = _get_action_mask(self.state, out=_mout, legal=legal)
-        flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
-        if flag in ("1", "true", "yes", "on"):
-            _strip_non_infantry_builds(mask, self.state, legal=legal)
-        mask = self._maybe_force_learner_opening_book_mask(mask)
+            return np.zeros(self.action_space.n, dtype=bool)
+
+        feats, mask, cands = self._build_candidate_policy_tensors()
+        self._candidate_features_cache = feats
+        self._candidate_mask_cache = mask
+        self._candidate_list_cache = cands
+        if self._use_preallocated_buffers:
+            self._action_mask_buf.fill(False)
+            self._action_mask_buf[: mask.shape[0]] = mask
+            return self._action_mask_buf
         return mask
 
     def active_seat_observation(self) -> dict:
@@ -2280,25 +2404,18 @@ class AWBWEnv(gym.Env):
             if self._use_preallocated_buffers:
                 self._action_mask_buf.fill(False)
                 return self._action_mask_buf
-            return np.zeros(ACTION_SPACE_SIZE, dtype=bool)
-        legal = self._get_legal()
-        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
-        mask = _get_action_mask(self.state, out=_mout, legal=legal)
-        flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
-        if flag in ("1", "true", "yes", "on"):
-            _strip_non_infantry_builds(mask, self.state, legal=legal)
-        mgr = getattr(self, "_opening_book_manager", None)
-        if mgr is not None and self.state is not None:
-            a = mgr.peek_flat(
-                seat=int(self.state.active_player),
-                calendar_turn=int(getattr(self.state, "turn", 0) or 0),
-                action_mask=mask,
-            )
-            self._sync_opening_book_log()
-            if a is not None:
-                forced = np.zeros_like(mask, dtype=bool)
-                forced[int(a)] = True
-                return forced
+            return np.zeros(MAX_CANDIDATES, dtype=bool)
+        if int(self.state.active_player) == int(self._learner_seat):
+            feats, mask, cands = self._build_candidate_policy_tensors()
+        else:
+            feats, mask, cands = candidate_arrays(self.state, max_candidates=MAX_CANDIDATES)
+        self._candidate_features_cache = feats
+        self._candidate_mask_cache = mask
+        self._candidate_list_cache = cands
+        if self._use_preallocated_buffers:
+            self._action_mask_buf.fill(False)
+            self._action_mask_buf[: mask.shape[0]] = mask
+            return self._action_mask_buf
         return mask
 
     def step_active_seat_once(
@@ -2317,20 +2434,8 @@ class AWBWEnv(gym.Env):
         self._p0_env_steps += 1
         acting = int(self.state.active_player)
         other = 1 - acting
-        legal = self._get_legal()
-        mgr = getattr(self, "_opening_book_manager", None)
-        if mgr is not None:
-            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
-            book_mask = _get_action_mask(self.state, out=_mout, legal=legal)
-            expected = mgr.peek_flat(
-                seat=acting,
-                calendar_turn=int(getattr(self.state, "turn", 0) or 0),
-                action_mask=book_mask,
-            )
-            if expected is not None:
-                mgr.commit_flat(seat=acting, action_idx=int(action_idx))
-                self._sync_opening_book_log()
-        action = _flat_to_action(int(action_idx), self.state, legal=legal)
+        candidate = self._decode_candidate_action(int(action_idx))
+        action = candidate.terminal_action if candidate is not None else None
         if action is None:
             obs = self._get_obs(observer=acting)
             return obs, -0.1, False, False, {
@@ -2370,32 +2475,49 @@ class AWBWEnv(gym.Env):
             else None
         )
 
-        phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag_dg, _phi_as_mag_dg = (
-            self._phi_power_activation_and_attack_bonus(
-                action, acting, self.state, learner_frame=False
-            )
-        )
-        self.state, reward, _done = self._engine_step_with_belief(action)
-        # ``GameState.step`` reports engine reward in acting-player coordinates.
-        reward = float(reward)
-        rc: dict[str, float] = {
-            # Includes engine sparse + dense capture shaping (until env strips it).
-            "acting_engine_sparse_plus_capture_shaping": float(reward),
+        assert candidate is not None
+        reward = 0.0
+        done_chain = False
+        rc_actor: dict[str, float] = {
+            "acting_engine_sparse_plus_capture_shaping": 0.0,
         }
-        if phi_power_b != 0.0:
-            reward += phi_power_b
-            rc.update(phi_power_rc)
-            if hasattr(self, "_episode_reward_power_cumulative"):
-                self._episode_reward_power_activation_cumulative[acting] += float(
-                    _phi_pa_mag_dg
+        book_steers_capture = self._peek_learner_book_flat_safe_ungated() is not None
+        _dg_step_capture_ctx: Any = (
+            _without_capture_move_gate()
+            if book_steers_capture
+            else contextlib.nullcontext()
+        )
+        with _dg_step_capture_ctx:
+            for sub in (candidate.first, candidate.second):
+                if sub is None:
+                    continue
+                phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag_dg, _phi_as_mag_dg = (
+                    self._phi_power_activation_and_attack_bonus(
+                        sub, acting, self.state, learner_frame=False
+                    )
                 )
-                self._episode_reward_attack_stats_cumulative[acting] += float(
-                    _phi_as_mag_dg
-                )
-                self._episode_reward_power_cumulative[acting] += float(
-                    _phi_pa_mag_dg + _phi_as_mag_dg
-                )
-        self._phi_after_step_record_power_activations(action, acting)
+                self.state, r_engine, done_chain = self._engine_step_with_belief(sub)
+                r_signed = float(r_engine)
+                rc_actor["acting_engine_sparse_plus_capture_shaping"] += r_signed
+                reward += r_signed
+                if phi_power_b != 0.0:
+                    reward += phi_power_b
+                    rc_actor.update(phi_power_rc)
+                    if hasattr(self, "_episode_reward_power_cumulative"):
+                        self._episode_reward_power_activation_cumulative[acting] += float(
+                            _phi_pa_mag_dg
+                        )
+                        self._episode_reward_attack_stats_cumulative[acting] += float(
+                            _phi_as_mag_dg
+                        )
+                        self._episode_reward_power_cumulative[acting] += float(
+                            _phi_pa_mag_dg + _phi_as_mag_dg
+                        )
+                self._phi_after_step_record_power_activations(sub, acting)
+                if done_chain:
+                    break
+        action = candidate.terminal_action
+        rc = rc_actor
         if self.state is not None and self.state.done:
             rb = reward
             reward = self._apply_phi_sparse_terminal_replacement_for_seat(
@@ -2600,26 +2722,8 @@ class AWBWEnv(gym.Env):
             self._opening_book_log.update(mgr.log_fields())
 
     def _maybe_force_learner_opening_book_mask(self, mask: np.ndarray) -> np.ndarray:
-        if (
-            not self._opening_book_force_mask_for_learner
-            or self.state is None
-            or int(self.state.active_player) != int(self._learner_seat)
-        ):
-            return mask
-        mgr = getattr(self, "_opening_book_manager", None)
-        if mgr is None:
-            return mask
-        a = mgr.peek_flat(
-            seat=int(self._learner_seat),
-            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
-            action_mask=mask,
-        )
-        self._sync_opening_book_log()
-        if a is None:
-            return mask
-        forced = np.zeros_like(mask, dtype=bool)
-        forced[int(a)] = True
-        return forced
+        """Flat-mask forcing is obsolete; learner books use :meth:`_build_candidate_policy_tensors`."""
+        return mask
 
     def _maybe_commit_learner_opening_book_action(self, action_idx: int) -> None:
         if (
@@ -2635,7 +2739,7 @@ class AWBWEnv(gym.Env):
         # mask was not forced or the model did not return the forced action,
         # commit_flat marks the selected book line desynced instead of silently
         # replacing the learner action.
-        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+        _mout = self._flat_action_mask_buf if self._use_preallocated_buffers else None
         mask = _get_action_mask(self.state, out=_mout, legal=self._get_legal())
         expected = mgr.peek_flat(
             seat=int(self._learner_seat),
@@ -3341,15 +3445,35 @@ class AWBWEnv(gym.Env):
         self._track_memory_allocation(spatial_buf.nbytes + scalars_buf.nbytes)
 
         raw_copy = (os.environ.get(VECENV_OBS_COPY_ENV) or "1").strip().lower()
-        if raw_copy not in ("0", "false", "no", "off"):
-            return {
-                "spatial": np.array(spatial_buf, copy=True, order="C"),
-                "scalars": np.array(scalars_buf, copy=True, order="C"),
-            }
-        return {
-            "spatial": spatial_buf,
-            "scalars": scalars_buf,
+        copy_obs = raw_copy not in ("0", "false", "no", "off")
+        obs: dict[str, Any] = {
+            "spatial": np.array(spatial_buf, copy=True, order="C") if copy_obs else spatial_buf,
+            "scalars": np.array(scalars_buf, copy=True, order="C") if copy_obs else scalars_buf,
         }
+        if self.state is None:
+            cand_features = np.zeros((MAX_CANDIDATES, CANDIDATE_FEATURE_DIM), dtype=np.float32)
+            cand_mask = np.zeros((MAX_CANDIDATES,), dtype=np.int8)
+            cands = []
+        else:
+            obs_learner = int(observer) == int(self._learner_seat)
+            active_learner = int(self.state.active_player) == int(self._learner_seat)
+            if obs_learner and active_learner:
+                cand_features, cand_mask_bool, cands = self._build_candidate_policy_tensors()
+            else:
+                cand_features, cand_mask_bool, cands = candidate_arrays(
+                    self.state, max_candidates=MAX_CANDIDATES
+                )
+            cand_mask = cand_mask_bool.astype(np.int8, copy=False)
+        self._candidate_features_cache = cand_features
+        self._candidate_mask_cache = cand_mask.astype(bool, copy=False)
+        self._candidate_list_cache = cands
+        obs["candidate_features"] = (
+            np.array(cand_features, copy=True, order="C") if copy_obs else cand_features
+        )
+        obs["candidate_mask"] = (
+            np.array(cand_mask, copy=True, order="C") if copy_obs else cand_mask
+        )
+        return obs
 
     # -- Belief bookkeeping ----------------------------------------------------
     def _belief_early_exit_enabled(self) -> bool:
@@ -3699,7 +3823,7 @@ class AWBWEnv(gym.Env):
             legal = self._get_legal()
             if not legal:
                 break
-            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+            _mout = self._flat_action_mask_buf if self._use_preallocated_buffers else None
             mask = _get_action_mask(self.state, out=_mout, legal=legal)
             book_idx = self._suggest_opening_book_for_active(mask)
             if book_idx is not None:
@@ -3707,7 +3831,9 @@ class AWBWEnv(gym.Env):
             else:
                 idxs = np.flatnonzero(mask)
                 opp_idx = (
-                    int(idxs[np.random.randint(0, len(idxs))]) if idxs.size else -1
+                    int(idxs[int(self.np_random.integers(0, len(idxs)))])
+                    if idxs.size
+                    else -1
                 )
             action = _flat_to_action(opp_idx, self.state, legal=legal)
             if action is None:
@@ -3757,7 +3883,7 @@ class AWBWEnv(gym.Env):
             needs_obs = True if needs_obs_fn is None else bool(needs_obs_fn())
             obs = self._get_obs(observer=enemy) if needs_obs else None
             legal = self._get_legal()
-            _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+            _mout = self._flat_action_mask_buf if self._use_preallocated_buffers else None
             mask = _get_action_mask(self.state, out=_mout, legal=legal)
             book_idx = self._suggest_opening_book_for_active(mask)
             if book_idx is not None:

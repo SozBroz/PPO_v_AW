@@ -156,6 +156,34 @@ def test_awbw_php_surface_matches_export_table() -> None:
         assert _AWBW_UNIT_NAMES[ut] == from_unit_type(ut, UnitNameSurface.AWBW_PHP), ut
 
 
+def test_awbw_viewer_surface_matches_export_actions_table() -> None:
+    """Action-stream JSON uses AWBW_VIEWER spellings (desktop Replay Player)."""
+    from tools.export_awbw_replay import _AWBW_VIEWER_UNIT_NAMES
+
+    for ut in UnitType:
+        assert _AWBW_VIEWER_UNIT_NAMES[ut] == from_unit_type(
+            ut, UnitNameSurface.AWBW_VIEWER
+        ), ut
+
+
+def test_zip_snapshot_awbwunit_name_matches_units_json_keys() -> None:
+    """PHP snapshot ``name``/``symbol`` must match C# ``Units.json`` (not AWBW_PHP).
+
+    ``EndTurnAction`` calls ``GetUnitDataForUnitName`` on every unit loaded from
+    snapshots; PHP-only spellings like ``Rockets`` / ``Missiles`` throw.
+    """
+    from tools.export_awbw_replay import _serialize_unit
+
+    rock = _serialize_unit(
+        1, 100001, UnitType.ROCKET, 0, 0, 100, 6, 50, False, False, 1
+    )
+    assert 's:6:"Rocket"' in rock
+    miss = _serialize_unit(
+        2, 100001, UnitType.MISSILES, 0, 0, 100, 6, 50, False, False, 1
+    )
+    assert 's:7:"Missile"' in miss
+
+
 def test_normalize_alias_key_idempotent() -> None:
     for s in ("Md.Tank", "Md. Tank", "Mega Tank", "B-Copter", "Anti Air"):
         n = normalize_alias_key(s)
