@@ -573,9 +573,15 @@ _AIR_UNITS: list[UnitType] = [
     UnitType.FIGHTER, UnitType.BOMBER, UnitType.STEALTH,
     UnitType.B_COPTER, UnitType.T_COPTER, UnitType.BLACK_BOMB,
 ]
+# AWBW ports: exactly six naval builds (no Gunboat — Days of Ruin unit; absent from
+# AWBW + upstream C# ``Units.json``).
 _NAVAL_UNITS: list[UnitType] = [
-    UnitType.BATTLESHIP, UnitType.CARRIER, UnitType.SUBMARINE,
-    UnitType.CRUISER, UnitType.LANDER, UnitType.GUNBOAT, UnitType.BLACK_BOAT,
+    UnitType.BATTLESHIP,
+    UnitType.CARRIER,
+    UnitType.SUBMARINE,
+    UnitType.CRUISER,
+    UnitType.LANDER,
+    UnitType.BLACK_BOAT,
 ]
 
 _BAN_MAP: dict[str, UnitType] = {

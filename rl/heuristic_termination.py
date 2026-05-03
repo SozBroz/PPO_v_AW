@@ -251,28 +251,39 @@ def _append_jsonl(path: Path, rec: dict[str, Any]) -> None:
 
 
 def _predict_p_win_both(
-    state: GameState, model, encode_fn, *, cfg: SpiritConfig
+    state: GameState,
+    model,
+    encode_fn,
+    *,
+    cfg: SpiritConfig,
+    observer1_model=None,
 ) -> tuple[float, float, float, float]:
-    """Returns p0, p1, v0, v1 raw from critic after sigmoid map."""
+    """Returns p0, p1, v0, v1 raw from critic after sigmoid map.
+
+    When *observer1_model* is set, seat-1 observations use its policy value head;
+    otherwise the same *model* evaluates both ego-centric views (legacy).
+    """
     import torch
 
     obs0 = encode_fn(state, 0)
     obs1 = encode_fn(state, 1)
-    pol = model.policy
-    device = model.device
-    b0, _ = pol.obs_to_tensor(obs0)
-    b1, _ = pol.obs_to_tensor(obs1)
+    pol0 = model.policy
+    pol1 = pol0 if observer1_model is None else observer1_model.policy
+    device0 = model.device
+    device1 = device0 if observer1_model is None else observer1_model.device
+    b0, _ = pol0.obs_to_tensor(obs0)
+    b1, _ = pol1.obs_to_tensor(obs1)
     if isinstance(b0, dict):
-        b0 = {k: v.to(device) for k, v in b0.items()}
+        b0 = {k: v.to(device0) for k, v in b0.items()}
     else:
-        b0 = b0.to(device)
+        b0 = b0.to(device0)
     if isinstance(b1, dict):
-        b1 = {k: v.to(device) for k, v in b1.items()}
+        b1 = {k: v.to(device1) for k, v in b1.items()}
     else:
-        b1 = b1.to(device)
+        b1 = b1.to(device1)
     with torch.no_grad():
-        v_0 = pol.predict_values(b0)
-        v_1 = pol.predict_values(b1)
+        v_0 = pol0.predict_values(b0)
+        v_1 = pol1.predict_values(b1)
     r0 = float(v_0.reshape(-1)[0].detach().cpu().numpy())
     r1 = float(v_1.reshape(-1)[0].detach().cpu().numpy())
     t = float(cfg.p_win_temperature)
@@ -379,6 +390,7 @@ def run_calendar_day(
     learner_seat: int,
     log_path: Path = DEFAULT_DISAGREEMENT_LOG,
     diag_line_budget: int = 0,
+    observer1_model: Any | None = None,
 ) -> tuple[Optional[str], int]:
     """
     Value-head diagnostic only (``AWBW_HEURISTIC_VALUE_DIAG``). Spirit **termination**
@@ -397,7 +409,13 @@ def run_calendar_day(
     r0 = r1 = 0.0
     if model is not None:
         try:
-            p0, p1, r0, r1 = _predict_p_win_both(state, model, encode_fn, cfg=cfg)
+            p0, p1, r0, r1 = _predict_p_win_both(
+                state,
+                model,
+                encode_fn,
+                cfg=cfg,
+                observer1_model=observer1_model,
+            )
         except Exception:
             p0, p1, r0, r1 = 0.0, 0.0, 0.0, 0.0
         n_written = maybe_log_disagreements(

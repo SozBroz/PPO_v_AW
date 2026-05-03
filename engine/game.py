@@ -38,6 +38,13 @@ SEAM_MAX_HP: int = 99
 MAX_TURNS = 100   # after this, winner = player with more properties; tie if equal
 
 
+def _rounded_div_half_up(n: int, d: int) -> int:
+    """ nonnegative n,d>0: round n/d to nearest int, half-up."""
+    if d <= 0:
+        raise ValueError("d must be positive")
+    return (n + d // 2) // d
+
+
 # AWBW Wiki: https://awbw.fandom.com/wiki/Machine_Gun
 # Units listed below carry both a primary weapon (cannon / bazooka / missile)
 # and a secondary Machine Gun. The MG is unlimited (no ammo cost) and is
@@ -731,7 +738,10 @@ class GameState:
         else:
             co.scop_active = True
             co.cop_active  = False
-        co.power_bar = 0
+        # Consume only the COP/SCOP segment; remainder stays on the bar (AWBW).
+        # Threshold is fixed from pre-increment power_uses (see COState._cop_threshold).
+        thresh = co._cop_threshold if cop else co._scop_threshold
+        co.power_bar = max(0, co.power_bar - thresh)
         co.power_uses += 1  # raises COP/SCOP threshold by +1800/star next time
 
         self._apply_power_effects(self.active_player, cop)
@@ -1268,6 +1278,7 @@ class GameState:
         # Primary attack
         # Phase 11J-SASHA-WARBONDS-SHIP: capture defender display HP BEFORE
         # damage so we can compute display-HP loss for the War Bonds payout.
+        # CO meter likewise uses defender display buckets before/after hp change.
         pre_def_disp = defender.display_hp
         if override_dmg is not None:
             dmg = max(0, int(override_dmg))
@@ -1283,7 +1294,8 @@ class GameState:
             self.losses_hp[defender.player] += dmg  # Track HP lost
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
-            self._charge_power(attacker.player, defender.player, dmg)
+            db_lost = max(0, pre_def_disp - defender.display_hp)
+            self._apply_co_meter_from_display_buckets_lost(attacker, defender, db_lost)
             self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
         else:
             dmg = 0
@@ -1325,7 +1337,8 @@ class GameState:
                 self.losses_hp[attacker.player] += counter  # Track counterattack HP lost
                 if attacker.hp == 0:
                     self.losses_units[attacker.player] += 1  # Track unit destroyed
-                self._charge_power(defender.player, attacker.player, counter)
+                cb_lost = max(0, pre_atk_disp - attacker.display_hp)
+                self._apply_co_meter_from_display_buckets_lost(defender, attacker, cb_lost)
                 # War Bonds payout for Sasha when she's defending and her
                 # unit deals counter-damage. Roles flipped: defender is the
                 # damage-dealer, attacker is the recipient of the counter.
@@ -1400,10 +1413,38 @@ class GameState:
             "dmg":    dmg,
         })
 
-    def _charge_power(self, attacker_player: int, defender_player: int, damage: int):
-        """Charge CO power bars. Attacker gains less than defender (approx AWBW rates)."""
-        self.co_states[attacker_player].power_bar += damage * 18
-        self.co_states[defender_player].power_bar += damage * 27
+    def _grant_co_meter_credit(self, seat: int, credit: int) -> None:
+        """Add CO-meter credit capped at SCOP ceiling; skips during COP/SCOP window."""
+        if credit <= 0:
+            return
+        co = self.co_states[int(seat)]
+        if co.cop_active or co.scop_active:
+            return
+        ceiling = co._scop_threshold
+        co.power_bar = min(ceiling, co.power_bar + int(credit))
+
+    def _apply_co_meter_from_display_buckets_lost(
+        self,
+        striker_unit: Unit,
+        victim_unit: Unit,
+        display_buckets_lost: int,
+    ) -> None:
+        """Award CO-meter for one combat swing from display-HP buckets lost.
+
+        AWBW-aligned model:
+          Seat S credits (Δ/10)×C_own + ((Δ_other/10)×C_enemy)×0.5 summed per swing.
+        For strike from striker -> victim losing Δ display buckets vs victim_cost:
+          Victim seat: Δ×Cv/10 (+ half-term zero for striker self-loss).
+          Striker seat: Δ×Cv/20 (= (Δ/10)×Cv×0.5).
+        Repairs and non-combat HP changes never call this hook.
+        """
+        if display_buckets_lost <= 0:
+            return
+        cv = int(UNIT_STATS[victim_unit.unit_type].cost)
+        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 10)
+        credit_s = _rounded_div_half_up(display_buckets_lost * cv, 20)
+        self._grant_co_meter_credit(int(victim_unit.player), credit_v)
+        self._grant_co_meter_credit(int(striker_unit.player), credit_s)
 
     def _apply_war_bonds_payout(
         self,

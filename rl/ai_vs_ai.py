@@ -6,6 +6,8 @@ Usage
   python -m rl.ai_vs_ai                         # mirror a running train.py (map/tier/COs + ckpt)
   python -m rl.ai_vs_ai --map-id 98             # train defaults, but force this map
   python -m rl.ai_vs_ai --ckpt checkpoints/latest.zip
+  python -m rl.ai_vs_ai --ckpt-p0 checkpoints/latest.zip \\
+        --ckpt-p1 Z:/checkpoints/pool/workhorse1/latest.zip   # asymmetric checkpoints
   python -m rl.ai_vs_ai --co0 1 --co1 7        # CO IDs
   python -m rl.ai_vs_ai --random                # force random vs random
   python -m rl.ai_vs_ai --no-open               # don't open replay output folder
@@ -17,7 +19,8 @@ Usage
         --capture-move-gate 0.10 --learner-greedy-mix 0.15
 ``train.py`` process, parses its CLI, and uses that as the **base** run (same
 idea as ``SelfPlayTrainer`` / ``AWBWEnv``). **Any** ``--map-id``, ``--tier``,
-``--co0`` / ``--co1``, ``--ckpt``, ``--capture-move-gate``, ``--opening-book`` /
+``--co0`` / ``--co1``, ``--ckpt``, ``--ckpt-p0`` / ``--ckpt-p1``,
+``--capture-move-gate``, ``--opening-book`` /
 ``--opening-book-strict-co``, or ``--learner-greedy-mix`` you add on the
 ``ai_vs_ai`` command line **overrides** only those fields; everything else still
 comes from the live trainer (checkpoint dir, promoted load, curriculum
@@ -34,8 +37,10 @@ file exists, else repo ``checkpoints/latest.zip``).
 
 Decision rule
 -------------
-1. Load the resolved checkpoint as a MaskablePPO for BOTH players.
-2. If loading fails: fall back to uniform-random legal actions for both sides.
+1. Load MaskablePPO per seat from ``--ckpt-p0`` / ``--ckpt-p1`` when set;
+   otherwise use ``--ckpt`` for both seats (or follow-train / default ``latest.zip``).
+   Same resolved path loads one model shared by both seats.
+2. If loading fails for a seat: uniform-random legal actions for that seat only.
 """
 from __future__ import annotations
 
@@ -607,6 +612,42 @@ def _load_model(ckpt_path: Path):
         return None
 
 
+def _resolve_seat_checkpoint_paths(
+    *,
+    ckpt_path: Optional[Path],
+    ckpt_path_p0: Optional[Path],
+    ckpt_path_p1: Optional[Path],
+) -> tuple[Path, Path]:
+    """Return concrete zip paths for P0 / P1 (defaults + shared ``ckpt_path`` fill-in)."""
+    fb = _default_ckpt_path()
+    p0 = ckpt_path_p0 if ckpt_path_p0 is not None else ckpt_path
+    p1 = ckpt_path_p1 if ckpt_path_p1 is not None else ckpt_path
+    return (fb if p0 is None else Path(p0), fb if p1 is None else Path(p1))
+
+
+def _load_models_for_two_seats(
+    path_p0: Path,
+    path_p1: Path,
+    *,
+    force_random: bool,
+) -> tuple[Any | None, Any | None]:
+    """(model_p0, model_p1). Same path ⇒ one load, shared reference. Random if *force_random*."""
+    if force_random:
+        return None, None
+    rp0 = path_p0.expanduser().resolve(strict=False)
+    rp1 = path_p1.expanduser().resolve(strict=False)
+    if not rp0.is_file():
+        _log(f"checkpoint: P0 — not found at {rp0} - using random policy")
+    if not rp1.is_file():
+        _log(f"checkpoint: P1 — not found at {rp1} - using random policy")
+    if rp0.is_file() and rp1.is_file() and rp0 == rp1:
+        m = _load_model(rp0)
+        return (m, m)
+    m0 = _load_model(rp0) if rp0.is_file() else None
+    m1 = _load_model(rp1) if rp1.is_file() else None
+    return m0, m1
+
+
 # ---------------------------------------------------------------------------
 # Action selection
 # ---------------------------------------------------------------------------
@@ -621,7 +662,7 @@ def _obs_from_state(state: GameState) -> dict:
 
 def _choose_action(
     state: GameState,
-    model,
+    seat_models: tuple[Any | None, Any | None],
     rng: random.Random,
     *,
     opening_book_mgr: Any | None = None,
@@ -631,13 +672,14 @@ def _choose_action(
     Pick an action for the current player.
     Optionally consumes ``TwoSidedOpeningBookManager`` indices (same as env opponent/book path),
     then applies capture-greedy teacher mix on **P0** only (matching ``AWBWEnv``).
-    Uses *MaskablePPO* with ego-centric observations when *model* is set.
+    Uses *MaskablePPO* with ego-centric observations when ``seat_models[seat]`` is set.
     """
     legal = get_legal_actions(state)
     if not legal:
         raise RuntimeError(_NO_LEGAL_ACTIONS_MSG)
 
     seat = int(state.active_player)
+    model = seat_models[seat] if 0 <= seat < 2 else None
     mask = _get_action_mask(state)
     cal = int(getattr(state, "turn", 0) or 0)
 
@@ -799,6 +841,8 @@ def _apply_max_turn_tiebreak(state: GameState) -> None:
 def run_game(
     map_id: Optional[int] = None,
     ckpt_path: Optional[Path] = None,
+    ckpt_path_p0: Optional[Path] = None,
+    ckpt_path_p1: Optional[Path] = None,
     co0: Optional[int] = None,
     co1: Optional[int] = None,
     tier: str = "T2",
@@ -836,6 +880,10 @@ def run_game(
     ``learner_greedy_mix``: P0-only capture-greedy teacher probability (parity with
     ``train.py --learner-greedy-mix`` / ``AWBW_LEARNER_GREEDY_MIX``); skipped when
     seat-0 joint book expects the next legal flat.
+
+    Checkpoints: ``ckpt_path`` applies to both seats unless overridden per seat by
+    ``ckpt_path_p0`` / ``ckpt_path_p1``. Paths are resolved independently; identical
+    resolved paths load a single MaskablePPO shared by both players.
 
     Observations passed to MaskablePPO use **observer = active_player** (ego-centric).
 
@@ -922,19 +970,40 @@ def run_game(
             co1 = _sample_co(rng, map_id, tier, 1)
         _log(f"COs: P0={co0}  P1={co1}  tier={tier}")
 
-    # ---- Checkpoint ----
-    model = None
-    if not force_random:
-        path = ckpt_path or _default_ckpt_path()
-        if path.exists():
-            model = _load_model(path)
-        else:
-            _log(f"checkpoint: not found at {path} - using random policy")
+    # ---- Checkpoint(s) ----
+    path_p0, path_p1 = _resolve_seat_checkpoint_paths(
+        ckpt_path=ckpt_path,
+        ckpt_path_p0=ckpt_path_p0,
+        ckpt_path_p1=ckpt_path_p1,
+    )
+    seat_models = _load_models_for_two_seats(path_p0, path_p1, force_random=force_random)
+    m0, m1 = seat_models
 
-    if model is None:
-        _log("policy: uniform random over legal actions")
+    _policy_log_line = ""
+    if force_random:
+        _policy_log_line = "uniform random over legal actions (both seats)"
+    elif m0 is None and m1 is None:
+        _policy_log_line = (
+            "uniform random over legal actions (both seats; checkpoints missing or unloadable)"
+        )
+    elif m0 is m1 and m0 is not None:
+        _policy_log_line = f"MaskablePPO shared (CPU): {path_p0}"
+    elif m0 is not None and m1 is not None:
+        _policy_log_line = f"MaskablePPO per seat (CPU): P0={path_p0}  P1={path_p1}"
+    elif m0 is not None:
+        _policy_log_line = (
+            f"MaskablePPO P0 (CPU)={path_p0}; P1 random (missing ckpt={path_p1})"
+        )
     else:
-        _log("policy: MaskablePPO (same checkpoint for both players, CPU)")
+        _policy_log_line = (
+            f"P0 random (missing ckpt={path_p0}); MaskablePPO P1 (CPU)={path_p1}"
+        )
+    _log(f"policy: {_policy_log_line}")
+
+    diag_primary = m0 if m0 is not None else m1
+    diag_observer1 = None
+    if diag_primary is not None and m1 is not None and m1 is not diag_primary:
+        diag_observer1 = m1
 
     if live_snapshot_path is None:
         # ---- Initial state (fresh) ----
@@ -1065,7 +1134,7 @@ def run_game(
             turn_before = int(state.turn)
             action = _choose_action(
                 state,
-                model,
+                seat_models,
                 rng,
                 opening_book_mgr=opening_book_mgr,
                 learner_greedy_mix=lgm,
@@ -1091,7 +1160,7 @@ def run_game(
 
                 _, _d = run_calendar_day(
                     state,
-                    model,
+                    diag_primary,
                     _cfg,
                     _enc,
                     is_std_map=bool(_map_is_std),
@@ -1101,6 +1170,7 @@ def run_game(
                     learner_seat=0,
                     log_path=Path(p_log),
                     diag_line_budget=_diag_n,
+                    observer1_model=diag_observer1,
                 )
                 _diag_n += int(_d)
 
@@ -1566,8 +1636,23 @@ def main() -> None:
         default=argparse.SUPPRESS,
         help=(
             "Checkpoint zip (when following train: overrides trainer checkpoint "
-            f"resolution; when alone: {_Z_PREFERRED_CKPT} if that file exists, else {_CKPT_DEFAULT})"
+            f"resolution; when alone: {_Z_PREFERRED_CKPT} if that file exists, else {_CKPT_DEFAULT}) "
+            "(shared default for both seats unless overridden with --ckpt-p0/--ckpt-p1)."
         ),
+    )
+    parser.add_argument(
+        "--ckpt-p0",
+        type=Path,
+        default=argparse.SUPPRESS,
+        metavar="ZIP",
+        help="Checkpoint zip for seat 0 only (falls back to shared --ckpt / train / default zip).",
+    )
+    parser.add_argument(
+        "--ckpt-p1",
+        type=Path,
+        default=argparse.SUPPRESS,
+        metavar="ZIP",
+        help="Checkpoint zip for seat 1 only (falls back to shared --ckpt / train / default zip).",
     )
     parser.add_argument(
         "--co0",
@@ -1730,8 +1815,12 @@ def main() -> None:
         pkl: Path, *, out_gid: int | None, open_viewer: bool
     ) -> Path:
         ck = getattr(args, "ckpt", None)
+        cp0 = getattr(args, "ckpt_p0", None)
+        cp1 = getattr(args, "ckpt_p1", None)
         return run_game(
             ckpt_path=Path(ck) if ck is not None else None,
+            ckpt_path_p0=Path(cp0) if cp0 is not None else None,
+            ckpt_path_p1=Path(cp1) if cp1 is not None else None,
             map_id=0,  # unused when loading snapshot
             co0=0,  # unused
             co1=0,  # unused
@@ -1813,7 +1902,15 @@ def main() -> None:
             merged = _merge_train_ns_with_explicit_ai_args(train_ns, args)
             override_bits = [
                 n
-                for n in ("map_id", "ckpt", "co0", "co1", "tier")
+                for n in (
+                    "map_id",
+                    "ckpt",
+                    "ckpt_p0",
+                    "ckpt_p1",
+                    "co0",
+                    "co1",
+                    "tier",
+                )
                 if hasattr(args, n)
             ]
             if _user_mentions_capture_move_gate(user):
@@ -1851,6 +1948,16 @@ def main() -> None:
                 run_game(
                     map_id=map_id,
                     ckpt_path=ckpt_path,
+                    ckpt_path_p0=(
+                        Path(args.ckpt_p0)
+                        if hasattr(args, "ckpt_p0")
+                        else None
+                    ),
+                    ckpt_path_p1=(
+                        Path(args.ckpt_p1)
+                        if hasattr(args, "ckpt_p1")
+                        else None
+                    ),
                     co0=co0,
                     co1=co1,
                     tier=tier,
@@ -1881,6 +1988,8 @@ def main() -> None:
     run_game(
         map_id=getattr(args, "map_id", None),
         ckpt_path=getattr(args, "ckpt", None),
+        ckpt_path_p0=getattr(args, "ckpt_p0", None),
+        ckpt_path_p1=getattr(args, "ckpt_p1", None),
         co0=getattr(args, "co0", None),
         co1=getattr(args, "co1", None),
         tier=getattr(args, "tier", "T2"),

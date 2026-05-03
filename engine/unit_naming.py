@@ -272,8 +272,9 @@ _TABLE_RAW: dict[UnitType, dict[UnitNameSurface, tuple[str, ...]]] = {
     UnitType.GUNBOAT: {
         UnitNameSurface.ENGINE: ("Gunboat",),
         UnitNameSurface.AWBW_PHP: ("Gunboat",),
-        # Upstream C# viewer Units.json predates Gunboat; AWBW engine
-        # does carry it. Best-effort canonical = engine spelling.
+        # Not on AWBW / not in C# ``Units.json`` (Advance Wars: Days of Ruin).
+        # Engine retains stats for damage oracle; ports cannot build it (``action.py``).
+        # Desktop replay zip must never contain this ``units_name`` — no viewer key.
         UnitNameSurface.AWBW_VIEWER: ("Gunboat",),
         UnitNameSurface.AWBW_DAMAGE_PHP: ("Gunboat",),
         UnitNameSurface.DISPLAY: ("Gunboat",),
@@ -302,8 +303,7 @@ _TABLE_RAW: dict[UnitType, dict[UnitNameSurface, tuple[str, ...]]] = {
     UnitType.OOZIUM: {
         UnitNameSurface.ENGINE: ("Oozium",),
         UnitNameSurface.AWBW_PHP: ("Oozium",),
-        # Upstream C# viewer Units.json has no Oozium. Engine spelling
-        # is the only sensible fallback.
+        # Campaign-only on DS; not in C# ``Units.json``. Map ban ``Oozium`` is typical.
         UnitNameSurface.AWBW_VIEWER: ("Oozium",),
         UnitNameSurface.AWBW_DAMAGE_PHP: ("Oozium",),
         UnitNameSurface.DISPLAY: ("Oozium",),
