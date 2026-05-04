@@ -294,23 +294,23 @@ PAIRWISE_ZERO_SUM_REWARD_ENV = "AWBW_PAIRWISE_ZERO_SUM_REWARD"
 #   κ (kappa, 0.05): contested-cap coefficient — partial capture progress toward enemy tiles (cp < 20)
 #   γ (gamma, 0.20): income-saturation coefficient — log-scale bonus for income property lead
 PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
-    "balanced": (2e-5, 0.05, 0.05, 0.20),
+    "balanced": (2e-5, 0.05, 0.05, 0.05),
     "capture": (2e-5, 0.02, 0.25, 0.20),
 }
 # Φ: one-time bonus for removing an enemy unit on the learner’s engine step,
 # in the same value units as the army line (α × cost × hp/100), scaled
 # with ``_phi_alpha`` so it tracks profile/env overrides.
 # Halved vs historical 0.3 (phi reshape): explicit combat kill chip only, not α.
-PHI_ENEMY_KILL_BONUS_FRAC = 0.15
+PHI_ENEMY_KILL_BONUS_FRAC = 0.07
 # Φ: CO power usage (per acting player; standard step maps to learner frame via
 # ``_signed_engine_reward``). Attack bonus uses pre-step ``state`` so only
 # attacks *after* COP/SCOP activation on that turn qualify (``cop_active`` /
 # ``scop_active`` on the pre-action state).
 # Base Φ bonuses before meter scaling (see ``PHI_VON_BOLT_SCOP_REF_THRESHOLD``).
-PHI_COP_ACTIVATION_BONUS = 0.09
-PHI_SCOP_ACTIVATION_BONUS = 0.18
+PHI_COP_ACTIVATION_BONUS = 0.001
+PHI_SCOP_ACTIVATION_BONUS = 0.003
 # Legacy flat attack-under-power chip (replaced by stats-advantage shaping).
-PHI_POWER_TURN_ATTACK_BONUS = 0.001
+PHI_POWER_TURN_ATTACK_BONUS = 0.0001
 # Von Bolt (co_id 30): 10★ SCOP, no COP — ``data/co_data.json``. Activation
 # bonuses multiply by (this power's ``_cop_threshold`` / ``_scop_threshold``)
 # ÷ this value so cheap meters (Adder) earn less than expensive ones (Hawke)
@@ -337,7 +337,7 @@ PHI_DESIGNED_DESIRES_CHECKPOINTS: dict[int, tuple[int, int]] = {
     8: (12, 11),
     9: (14, 16),
     12: (17, 17),
-}
+} #SPECIFIC TO DESIGNED DESIRES
 
 
 def _env_truthy(name: str) -> bool:
@@ -1820,7 +1820,7 @@ class AWBWEnv(gym.Env):
         if action is None:
             self._invalid_action_count += 1
             obs = self._get_obs(observer=self._learner_seat)
-            reward = -0.1
+            reward = 0
             info = {
                 "invalid_action": True,
                 "reward_components": {},
