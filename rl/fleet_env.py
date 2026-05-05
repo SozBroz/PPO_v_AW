@@ -233,6 +233,35 @@ def allowed_aux_write_prefixes(shared_root: Path, machine_id: str) -> tuple[Path
     )
 
 
+def remote_transition_dir(shared_root: Path, machine_id: str) -> Path:
+    """Return the directory where a machine writes remote transition files.
+
+    Layout: ``<shared_root>/fleet/<machine_id>/transitions/``
+
+    This is the canonical path used by both:
+    - ``scripts/rhea_remote_actor.py`` (writes transition batches here)
+    - ``scripts/train_rhea_value_parallel.py`` (polls this directory for new files)
+
+    The directory is NOT created by this helper; call ``.mkdir(parents=True, exist_ok=True)``
+    at the write site.
+    """
+    return shared_root / "fleet" / machine_id / "transitions"
+
+
+def iter_remote_transition_files(shared_root: Path) -> list[Path]:
+    """Glob all ``.jsonl`` transition files under ``fleet/*/transitions/``.
+
+    Used by the learner to discover new transition batches written by remote
+    actors.  Files ending in ``.jsonl.done`` are skipped (already ingested).
+    """
+    sr = _norm(shared_root)
+    pattern = str(sr / "fleet" / "*" / "transitions" / "*.jsonl")
+    import glob
+    files = glob.glob(pattern)
+    # Filter out already-consumed files
+    return [Path(f) for f in files if not f.endswith(".done")]
+
+
 def assert_aux_write_path(path: Path, shared_root: Path, machine_id: str) -> Path:
     """Refuse aux writes outside designated subtrees."""
     p = _norm(path)
