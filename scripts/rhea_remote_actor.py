@@ -31,6 +31,71 @@ import time
 from pathlib import Path
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# Cython auto-recompile: if any .pyx is newer than its compiled .pyd/.so,
+# rebuild the Cython extensions before importing rl.* modules.
+# ---------------------------------------------------------------------------
+def _maybe_recompile_cython() -> None:
+    """Rebuild Cython extensions if any .pyx source is newer than the binary."""
+    import subprocess
+    from pathlib import Path as _Path
+    import sys as _sys
+
+    project_root = _Path(__file__).resolve().parents[1]
+    setup_script = project_root / "setup_cython.py"
+    if not setup_script.exists():
+        return
+
+    pyx_dirs = [project_root / "rl", project_root / "engine"]
+    pyx_files = []
+    for d in pyx_dirs:
+        if d.exists():
+            pyx_files.extend(d.glob("*.pyx"))
+
+    if not pyx_files:
+        return
+
+    if _sys.platform.startswith("win"):
+        ext_suffix = ".pyd"
+    else:
+        ext_suffix = ".so"
+
+    needs_rebuild = False
+    for pyx in pyx_files:
+        compiled = pyx.with_suffix(ext_suffix)
+        if not compiled.exists():
+            needs_rebuild = True
+            break
+        if pyx.stat().st_mtime > compiled.stat().st_mtime:
+            needs_rebuild = True
+            break
+
+    if needs_rebuild:
+        print("Cython sources changed; rebuilding extensions...", flush=True)
+        try:
+            result = subprocess.run(
+                [_sys.executable, str(setup_script), "build_ext", "--inplace"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                print(
+                    f"Cython rebuild failed (rc={result.returncode}):\n"
+                    f"{result.stdout}\n{result.stderr}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+            else:
+                print("Cython rebuild complete.", flush=True)
+        except Exception as exc:
+            print(f"Cython rebuild error: {exc}", file=_sys.stderr, flush=True)
+
+
+# Run the check before importing rl.* (which may import the .pyd files)
+_maybe_recompile_cython()
+
 import numpy as np
 import torch
 
