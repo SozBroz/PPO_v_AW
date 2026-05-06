@@ -366,14 +366,11 @@ def compare_co_states(
     Engine ``COState`` carries ``cop_stars``, ``scop_stars`` (threshold stars),
     ``cop_active``, ``scop_active``, and ``power_bar`` (current charge in 0..max).
 
-    Scaling:
-    - PHP ``co_power``: 1000 per star (2500 → 2.5 stars)
-    - Engine ``power_bar``: 100 per star (250 → 2.5 stars)
-    - Empirical ratio: PHP 10x engine units (2500/250 = 10)
-    - Engine thresholds: ``stars * 9000 + uses * 1800`` (from co.py)
-
-    Comparison: Convert PHP to engine-scale by dividing by 10, then compare
-    against ``power_bar`` directly with a tolerance of 100 engine units (1 star).
+    Comparison logic:
+    - PHP ``co_power // 1000`` gives stars charged (2500 → 2 stars)
+    - Engine ``power_bar // 1000`` gives stars charged (3000 → 3 stars)
+    - We compare these normalized values, allowing a tolerance of 1 star
+      to absorb minor timing differences (end-of-turn vs start-of-turn snapshots).
     """
     out: list[str] = []
     players = php_frame.get("players") or {}
@@ -403,15 +400,15 @@ def compare_co_states(
             php_charge = _php_int_optional(pl.get("co_power"), 0)
             if php_charge > 0:
                 # PHP co_power: 1000 per star (2500 = 2.5 stars)
-                # Engine power_bar: ~100 per star (250 = 2.5 stars)
+                # Engine power_bar: 100 per star (250 = 2.5 stars)
                 # Empirical ratio: PHP 10x engine units (2500/250 = 10)
-                php_scaled = php_charge / 10.0  # Convert to engine-scale units
+                php_engine = php_charge / 10.0  # Convert PHP to engine-scale
                 eng_bar = float(co_state.power_bar)
-                # Allow ~100 engine units (1 star) tolerance for timing differences
-                if abs(php_scaled - eng_bar) > 100.0:
+                # Tolerance: 100 engine units = 1 star, to absorb timing differences
+                if abs(php_engine - eng_bar) > 100.0:
                     out.append(
                         f"P{eng} charge_mismatch: "
-                        f"php={php_charge/1000.0:.1f} stars (raw={php_charge}, scaled={php_scaled:.0f}) "
+                        f"php={php_charge/1000.0:.1f} stars (raw={php_charge}, engine_scale={php_engine:.0f}) "
                         f"engine={eng_bar/100.0:.1f} stars (power_bar={co_state.power_bar})"
                     )
     return out
@@ -461,15 +458,6 @@ def compare_turn(
 
     PHP: ``day`` field (1-indexed day number).
     Engine: ``state.turn`` (1-indexed turn number, increments after P1 ends).
-
-    The PHP snapshot ``day`` is captured after the envelope's actions complete.
-    The engine increments ``state.turn`` in ``_end_turn`` only when the
-    active player is about to become P0 (i.e., P1 just ended).
-
-    Depending on cadence (explicit ``End`` vs implicit server-side end-of-turn),
-    the engine may or may not have incremented ``state.turn`` when we run
-    the comparison.  We accept both ``state.turn`` and ``state.turn + 1``
-    as valid matches for the PHP day.
     """
     out: list[str] = []
     php_day = php_frame.get("day")
@@ -479,7 +467,7 @@ def compare_turn(
         php_day_int = int(php_day)
     except (TypeError, ValueError):
         return out
-    # Accept both state.turn and state.turn+1 to handle increment timing
-    if php_day_int != state.turn and php_day_int != state.turn + 1:
+    # Engine turn should match PHP day (both are 1-indexed day numbers)
+    if php_day_int != state.turn:
         out.append(f"turn engine={state.turn} php_day={php_day_int}")
     return out
