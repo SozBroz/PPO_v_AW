@@ -1320,15 +1320,16 @@ class GameState:
                 luck_rng=self.luck_rng,
             )
         if dmg is not None and dmg > 0:
-            defender.hp = max(0, defender.hp - dmg)
-            self.losses_hp[defender.player] += dmg  # Track HP lost
+            # AWBW: 9000 funds damage = 1 star = 9000 power_bar units
+            # dmg is display HP lost (1-10) from oracle (pre/post are internal_HP/10)
+            # Convert to internal HP (1-100) for engine unit state
+            internal_dmg = dmg * 10
+            defender.hp = max(0, defender.hp - internal_dmg)
+            self.losses_hp[defender.player] += internal_dmg  # Track HP lost
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
-            # AWBW: 9000 funds damage = 1 star = 9000 power_bar units
-            # dmg is internal HP lost (1-100), where 10 internal = 1 display HP
-            # Funds value = (dmg/10) * cost = dmg * cost / 10
-            # Pass internal HP directly; function handles conversion
-            self._apply_co_meter_from_display_buckets_lost(attacker, defender, dmg)
+            # Pass internal HP to CO meter function
+            self._apply_co_meter_from_internal_hp_lost(attacker, defender, internal_dmg)
             self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
 
         # Counterattack (only if defender survived and attacker is direct)
@@ -1368,10 +1369,10 @@ class GameState:
                 self.losses_hp[attacker.player] += counter  # Track counterattack HP lost
                 if attacker.hp == 0:
                     self.losses_units[attacker.player] += 1  # Track unit destroyed
-                # Use internal HP lost (counter) for CO meter, not display buckets
-                # AWBW: 9000 funds of damage = 1 star = 100 engine units
-                # Formula: internal_hp_lost × cost / 90 = engine units
-                self._apply_co_meter_from_display_buckets_lost(defender, attacker, counter)
+                # Use internal HP lost (counter) for CO meter
+                # AWBW: 9000 funds of damage = 1 star
+                # Formula: internal_hp_lost × cost / 10 = funds value
+                self._apply_co_meter_from_internal_hp_lost(defender, attacker, counter)
                 # War Bonds payout for Sasha when she's defending and her
                 # unit deals counter-damage. Roles flipped: defender is the
                 # damage-dealer, attacker is the recipient of the counter.
@@ -1454,11 +1455,11 @@ class GameState:
         ceiling = co._scop_threshold
         co.power_bar = min(ceiling, co.power_bar + int(credit))
 
-    def _apply_co_meter_from_display_buckets_lost(
+    def _apply_co_meter_from_internal_hp_lost(
         self,
         striker_unit: Unit,
         victim_unit: Unit,
-        display_buckets_lost: int,
+        internal_hp_lost: int,
     ) -> None:
         """Award CO-meter for one combat swing from internal HP lost.
 
@@ -1466,7 +1467,7 @@ class GameState:
         9000 funds damage = 1 star = 9000 power_bar units.
 
         Args:
-            display_buckets_lost: Internal HP lost (1-100), where 10 internal = 1 display HP.
+            internal_hp_lost: Internal HP lost (1-100), where 10 internal = 1 display HP.
         
         For internal HP lost D and unit cost C:
         - Victim seat credit: (D/10) × C = D × C / 10 (funds value)
@@ -1476,12 +1477,8 @@ class GameState:
 
         Repairs and non-combat HP changes never call this hook.
         """
-        if display_buckets_lost <= 0:
+        if internal_hp_lost <= 0:
             return
-        
-        import sys
-        print(f"DEBUG CO: dmg={display_buckets_lost} victim={victim_unit.unit_type} striker={striker_unit.unit_type}", file=sys.stderr)
-        
         # AWBW canon: "Real unit cost is also factored into the calculation,
         # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
         # charge their powers more slowly / more quickly on a per-unit basis."
@@ -1498,10 +1495,9 @@ class GameState:
         cs = int(base_cs * (100 + mod_s) / 100)
         # Victim credit: internal_HP_lost × cost / 10 = funds value
         # 90 internal HP × 1000 cost / 10 = 9000 funds = 1 star = 9000 power_bar
-        credit_v = display_buckets_lost * cv // 10
+        credit_v = internal_hp_lost * cv // 10
         # Striker credit: 50% of victim (per AWBW)
-        credit_s = display_buckets_lost * cs // 20
-        print(f"DEBUG CO: cv={cv} cs={cs} credit_v={credit_v} credit_s={credit_s} victim_bar={self.co_states[int(victim_unit.player)].power_bar}", file=sys.stderr)
+        credit_s = internal_hp_lost * cs // 20
         self._grant_co_meter_credit(int(victim_unit.player), credit_v)
         self._grant_co_meter_credit(int(striker_unit.player), credit_s)
     def _apply_war_bonds_payout(

@@ -206,10 +206,10 @@ class COState:
         # Luck by CO ID: (d2d_low, d2d_high, cop_low, cop_high, scop_low, scop_high)
         # Values from AWBW CO Chart.
         LUCK = {
-            5: (0, 19, 0, 59, 0, 99),     # Nell
+            24: (0, 19, 0, 59, 0, 99),     # Nell
             18: (-9, 9, -9, 9, -9, 9),       # Sonja (dual: -9..+9)
-            22: (-9, 24, -19, 49, -39, 89),   # Flak (dual)
-            23: (-14, 29, -24, 54, -44, 94),  # Jugger (dual)
+            25: (-9, 24, -19, 49, -39, 89),   # Flak (dual)
+            26: (-14, 29, -24, 54, -44, 94),  # Jugger (dual)
         }
         if self.co_id not in LUCK:
             return None
