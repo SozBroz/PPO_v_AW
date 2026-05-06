@@ -399,8 +399,9 @@ def compare_co_states(
         if not co_state.cop_active and not co_state.scop_active:
             php_charge = _php_int_optional(pl.get("co_power"), 0)
             if php_charge > 0:
-                                # PHP: 1000 per star (2500 = 2.5 stars)
-                php_stars = php_charge / 1000.0
+                                # PHP: 90000 per star (2500 = 2.5 stars)
+                # Subagent A found: PHP uses 90000 units/star (10x engine)
+                php_stars = php_charge / 90000.0
                 # Engine: power_bar is in funds units (9000 per star)
                 # e.g. 9000 funds damage = 1 star = 9000 power_bar units
                 eng_stars = co_state.power_bar / 9000.0
