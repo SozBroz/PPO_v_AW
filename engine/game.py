@@ -577,8 +577,10 @@ class GameState:
         # counter reaches 0 the weather reverts to the map default.
         if self.co_weather_segments_remaining > 0:
             self.co_weather_segments_remaining -= 1
-            if self.co_weather_segments_remaining == 0:
-                self.weather = self.default_weather
+        # Defensive: always sync weather to default when segments exhausted,
+        # even if the decrement happened elsewhere or the initial state was inconsistent.
+        if self.co_weather_segments_remaining == 0:
+            self.weather = self.default_weather
 
         # Reset capture progress for enemy units on opponent's properties
         # (AWBW rule: capture resets if unit moves off tile — handled in _apply_capture)
@@ -1304,6 +1306,7 @@ class GameState:
         # damage so we can compute display-HP loss for the War Bonds payout.
         # CO meter likewise uses defender display buckets before/after hp change.
         pre_def_disp = defender.display_hp
+        dmg = 0  # Default: no damage
         if override_dmg is not None:
             dmg = max(0, int(override_dmg))
         else:
@@ -1313,16 +1316,18 @@ class GameState:
                 att_co, def_co,
                 luck_rng=self.luck_rng,
             )
-        if dmg is not None:
+        if dmg is not None and dmg > 0:
             defender.hp = max(0, defender.hp - dmg)
             self.losses_hp[defender.player] += dmg  # Track HP lost
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
-            db_lost = max(0, pre_def_disp - defender.display_hp)
-            self._apply_co_meter_from_display_buckets_lost(attacker, defender, db_lost)
+            # Use display HP lost for CO meter per AWBW wiki
+            # AWBW: 9000 funds of damage = 1 star = 100 engine units
+            # Formula: display_hp_lost × cost / 90 = engine units
+            # (9000/100 = 90, display HP is internal HP / 10)
+            display_lost = (dmg + 9) // 10  # Convert internal HP to display HP
+            self._apply_co_meter_from_display_buckets_lost(attacker, defender, display_lost)
             self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
-        else:
-            dmg = 0
 
         # Counterattack (only if defender survived and attacker is direct)
         att_stats = UNIT_STATS[attacker.unit_type]
@@ -1361,8 +1366,10 @@ class GameState:
                 self.losses_hp[attacker.player] += counter  # Track counterattack HP lost
                 if attacker.hp == 0:
                     self.losses_units[attacker.player] += 1  # Track unit destroyed
-                cb_lost = max(0, pre_atk_disp - attacker.display_hp)
-                self._apply_co_meter_from_display_buckets_lost(defender, attacker, cb_lost)
+                # Use internal HP lost (counter) for CO meter, not display buckets
+                # AWBW: 9000 funds of damage = 1 star = 100 engine units
+                # Formula: internal_hp_lost × cost / 90 = engine units
+                self._apply_co_meter_from_display_buckets_lost(defender, attacker, counter)
                 # War Bonds payout for Sasha when she's defending and her
                 # unit deals counter-damage. Roles flipped: defender is the
                 # damage-dealer, attacker is the recipient of the counter.
@@ -1478,10 +1485,12 @@ class GameState:
         # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
         cv = int(base_cv * (100 + mod_v) / 100)
         cs = int(base_cs * (100 + mod_s) / 100)
-        # Victim seat: Δ×Cv/10  (damage dealt to victim)
-        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 10)
-        # Striker seat: Δ×Cs/20 = (Δ/10)×Cs×0.5  (damage received by striker)
-        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 20)
+        # Victim seat: damage dealt → CO meter (AWBW: 9000 funds = 1 star)
+        # display_buckets_lost is internal HP (1-100), so divisor is 90 (9000/100)
+        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 90)
+        # Striker seat: 50% credit for damage dealt (AWBW: half of victim)
+        # divisor is 180 (18000/100)
+        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 180)
         self._grant_co_meter_credit(int(victim_unit.player), credit_v)
         self._grant_co_meter_credit(int(striker_unit.player), credit_s)
 
