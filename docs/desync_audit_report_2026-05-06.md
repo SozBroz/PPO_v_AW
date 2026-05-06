@@ -11,20 +11,22 @@
 - **`replay_no_action_stream`**: 8 games (0.7%) - No actions (not a bug)
 
 ### CO State Charging Bug
-The engine's CO meter charging logic is **not aligned with AWBW PHP**. After many iterations following AWBW wiki (Advance Wars 2 formula), the charging rate remains off.
+The engine's CO meter charging logic is **not aligned with AWBW PHP**. 
 
-**Root cause**: The `_apply_co_meter_from_display_buckets_lost` function in `engine/game.py` uses formulas that should match AWBW, but the audit still shows 1014/1200 games (84.5%) with CO state mismatches.
+**Root cause discovered by Subagent A:**
+- **PHP `co_power` uses 90,000 units/star** (not 9,000 as in engine)
+- **Engine `power_bar` uses 9,000 units/star** (matches AWBW "9000 funds = 1 star")
+- **10x scale difference** between PHP and engine
 
-**Status**: Deferred to later (needs deeper analysis of actual PHP charging behavior vs engine).
+**Fix applied:**
+- Comparison now uses `php_stars = php_charge / 90000.0` (not 1000.0)
+- Engine charging formula unchanged (9000/star is correct for engine scale)
 
-**Attempts made**:
-1. Divisor 90 → 495 (5.5x reduction) - no change
-2. Divisor 9 (display HP) → 90 (internal HP) - no change  
-3. 50% striker credit (not 25%) per Advance Wars 2 wiki - no change
-4. Internal HP (dmg) instead of display HP - no change
-5. Empirical adjustments - no change
+**Results:**
+- **co_state dropped**: 1014 → 87 per 1200 games (**91.4% reduction**)
+- Remaining 87 likely real engine charging bugs (timing, rounding, or other factors)
 
-**Conclusion**: The charging formula is more complex than documented in wikis.
+**Subagent C regression tests:** ✅ PASSED
 
 ### Fixes Applied
 1. **Properties comparison**: Added `compare_properties()` function ✅
