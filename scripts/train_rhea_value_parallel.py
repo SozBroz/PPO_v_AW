@@ -365,10 +365,11 @@ def _compute_gradients_for_transitions(
     loss.backward()
     
     # Collect gradients (only trainable parameters)
+    # Preserve shape — flattening breaks assignment to conv weights later
     grads = {}
     for name, p in model.named_parameters():
         if p.requires_grad and p.grad is not None:
-            grads[name] = p.grad.detach().cpu().flatten().tolist()
+            grads[name] = p.grad.detach().cpu().tolist()
     
     return grads
 
@@ -473,9 +474,9 @@ def _poll_gradients_from_shared(
             mtime = f.stat().st_mtime
             if fpath in last_poll_time and last_poll_time[fpath] >= mtime:
                 continue
-            
-            with open(f, "r", encoding="utf-8") as f:
-                grad_data = json.load(f)
+
+            with open(f, "r", encoding="utf-8") as fh:
+                grad_data = json.load(fh)
             
             actor_id = grad_data["actor_id"]
             timestamp = grad_data.get("timestamp", mtime)

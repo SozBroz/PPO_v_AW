@@ -401,9 +401,9 @@ def compare_co_states(
             if php_charge > 0:
                                 # PHP: 1000 per star (2500 = 2.5 stars)
                 php_stars = php_charge / 1000.0
-                # Engine: raw power_bar, 90 per star (from charging formula divisor)
-                # (matches engine's credit_v = display_lost * cv / 90)
-                eng_stars = co_state.power_bar / 90.0
+                # Engine: power_bar is in funds units (9000 per star)
+                # e.g. 9000 funds damage = 1 star = 9000 power_bar units
+                eng_stars = co_state.power_bar / 9000.0
                 # Allow 0.5-star tolerance
                 if abs(php_stars - eng_stars) > 0.5:
                     out.append(
