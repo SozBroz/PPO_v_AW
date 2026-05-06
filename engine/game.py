@@ -1491,10 +1491,10 @@ class GameState:
         # Victim seat: damage dealt -> CO meter (AWBW: 9000 funds = 1 star)
         # display_buckets_lost is display HP (1-10), so divisor is 9
         # (9000 funds / 1000 cost = 9 display HP per star)
-        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 100)
+        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 10)
         # Striker seat: 50% credit for damage dealt (AWBW: half of victim)
-        # divisor is 18 (half of 9, x 10 for engine units)
-        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 200)
+        # divisor is 20 (half of 10, x 10 for engine units)
+        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 20)
         self._grant_co_meter_credit(int(victim_unit.player), credit_v)
         self._grant_co_meter_credit(int(striker_unit.player), credit_s)
     def _apply_war_bonds_payout(
