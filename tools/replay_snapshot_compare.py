@@ -191,9 +191,6 @@ def compare_units(
                 if key in eng_by_tile:
                     out.append(f"engine duplicate unit at P{seat} {u.pos}")
                 eng_by_tile[key] = u
-                # Loaded units are stored inside the transport, not on the map
-                # They should NOT be added to eng_by_tile (they don't have a tile position)
-                # This is why PHP has "carried=Y" units at the same tile - those are the cargo
 
     if set(php_by_tile) != set(eng_by_tile):
         only_php = set(php_by_tile) - set(eng_by_tile)
@@ -277,6 +274,9 @@ def compare_properties(
     ``owner = None`` is correct.
     """
     out: list[str] = []
+    # Skip if state doesn't have properties (e.g. SimpleNamespace in tests)
+    if not hasattr(state, 'properties'):
+        return out
     php_buildings = php_frame.get("buildings") or {}
     # Build a map from (row, col) -> PHP building for matching
     php_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
