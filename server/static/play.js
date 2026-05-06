@@ -66,7 +66,7 @@
 
   function pctLabel(x) {
     const v = typeof x === 'number' ? x : 0;
-    return `${Math.round(Math.min(1, Math.max(0, v)) * 100)}%`;
+    return `${Math.round(Math.min(1, Math.max(0, v)) * 100}%`;
   }
 
   function syncPowerHud(p) {
@@ -344,12 +344,122 @@
   }
 
   document.addEventListener('keydown', (ev) => {
-    if (ev.key !== 'Escape') return;
-    if (buildModal && buildModal.style.display === 'flex') {
-      closeBuildModal();
+    if (!last || !sessionId || last.done) return;
+    if (last.active_player !== 0) return;
+
+    const st = last.action_stage;
+    const key = ev.key.toLowerCase();
+
+    // Escape: cancel selection / close modal
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      if (buildModal && buildModal.style.display === 'flex') {
+        closeBuildModal();
+        return;
+      }
+      cancelSel();
       return;
     }
-    cancelSel();
+
+    // Enter or Space: End Turn (when legal, in SELECT stage)
+    if ((ev.key === 'Enter' || ev.key === ' ') && st === 'SELECT') {
+      ev.preventDefault();
+      const lg = last.legal_global || {};
+      if (lg.end_turn) {
+        step({ kind: 'end_turn' });
+      }
+      return;
+    }
+
+    // W: Wait (in ACTION stage)
+    if (key === 'w' && st === 'ACTION') {
+      ev.preventDefault();
+      const opts = last.action_options || [];
+      if (opts.includes('WAIT') && last.selected_unit_pos && last.selected_move_pos) {
+        step({
+          kind: 'wait',
+          unit_pos: last.selected_unit_pos,
+          move_pos: last.selected_move_pos,
+        });
+      }
+      return;
+    }
+
+    // C: Capture (in ACTION stage)
+    if (key === 'c' && st === 'ACTION') {
+      ev.preventDefault();
+      const opts = last.action_options || [];
+      if (opts.includes('CAPTURE') && last.selected_unit_pos && last.selected_move_pos) {
+        step({
+          kind: 'capture',
+          unit_pos: last.selected_unit_pos,
+          move_pos: last.selected_move_pos,
+        });
+      }
+      return;
+    }
+
+    // J: Join (in ACTION stage)
+    if (key === 'j' && st === 'ACTION') {
+      ev.preventDefault();
+      const opts = last.action_options || [];
+      if (opts.includes('JOIN') && last.selected_unit_pos && last.selected_move_pos) {
+        step({
+          kind: 'join',
+          unit_pos: last.selected_unit_pos,
+          move_pos: last.selected_move_pos,
+        });
+      }
+      return;
+    }
+
+    // L: Load (in ACTION stage)
+    if (key === 'l' && st === 'ACTION') {
+      ev.preventDefault();
+      const opts = last.action_options || [];
+      if (opts.includes('LOAD') && last.selected_unit_pos && last.selected_move_pos) {
+        step({
+          kind: 'load',
+          unit_pos: last.selected_unit_pos,
+          move_pos: last.selected_move_pos,
+        });
+      }
+      return;
+    }
+
+    // D or H: Dive/Hide (in ACTION stage)
+    if ((key === 'd' || key === 'h') && st === 'ACTION') {
+      ev.preventDefault();
+      const opts = last.action_options || [];
+      if (opts.includes('DIVE_HIDE') && last.selected_unit_pos && last.selected_move_pos) {
+        step({
+          kind: 'dive_hide',
+          unit_pos: last.selected_unit_pos,
+          move_pos: last.selected_move_pos,
+        });
+      }
+      return;
+    }
+
+    // O: Activate COP (in SELECT stage)
+    if (key === 'o' && st === 'SELECT') {
+      ev.preventDefault();
+      const lg = last.legal_global || {};
+      if (lg.cop) {
+        step({ kind: 'cop' });
+      }
+      return;
+    }
+
+    // S: Activate SCOP (in SELECT stage)
+    if (key === 's' && st === 'SELECT') {
+      ev.preventDefault();
+      const lg = last.legal_global || {};
+      if (lg.scop) {
+        step({ kind: 'scop' });
+      }
+      return;
+    }
   });
 
   if (buildUnitSelect) {
@@ -395,6 +505,12 @@
       }
       if (tileIncludes(sel, r, c)) {
         await step({ kind: 'select_unit', unit_pos: [r, c] });
+        return;
+      }
+      // If we have a selected unit and clicked somewhere, try auto-attack
+      if (last.selected_unit_pos) {
+        const up = last.selected_unit_pos;
+        await step({ kind: 'attack_unit', unit_pos: up, target_pos: [r, c] });
         return;
       }
       if (sel.length === 0 && fb.length === 0) {

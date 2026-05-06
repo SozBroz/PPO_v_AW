@@ -3340,9 +3340,22 @@ def map_snapshot_player_ids_to_engine(
     for _k, p in players.items():
         if not isinstance(p, dict):
             continue
-        pid = int(p["id"])
-        order = int(p.get("order", 0))
-        cid = int(p["co_id"])
+        pid = _oracle_awbw_scalar_int_optional(p.get("id"))
+        if pid is None:
+            continue
+        order_raw = p.get("order", 0)
+        # PHP may use 'N' placeholder for hidden/unknown fields (fog, unknown CO).
+        # ``_oracle_awbw_scalar_int_optional`` swallows these safely elsewhere;
+        # do the same here so fogged games don't crash the audit harness.
+        order = _oracle_awbw_scalar_int_optional(order_raw)
+        if order is None:
+            order = 0
+        cid_raw = p.get("co_id")
+        cid = _oracle_awbw_scalar_int_optional(cid_raw)
+        if cid is None:
+            # Fogged or unknown CO — use the caller-supplied co0/co1 as fallback.
+            # We still need a stable order; use the order field (0/1) to assign.
+            cid = co0 if order == 0 else co1
         rows.append((order, pid, cid))
     rows.sort(key=lambda t: t[0])
     if len(rows) < 2:

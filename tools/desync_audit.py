@@ -25,13 +25,19 @@ State-mismatch / silent gold drift (opt-in)
 Pass ``--enable-state-mismatch`` to diff engine vs PHP after each envelope.
 When enabled, the audit **automatically**:
 
-1. Prints a **SILENT DRIFT** summary block to stderr (counts + every
-   ``state_mismatch_funds`` row — "gold drift" — plus units/multi totals).
+1. Prints a **SILENT DRIFT** summary block to stderr (counts +
+   every ``state_mismatch_funds`` row — "gold drift").
+
 2. Writes sidecar JSONLs next to ``--register``:
 
    * ``<register_stem>_state_mismatch_funds.jsonl`` — one line per funds-only drift
    * ``<register_stem>_state_mismatch_units.jsonl`` — units-only rows
    * ``<register_stem>_state_mismatch_multi.jsonl`` — multi-axis rows
+   * ``<register_stem>_state_mismatch_properties.jsonl`` — property state rows
+   * ``<register_stem>_state_mismatch_co_state.jsonl`` — CO state rows
+   * ``<register_stem>_state_mismatch_weather.jsonl`` — weather rows
+   * ``<register_stem>_state_mismatch_turn.jsonl`` — turn rows
+   * ``<register_stem>_state_mismatch_investigate.jsonl`` — unknown rows
 
    Use ``--no-silent-drift-sidecars`` to suppress sidecar files (summary still prints).
 
@@ -40,18 +46,11 @@ When enabled, the audit **automatically**:
    still use exit **1**.
 
 When ``--enable-state-mismatch`` is on, each diff also **re-snaps engine
-``funds[]`` from the PHP frame immediately after the cadence pre-roll** and
-before ``_diff_engine_vs_snapshot``. That clears residual funds-only drift
+``funds[]`` from the PHP frame immediately after the cadence pre-roll**
+and before ``_diff_engine_vs_snapshot``. That clears residual funds-only drift
 once HP already matches, without double-counting the implicit end-of-turn
-income case (e.g. ``1618984`` env 5 — treasury snap must run *after* the
-pre-roll, not only with the post-envelope HP sync block).
-
-Examples::
-
-  python tools/desync_audit.py
-  python tools/desync_audit.py --max-games 10 --register logs/desync_misery.jsonl
-  python tools/desync_audit.py --max-games 10 --from-bottom --register logs/desync_tail.jsonl
-  python tools/desync_audit.py --games-id 272176
+income case (e.g. ``1618984`` env 5 — treasury snap must run *after*
+the cadence pre-roll, not only with the post-envelope HP sync).
 """
 from __future__ import annotations
 
@@ -99,26 +98,24 @@ from tools.oracle_zip_replay import (  # noqa: E402
     oracle_set_php_id_tile_cache,
     parse_p_envelopes_from_zip,
     resolve_replay_first_mover,
+    load_replay,  # noqa: E402
 )
-
-
-def _audit_before_engine_step(*_args, **_kwargs) -> None:
-    """No-op hook satisfying the EngineStepHook signature for audit-internal
-    pre-roll calls. The desync audit does not need a per-step trace; oracle-
-    side helpers expect a callable to fire before each engine step."""
-    return None
-from tools.diff_replay_zips import load_replay  # noqa: E402
+from tools.replay_snapshot_compare import (  # noqa: E402
+    compare_funds,
+    compare_snapshot_to_engine,
+    compare_properties,
+    compare_co_states,
+    compare_weather,
+    compare_turn,
+    php_internal_from_snapshot_hit_points,
+    replay_snapshot_pairing,
+)
+from tools.gl_std_maps import gl_std_map_ids  # noqa: E402
 from tools.amarriner_catalog_cos import (  # noqa: E402
     catalog_row_has_both_cos,
     pair_catalog_cos_ids,
 )
-from tools.gl_std_maps import gl_std_map_ids  # noqa: E402
-from tools.replay_snapshot_compare import (  # noqa: E402
-    compare_funds,
-    compare_snapshot_to_engine,
-    php_internal_from_snapshot_hit_points,
-    replay_snapshot_pairing,
-)
+from tools.diff_replay_zips import load_replay  # noqa: E402
 from engine.unit import UNIT_STATS  # noqa: E402
 from engine.unit_naming import UnknownUnitName, normalize_alias_key, to_unit_type  # noqa: E402
 
@@ -153,6 +150,10 @@ CLS_ENGINE_BUG = "engine_bug"                  # engine raised under a mapped ac
 CLS_STATE_MISMATCH_FUNDS = "state_mismatch_funds"
 CLS_STATE_MISMATCH_UNITS = "state_mismatch_units"
 CLS_STATE_MISMATCH_MULTI = "state_mismatch_multi"
+CLS_STATE_MISMATCH_PROPERTIES = "state_mismatch_properties"
+CLS_STATE_MISMATCH_CO_STATE = "state_mismatch_co_state"
+CLS_STATE_MISMATCH_WEATHER = "state_mismatch_weather"
+CLS_STATE_MISMATCH_TURN = "state_mismatch_turn"
 CLS_STATE_MISMATCH_INVESTIGATE = "state_mismatch_investigate"  # comparator failure / unknown layout
 CLS_CATALOG_INCOMPLETE = "catalog_incomplete"  # missing co_p0_id / co_p1_id in JSON — cannot build GameState
 
@@ -160,6 +161,10 @@ _STATE_MISMATCH_SIDE_CLS = (
     CLS_STATE_MISMATCH_FUNDS,
     CLS_STATE_MISMATCH_UNITS,
     CLS_STATE_MISMATCH_MULTI,
+    CLS_STATE_MISMATCH_PROPERTIES,
+    CLS_STATE_MISMATCH_CO_STATE,
+    CLS_STATE_MISMATCH_WEATHER,
+    CLS_STATE_MISMATCH_TURN,
     CLS_STATE_MISMATCH_INVESTIGATE,
 )
 
@@ -175,6 +180,10 @@ def _state_mismatch_sidecar_paths(register: Path) -> dict[str, Path]:
         CLS_STATE_MISMATCH_FUNDS: parent / f"{stem}_state_mismatch_funds.jsonl",
         CLS_STATE_MISMATCH_UNITS: parent / f"{stem}_state_mismatch_units.jsonl",
         CLS_STATE_MISMATCH_MULTI: parent / f"{stem}_state_mismatch_multi.jsonl",
+        CLS_STATE_MISMATCH_PROPERTIES: parent / f"{stem}_state_mismatch_properties.jsonl",
+        CLS_STATE_MISMATCH_CO_STATE: parent / f"{stem}_state_mismatch_co_state.jsonl",
+        CLS_STATE_MISMATCH_WEATHER: parent / f"{stem}_state_mismatch_weather.jsonl",
+        CLS_STATE_MISMATCH_TURN: parent / f"{stem}_state_mismatch_turn.jsonl",
         CLS_STATE_MISMATCH_INVESTIGATE: parent / f"{stem}_state_mismatch_investigate.jsonl",
     }
 
@@ -205,6 +214,10 @@ def _print_silent_drift_summary(register: Path, rows: list["AuditRow"], counts: 
     n_u = counts.get(CLS_STATE_MISMATCH_UNITS, 0)
     n_m = counts.get(CLS_STATE_MISMATCH_MULTI, 0)
     n_i = counts.get(CLS_STATE_MISMATCH_INVESTIGATE, 0)
+    n_p = counts.get(CLS_STATE_MISMATCH_PROPERTIES, 0)
+    n_c = counts.get(CLS_STATE_MISMATCH_CO_STATE, 0)
+    n_w = counts.get(CLS_STATE_MISMATCH_WEATHER, 0)
+    n_t = counts.get(CLS_STATE_MISMATCH_TURN, 0)
     print("", file=sys.stderr)
     print(
         "[desync_audit] ========== SILENT DRIFT (state-mismatch vs PHP) ==========",
@@ -213,6 +226,11 @@ def _print_silent_drift_summary(register: Path, rows: list["AuditRow"], counts: 
     print(
         f"[desync_audit] gold_drift (state_mismatch_funds): {n_f}  |  "
         f"units_only: {n_u}  |  multi_axis: {n_m}  |  investigate: {n_i}",
+        file=sys.stderr,
+    )
+    print(
+        f"[desync_audit] properties: {n_p}  |  co_state: {n_c}  |  "
+        f"weather: {n_w}  |  turn: {n_t}",
         file=sys.stderr,
     )
     if n_f:
@@ -237,7 +255,7 @@ def _print_silent_drift_summary(register: Path, rows: list["AuditRow"], counts: 
         for pth in side_written:
             print(f"[desync_audit]   {pth}", file=sys.stderr)
     print(
-        "[desync_audit] ==============================================",
+        "[desync_audit] =============================================",
         file=sys.stderr,
     )
 
@@ -320,13 +338,14 @@ def _replay_resync_unit_hp_from_php_post_frame(
             if new_hp is None:
                 try:
                     row, col = u.pos
-                    key = (seat, int(row), int(col))
                 except (TypeError, ValueError):
-                    key = None
-                if key is not None and key in php_by_seat_pos:
-                    new_hp = php_internal_from_snapshot_hit_points(
-                        php_by_seat_pos[key], int(u.hp)
-                    )
+                    row, col = None, None
+                if row is not None and col is not None:
+                    key = (seat, int(row), int(col))
+                    if key in php_by_seat_pos:
+                        new_hp = php_internal_from_snapshot_hit_points(
+                            php_by_seat_pos[key], int(u.hp)
+                        )
             if new_hp is not None and new_hp != int(u.hp):
                 u.hp = new_hp
     for p in (0, 1):
@@ -559,6 +578,30 @@ def _diff_engine_vs_snapshot(
     if units_hp_mismatch_count > 0:
         axes.append("units_hp")
 
+    # NEW: Property state comparison (ownership, capture points)
+    prop_lines = compare_properties(php_frame, state, awbw_to_engine)
+    if prop_lines:
+        axes.append("properties")
+        own_lines.extend(prop_lines)
+
+    # NEW: CO state comparison (meter, power activation)
+    co_lines = compare_co_states(php_frame, state, awbw_to_engine)
+    if co_lines:
+        axes.append("co_state")
+        own_lines.extend(co_lines)
+
+    # NEW: Weather comparison
+    weather_lines = compare_weather(php_frame, state)
+    if weather_lines:
+        axes.append("weather")
+        own_lines.extend(weather_lines)
+
+    # NEW: Turn/day comparison
+    turn_lines = compare_turn(php_frame, state)
+    if turn_lines:
+        axes.append("turn")
+        own_lines.extend(turn_lines)
+
     if not axes:
         return {}
 
@@ -600,22 +643,33 @@ def _diff_engine_vs_snapshot(
 def _classify_state_mismatch(diff_summary: dict[str, Any]) -> str:
     """Pick the most specific ``state_mismatch_*`` class for a non-empty diff.
 
-    Heuristic: funds-only -> ``state_mismatch_funds``; units-only ->
-    ``state_mismatch_units``; both families -> ``state_mismatch_multi``;
-    empty/garbled -> ``state_mismatch_investigate``. ``meta`` and
-    ``properties`` are reserved (Section 3 of the design spec) and not
-    emitted in this initial implementation — diff_summary today doesn't
-    populate those axes.
+    Heuristic: multi-axis -> ``state_mismatch_multi``; single-axis maps to
+    its specific class. ``investigate`` catches empty/garbled diffs.
+    New axes (properties, co_state, weather, turn) added 2026-05-05.
     """
     axes = diff_summary.get("axes") or []
     has_funds = "funds" in axes
     has_units = any(a.startswith("units") for a in axes)
-    if has_funds and has_units:
+    has_properties = "properties" in axes
+    has_co_state = "co_state" in axes
+    has_weather = "weather" in axes
+    has_turn = "turn" in axes
+    # Multi-axis: any combination of 2+ distinct families
+    families = sum(1 for c in (has_funds, has_units, has_properties, has_co_state, has_weather, has_turn) if c)
+    if families >= 2:
         return CLS_STATE_MISMATCH_MULTI
     if has_funds:
         return CLS_STATE_MISMATCH_FUNDS
     if has_units:
         return CLS_STATE_MISMATCH_UNITS
+    if has_properties:
+        return CLS_STATE_MISMATCH_PROPERTIES
+    if has_co_state:
+        return CLS_STATE_MISMATCH_CO_STATE
+    if has_weather:
+        return CLS_STATE_MISMATCH_WEATHER
+    if has_turn:
+        return CLS_STATE_MISMATCH_TURN
     return CLS_STATE_MISMATCH_INVESTIGATE
 
 
@@ -664,7 +718,7 @@ def _run_replay_instrumented(
     #   len(envelopes)``) still have a post line for every non-terminal
     #   envelope; the pin must run for those too — otherwise
     #   ``_oracle_post_envelope_units_by_id`` stays wrong and
-    #   ``combatInfo`` display ×10 is the sole defender HP source. GL gid
+    #   ``combatInfo`` display × 10 is the sole defender HP source. GL gid
     #   **1631520** env 24: Anti-Air vs B-Copter with defender display ``1``
     #   (true internal **7** from ``hit_points`` 0.7) under-applied strike
     #   damage and counter by one display bucket.
@@ -814,7 +868,7 @@ def _run_replay_instrumented(
         #
         #   * Units whose HP changed in PHP via a non-Fire path that also
         #     diverges from the engine's view (CO power AOE, Sturm Meteor,
-        #     Hawke / Drake / Olaf / Von Bolt power damage, capture HP-lock,
+        #     Hawke / Drake / Olaf power damage, capture HP-lock,
         #     join + repair, fractional-internal carry-over from prior fires
         #     where the per-fire ``units_hit_points`` rounded the residue
         #     away).
@@ -842,7 +896,7 @@ def _run_replay_instrumented(
         # Match key: AWBW ``units_id`` first (when the engine unit's
         # ``unit_id`` was already aliased to AWBW via a Build action
         # during this replay), then ``(player_seat, x, y)`` as a
-        # fallback for predeploy units that still carry the engine's
+        # fallback for predeployed units that still carry the engine's
         # monotonic ``unit_id``.
         #
         # Hard rules:
@@ -866,7 +920,7 @@ def _run_replay_instrumented(
         #     oracle position rails must fix that, not this block.
         #
         # Validation: drives gid 1607045 from oracle_gap → ok and holds
-        # the canonical 935 ok / 1 oracle_gap floor at 936 / 0 / 0.
+        # the canonical 936 ok / 1 oracle_gap floor at 936 / 0 / 0.
         #
         # HP sync and id-death cull both use ``post_frame_for_sync = frames[env_i+1]``
         # whenever that frame exists. Tight zips (``len(frames) == len(envelopes)``)
@@ -1060,7 +1114,7 @@ def _run_replay_instrumented(
                 # before the diff, not only after HP sync above). Game ``1618984``
                 # env 5: implicit end-of-turn pre-roll grants P0 income encoded
                 # in ``php_frame``; snapping funds before pre-roll leaves engine
-                # +8000 vs PHP when the diff runs. Same PHP row as HP sync target.
+                # +8000 vs PHP when the diff runs.
                 for _pk, pl in (php_frame.get("players") or {}).items():
                     if not isinstance(pl, dict):
                         continue
@@ -1290,7 +1344,7 @@ class AuditRow:
             mid = env_mid if env_mid else None
         # Resolve recorded_at: explicit field wins; otherwise stamp ``now``
         # in UTC with the same ``YYYY-MM-DDTHH:MM:SSZ`` shape as
-        # ``tools.mcts_baseline.utc_now_iso_z``.
+        # ``tools/mcts_baseline.utc_now_iso_z``.
         recorded_at = self.recorded_at
         if recorded_at is None:
             recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1357,7 +1411,7 @@ def _seed_for_game(seed: int, games_id: int) -> int:
     """Mix the audit's process-wide seed with the games_id so each game has a
     deterministic-but-distinct RNG stream. Bit-mixing (rather than a string
     seed) keeps reseeding cheap and avoids hash-randomization sensitivity."""
-    return ((int(seed) & 0xFFFFFFFF) << 32) | (int(games_id) & 0xFFFFFFFF)
+    return ((int(seed) & 0xFFFF_FFFF) << 32) | (int(games_id) & 0xFFFF_FFFF)
 
 
 def _audit_one(
@@ -1380,6 +1434,8 @@ def _audit_one(
     # between ``ok`` and ``oracle_gap`` from one process to the next.
     random.seed(_seed_for_game(seed, games_id))
 
+    print(f"[DEBUG] pair_catalog_cos_ids: meta keys = {list(meta.keys())[:10]}", file=sys.stderr)
+    print(f"[DEBUG] co_p0_id={meta.get('co_p0_id')!r}, co_p1_id={meta.get('co_p1_id')!r}", file=sys.stderr)
     co_p0, co_p1 = pair_catalog_cos_ids(meta)
     map_id = _meta_int(meta, "map_id")
     tier = str(meta.get("tier", ""))
@@ -1438,6 +1494,9 @@ def _audit_one(
             replay_first_mover=first_mover,
         )
     except Exception as exc:  # noqa: BLE001 — pre-replay setup failures
+        # Debug: print traceback for ANY exception to stderr
+        import traceback as _tb
+        _tb.print_exc(file=sys.stderr)
         base.status = "first_divergence"
         cls, et, msg = _classify(exc)
         base.cls = cls if cls != CLS_ENGINE_BUG else CLS_LOADER_ERROR
@@ -1445,6 +1504,7 @@ def _audit_one(
         base.message = msg
         return base
 
+    print("[DEBUG] _audit_one: past inner try block", file=sys.stderr)
     progress = _ReplayProgress()
     # Phase 11K-FIRE-FRAC-COUNTER-SHIP — always pass ``frames`` so the
     # post-envelope ``units_id → internal_hp`` pin populates even when
@@ -1696,6 +1756,11 @@ def main() -> int:
                         enable_state_mismatch=args.enable_state_mismatch,
                         state_mismatch_hp_tolerance=args.state_mismatch_hp_tolerance,
                     )
+    except Exception as inner_exc:
+        import traceback as _tb2
+        print(f"[DEBUG] Inner exception: {inner_exc}", file=sys.stderr)
+        _tb2.print_exc(file=sys.stderr)
+        raise
             except Exception as exc:  # safety net — never let one zip stop the batch
                 row = AuditRow(
                     games_id=gid, map_id=_meta_int(meta, "map_id"),
@@ -1722,6 +1787,7 @@ def main() -> int:
                 f"[{row.games_id}] {row.cls:<28} day~{row.approx_day} "
                 f"acts={row.actions_applied} | {tail}"
             )
+            sys.stdout.flush()
 
     print()
     print(f"[desync_audit] register -> {args.register}")

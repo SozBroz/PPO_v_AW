@@ -682,6 +682,108 @@ def cancel_selection(session_id: str) -> tuple[dict[str, Any], Optional[str]]:
         return build_play_payload(session_id, state), None
 
 
+def _execute_auto_attack(
+    state: GameState, unit_pos: tuple[int, int], target_pos: tuple[int, int]
+) -> tuple[bool, str]:
+    """Execute auto-attack: select unit, move to adjacent tile, attack target.
+
+    Returns (success, error_message).
+    """
+    unit = state.get_unit_at(*unit_pos)
+    if unit is None:
+        return False, "No unit at selected position"
+    if unit.player != HUMAN_PLAYER:
+        return False, "Selected unit is not yours"
+
+    target = state.get_unit_at(*target_pos)
+    if target is None:
+        return False, "No enemy unit at target position"
+    if target.player == HUMAN_PLAYER:
+        return False, "Target is not an enemy unit"
+
+    # Find tiles adjacent to target that our unit can reach and attack from
+    from engine.action import (
+        Action, ActionType, compute_reachable_costs, get_attack_targets, get_legal_actions
+    )
+
+    reachable = compute_reachable_costs(state, unit)
+    if not reachable:
+        return False, "Unit cannot move anywhere"
+
+    # Find adjacent tiles to target that are in reachable set and can attack from
+    tr, tc = target_pos
+    best_tile = None
+    best_cost = float('inf')
+
+    for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+        ar, ac = tr + dr, tc + dc
+        if (ar, ac) not in reachable:
+            continue
+        # Check if we can attack from this tile
+        targets_from_here = get_attack_targets(state, unit, (ar, ac))
+        if target_pos in targets_from_here:
+            cost = reachable[(ar, ac)]
+            if cost < best_cost:
+                best_cost = cost
+                best_tile = (ar, ac)
+
+    if best_tile is None:
+        # Try indirect range too
+        from engine.unit import UNIT_STATS
+        stats = UNIT_STATS[unit.unit_type]
+        min_r, max_r = stats.min_range, stats.max_range
+        if min_r > 1:  # Indirect unit
+            for dr in range(-max_r, max_r + 1):
+                for dc in range(-max_r, max_r + 1):
+                    dist = abs(dr) + abs(dc)
+                    if dist < min_r or dist > max_r:
+                        continue
+                    ar, ac = tr + dr, tc + dc
+                    if (ar, ac) not in reachable:
+                        continue
+                    targets_from_here = get_attack_targets(state, unit, (ar, ac))
+                    if target_pos in targets_from_here:
+                        cost = reachable[(ar, ac)]
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_tile = (ar, ac)
+
+    if best_tile is None:
+        return False, "No path to attack this enemy"
+
+    # Execute: SELECT_UNIT
+    select_action = Action(ActionType.SELECT_UNIT, unit_pos=unit_pos)
+    legal = get_legal_actions(state)
+    if select_action not in legal:
+        return False, "Cannot select this unit (not legal)"
+    state.step(select_action)
+
+    # Execute: SELECT_UNIT again with move_pos (move to best tile)
+    move_action = Action(ActionType.SELECT_UNIT, unit_pos=unit_pos, move_pos=best_tile)
+    legal = get_legal_actions(state)
+    if move_action not in legal:
+        # Rollback - we already selected the unit, need to cancel
+        state.selected_unit = None
+        state.selected_move_pos = None
+        state.action_stage = ActionStage.SELECT
+        return False, "Cannot move to attack position (not legal)"
+    state.step(move_action)
+
+    # Execute: ATTACK
+    attack_action = Action(
+        ActionType.ATTACK,
+        unit_pos=unit_pos,
+        move_pos=best_tile,
+        target_pos=target_pos,
+    )
+    legal = get_legal_actions(state)
+    if attack_action not in legal:
+        return False, "Cannot attack from this position"
+    state.step(attack_action)
+
+    return True, ""
+
+
 def apply_human_step(
     session_id: str,
     data: dict[str, Any],
@@ -699,6 +801,28 @@ def apply_human_step(
             return build_play_payload(session_id, state, ok=False, error="Game already finished"), "done"
         if state.active_player != HUMAN_PLAYER:
             return build_play_payload(session_id, state, ok=False, error="Not human turn"), "turn"
+
+        # Handle auto-attack: select unit + click enemy = walk+attack in one action
+        kind = (data.get("kind") or "").lower()
+        if kind == "attack_unit":
+            unit_pos = data.get("unit_pos")
+            target_pos = data.get("target_pos")
+            if not unit_pos or not target_pos:
+                return build_play_payload(session_id, state, ok=False, error="attack_unit requires unit_pos and target_pos"), "missing params"
+            success, err_msg = _execute_auto_attack(
+                state, (int(unit_pos[0]), int(unit_pos[1])), (int(target_pos[0]), int(target_pos[1]))
+            )
+            if not success:
+                return build_play_payload(session_id, state, ok=False, error=err_msg), err_msg
+
+            # Run bot turn if needed
+            if not state.done and state.active_player == BOT_PLAYER:
+                meta = _session_meta.get(session_id, {})
+                model, _ = ensure_model_loaded(checkpoint_dir)
+                ob = meta.get("p1_opening_book")
+                _run_bot_turn(state, model, p1_opening_book=ob)
+
+            return build_play_payload(session_id, state), None
 
         model, err = ensure_model_loaded(checkpoint_dir)
         if err is not None:

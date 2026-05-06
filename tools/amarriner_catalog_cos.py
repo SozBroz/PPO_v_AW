@@ -22,9 +22,9 @@ def pair_catalog_cos_ids(g: dict[str, Any]) -> tuple[int, int]:
     Return ``(co_p0_id, co_p1_id)`` as ints.
 
     Raises
-    ------
+    -----
     ValueError
-        If either id is missing — callers must skip the game or fail fast.
+        If either id is missing or not an integer (e.g. 'N' placeholder from fogged listings).
     """
     a, b = g.get("co_p0_id"), g.get("co_p1_id")
     if a is None or b is None:
@@ -34,4 +34,15 @@ def pair_catalog_cos_ids(g: dict[str, Any]) -> tuple[int, int]:
             "Re-run `python tools/amarriner_gl_catalog.py build` after fixing portrait parsing, "
             "or edit data/amarriner_gl_std_catalog.json when the listing is wrong."
         )
-    return int(a), int(b)
+    # Guard against 'N' placeholders from fogged/unknown CO listings
+    try:
+        a_int = int(a)
+        b_int = int(b)
+    except (TypeError, ValueError) as exc:
+        gid = g.get("games_id", "?")
+        raise ValueError(
+            f"games_id={gid}: invalid co_p0_id={a!r} or co_p1_id={b!r} (not an integer). "
+            f"Original error: {exc}. "
+            "Re-run `python tools/amarriner_gl_catalog.py build` after fixing portrait parsing."
+        ) from exc
+    return a_int, b_int

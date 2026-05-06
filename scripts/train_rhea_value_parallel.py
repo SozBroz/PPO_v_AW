@@ -234,6 +234,22 @@ def _transition_to_payload(t: RheaTransition) -> dict[str, Any]:
     }
 
 
+def _maybe_disable_cop_for_seat(co_state, disable_prob: float = 0.10) -> bool:
+    """Randomly disable COP for a seat at game start (10% default).
+    
+    Returns True if COP was disabled for this seat.
+    Only applies if the CO has a COP (cop_stars is not None and has cop data).
+    """
+    if disable_prob <= 0.0:
+        return False
+    if co_state.cop_stars is None or co_state._data.get("cop") is None:
+        return False
+    if random.random() < disable_prob:
+        co_state.cop_activation_disabled = True
+        return True
+    return False
+
+
 def _payload_to_transition(p: dict[str, Any]) -> RheaTransition:
     return RheaTransition(
         spatial_before=p["spatial_before"],
@@ -543,6 +559,11 @@ def _actor_loop(
                 env.reset()
                 game_turns = 0
 
+                # 10% chance to disable COP for each seat at game start (forces SCOP learning)
+                cop_disable_p = getattr(args, "cop_disable_per_seat_p", 0.10)
+                for seat in (0, 1):
+                    _maybe_disable_cop_for_seat(env.state.co_states[seat], cop_disable_p)
+
                 # Set async rollout mode for logging if dual-gradient is enabled
                 if args.dual_gradient_self_play:
                     try:
@@ -712,6 +733,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--queue-size", type=int, default=2048)
     ap.add_argument("--actor-refresh-seconds", type=float, default=120.0)
     ap.add_argument("--verbose", action="store_true", help="Print diagnostic logs to stdout")
+
+    # COP disable (forces SCOP learning)
+    ap.add_argument("--cop-disable-per-seat-p", type=float, default=0.10,
+                      help="Probability (0-1) to disable COP for each seat at game start (default 0.10 = 10%%)")
 
     # RHEA search.
     ap.add_argument("--rhea-autotune", action="store_true",

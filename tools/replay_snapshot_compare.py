@@ -233,6 +233,10 @@ def compare_snapshot_to_engine(
     *,
     check_funds: bool = True,
     check_units: bool = True,
+    check_properties: bool = True,
+    check_co_states: bool = True,
+    check_weather: bool = True,
+    check_turn: bool = True,
 ) -> list[str]:
     """Return a list of human-readable mismatch lines (empty => match on checked axes)."""
     out: list[str] = []
@@ -240,4 +244,192 @@ def compare_snapshot_to_engine(
         out.extend(compare_funds(php_frame, state, awbw_to_engine))
     if check_units:
         out.extend(compare_units(php_frame, state, awbw_to_engine))
+    if check_properties:
+        out.extend(compare_properties(php_frame, state, awbw_to_engine))
+    if check_co_states:
+        out.extend(compare_co_states(php_frame, state, awbw_to_engine))
+    if check_weather:
+        out.extend(compare_weather(php_frame, state))
+    if check_turn:
+        out.extend(compare_turn(php_frame, state))
+    return out
+
+
+def compare_properties(
+    php_frame: dict[str, Any],
+    state: GameState,
+    awbw_to_engine: dict[int, int],
+) -> list[str]:
+    """Compare property ownership and capture points.
+
+    PHP buildings are keyed by database id; we match by (row, col) using
+    the engine ``PropertyState`` grid position.  PHP ``capture`` is 0–99
+    (99 = neutral/no owner, 20 = fully owned by the player whose
+    ``countries_id`` matches).  Engine ``capture_points`` is 0–20
+    (20 = fully owned).
+
+    Neutral PHP buildings (``capture == 99``) are skipped — engine
+    ``owner = None`` is correct.
+    """
+    out: list[str] = []
+    php_buildings = php_frame.get("buildings") or {}
+    # Build a map from (row, col) -> PHP building for matching
+    php_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
+    for _k, b in php_buildings.items():
+        if not isinstance(b, dict):
+            continue
+        try:
+            r, c = int(b["y"]), int(b["x"])
+        except (KeyError, ValueError):
+            continue
+        php_by_pos[(r, c)] = b
+
+    for prop in state.properties:
+        key = (prop.row, prop.col)
+        pb = php_by_pos.get(key)
+        if pb is None:
+            out.append(f"property at ({prop.row},{prop.col}) tid={prop.terrain_id} not in PHP snapshot")
+            continue
+        php_capture = int(pb.get("capture", 0) or 0)
+        php_last_capture = int(pb.get("last_capture", 20) or 20)
+        # PHP capture=99 means neutral; skip ownership check
+        if php_capture == 99:
+            if prop.owner is not None:
+                out.append(
+                    f"property at ({prop.row},{prop.col}) tid={prop.terrain_id} "
+                    f"engine_owner={prop.owner} php=neutral(capture=99)"
+                )
+            continue
+        # Determine expected engine owner from PHP capture state
+        # When capture < 20, the building is being captured by someone.
+        # We use last_capture (20 = owned by the player who placed it) to determine owner.
+        # This is approximate; AWBW's capture field doesn't directly encode owner.
+        # Use the country_to_player mapping from the map data.
+        expected_owner: Optional[int] = None
+        if php_capture >= 20:
+            # Fully owned — find which engine seat owns this country
+            cid = pb.get("countries_id")
+            if cid is not None:
+                try:
+                    cid_int = int(cid)
+                    ctp = state.map_data.country_to_player
+                    if ctp:
+                        expected_owner = ctp.get(cid_int)
+                except (ValueError, TypeError):
+                    pass
+        if expected_owner is not None and prop.owner != expected_owner:
+            out.append(
+                f"property at ({prop.row},{prop.col}) tid={prop.terrain_id} "
+                f"engine_owner={prop.owner} php_expected={expected_owner}"
+            )
+        # Compare capture points (scale: PHP 0-99 vs engine 0-20)
+        eng_cp = prop.capture_points
+        # PHP capture is ticks (0-99) where 20 = full; scale to 0-20
+        php_cp_scaled = max(0, min(20, (php_capture * 20 + 49) // 99))
+        # Also check last_capture (should be 20 when fully owned)
+        if php_capture < 20:
+            # Building is being captured — engine should reflect progress
+            if eng_cp != php_cp_scaled and abs(eng_cp - php_cp_scaled) > 2:
+                out.append(
+                    f"property at ({prop.row},{prop.col}) capture_points "
+                    f"engine={eng_cp} php_scaled={php_cp_scaled} (php_raw={php_capture})"
+                )
+    return out
+
+
+def compare_co_states(
+    php_frame: dict[str, Any],
+    state: GameState,
+    awbw_to_engine: dict[int, int],
+) -> list[str]:
+    """Compare CO power meter and activation state.
+
+    PHP ``players[]`` carries ``co_power`` (current stars),
+    ``co_max_power`` (COP stars), ``co_max_spower`` (SCOP stars),
+    and ``co_power_on`` (1 if a power is active this turn).
+
+    Engine ``COState`` carries ``cop_stars``, ``scop_stars``,
+    ``cop_active``, ``scop_active``, and internal meter tracking.
+    """
+    out: list[str] = []
+    players = php_frame.get("players") or {}
+    for _k, pl in players.items():
+        if not isinstance(pl, dict):
+            continue
+        try:
+            pid = int(pl["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        eng = awbw_to_engine.get(pid)
+        if eng is None or eng < 0 or eng >= len(state.co_states):
+            continue
+        co_state = state.co_states[eng]
+        # Compare power activation
+        php_power_on = int(pl.get("co_power_on", 0) or 0)
+        engine_power_active = 1 if (co_state.cop_active or co_state.scop_active) else 0
+        if php_power_on != engine_power_active:
+            power_type = "COP" if co_state.cop_active else ("SCOP" if co_state.scop_active else "none")
+            out.append(
+                f"P{eng} power_active engine={engine_power_active}({power_type}) php={php_power_on}"
+            )
+        # Compare approximate meter (PHP uses stars; engine uses internal meter)
+        # Only check when COP/SCOP is not active (meter is consumed on activation)
+        if not co_state.cop_active and not co_state.scop_active:
+            php_stars = int(pl.get("co_power", 0) or 0)
+            # Engine meter: cop_stars is the threshold; we can't directly read
+            # current meter without exposing internal state.  Log what we can.
+            if php_stars > 0:
+                # Engine doesn't expose raw meter in COState — log for visibility
+                out.append(
+                    f"P{eng} php_co_power_stars={php_stars} "
+                    f"cop_stars={co_state.cop_stars} scop_stars={co_state.scop_stars}"
+                )
+    return out
+
+
+def compare_weather(
+    php_frame: dict[str, Any],
+    state: GameState,
+) -> list[str]:
+    """Compare weather state.
+
+    PHP: ``weather_type`` / ``weather_code`` (numeric code or string).
+    Engine: ``state.weather`` is "clear", "rain", or "snow".
+    """
+    out: list[str] = []
+    php_weather = php_frame.get("weather_type") or php_frame.get("weather_code")
+    if php_weather is None:
+        return out
+    # Map PHP weather codes to engine strings
+    # PHP: 1=clear, 2=rain, 3=snow (approximate based on AWBW source)
+    weather_map = {1: "clear", 2: "rain", 3: "snow", "1": "clear", "2": "rain", "3": "snow"}
+    php_str = weather_map.get(php_weather)
+    if php_str is None:
+        php_str = str(php_weather).strip().lower()
+    eng_weather = state.weather
+    if php_str and eng_weather and php_str != eng_weather:
+        out.append(f"weather engine={eng_weather} php={php_str} (raw={php_weather})")
+    return out
+
+
+def compare_turn(
+    php_frame: dict[str, Any],
+    state: GameState,
+) -> list[str]:
+    """Compare turn/day number.
+
+    PHP: ``day`` field (1-indexed day number).
+    Engine: ``state.turn`` (1-indexed turn number, increments after P1 ends).
+    """
+    out: list[str] = []
+    php_day = php_frame.get("day")
+    if php_day is None:
+        return out
+    try:
+        php_day_int = int(php_day)
+    except (TypeError, ValueError):
+        return out
+    # Engine turn should match PHP day (both are 1-indexed day numbers)
+    if php_day_int != state.turn:
+        out.append(f"turn engine={state.turn} php_day={php_day_int}")
     return out
