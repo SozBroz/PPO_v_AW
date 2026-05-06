@@ -737,15 +737,16 @@ def _actor_loop(
         hist_checkpoint_path = args.hist_checkpoint_path
         if args.dual_gradient_self_play and args.dual_gradient_hist_prob > 0:
             if not hist_checkpoint_path:
-                # Auto-discover: use the oldest saved transition checkpoint as historical
+                # Auto-discover: use the oldest saved timestamped checkpoint as historical
                 try:
                     ckpt_dir = Path("checkpoints")
                     hist_candidates = sorted(
-                        ckpt_dir.glob("value_rhea_transition_*.pt"),
+                        [p for p in ckpt_dir.glob("value_rhea_*.pt")
+                         if p.name not in ("value_rhea_latest.pt", "value_rhea_latest_backup.pt")],
                         key=lambda p: p.stat().st_mtime
                     )
-                    if len(hist_candidates) >= 2:
-                        # Use a checkpoint from at least 2 saves ago (not the most recent)
+                    if len(hist_candidates) >= 1:
+                        # Use the oldest checkpoint as historical opponent
                         hist_checkpoint_path = str(hist_candidates[0])  # Oldest
                         print(json.dumps({
                             "event": "hist_checkpoint_auto_discovered",
@@ -869,6 +870,11 @@ def _actor_loop(
                         state = env.state
                         acting = int(state.active_player)
                         day = int(getattr(state, "turn", getattr(state, "day", 0)))
+
+                        # Swap value model if using historical checkpoint opponent
+                        if use_hist_checkpoint and hist_value_model is not None:
+                            # Use hist_value_model for opponent (seat 1 - enemy), current model for self (seat 0)
+                            fitness.value_model = hist_value_model if acting == 1 else value_model
 
                         # Encode before state using pre-allocated buffers
                         _encode_into(state, acting, spatial_buf, scalars_buf)
