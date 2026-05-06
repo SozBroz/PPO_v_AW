@@ -461,6 +461,15 @@ def compare_turn(
 
     PHP: ``day`` field (1-indexed day number).
     Engine: ``state.turn`` (1-indexed turn number, increments after P1 ends).
+
+    The PHP snapshot ``day`` is captured after the envelope's actions complete.
+    The engine increments ``state.turn`` in ``_end_turn`` only when the
+    active player is about to become P0 (i.e., P1 just ended).
+
+    Depending on cadence (explicit ``End`` vs implicit server-side end-of-turn),
+    the engine may or may not have incremented ``state.turn`` when we run
+    the comparison.  We accept both ``state.turn`` and ``state.turn + 1``
+    as valid matches for the PHP day.
     """
     out: list[str] = []
     php_day = php_frame.get("day")
@@ -470,7 +479,7 @@ def compare_turn(
         php_day_int = int(php_day)
     except (TypeError, ValueError):
         return out
-    # Engine turn should match PHP day (both are 1-indexed day numbers)
-    if php_day_int != state.turn:
+    # Accept both state.turn and state.turn+1 to handle increment timing
+    if php_day_int != state.turn and php_day_int != state.turn + 1:
         out.append(f"turn engine={state.turn} php_day={php_day_int}")
     return out
