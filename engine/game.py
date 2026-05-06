@@ -3052,7 +3052,7 @@ def make_initial_state(
     luck_seed: Optional[int] = None,
     spirit_map_is_std: Optional[bool] = True,
 ) -> GameState:
-    print(f"[DEBUG] make_initial_state: p0_co_id={p0_co_id}, p1_co_id={p1_co_id}", file=sys.stderr)
+
     # Treasuries always start at 0g in AWBW; the opening player receives income
     # at the start of their first turn via _grant_income below. ``starting_funds``
     # stays as a parameter only for non-AWBW experiments (tests/handicaps).
@@ -3082,11 +3082,10 @@ def make_initial_state(
         mt = MAX_TURNS
     if mt < 1:
         raise ValueError(f"max_days/max_turns must be >= 1, got {mt}")
-    print(f"[DEBUG] make_initial_state: loading properties", file=sys.stderr)
+
     props = _copy_mod.deepcopy(map_data.properties)
-    print(f"[DEBUG] make_initial_state: creating units", file=sys.stderr)
+
     units = specs_to_initial_units(map_data.predeployed_specs)
-    print(f"[DEBUG] make_initial_state: units created, types={[str(u) for u in units[0][:3]] + ['...']}", file=sys.stderr)
 
     # Deep-copy the mutable pieces of ``map_data`` that the engine writes to
     # during play. Terrain flips on seam break (113/114 → 115/116) must not

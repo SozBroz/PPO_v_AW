@@ -530,7 +530,7 @@ def encode_state(
     # Use Cython for property encoding if available
     if USE_CYTHON_ENCODER and _encoder_cython is not None:
         _encoder_cython.encode_properties(
-            spatial,
+            np.asarray(spatial),
             state,
             state.properties,
             observer,
@@ -590,7 +590,7 @@ def encode_state(
         
         # Encode observer units
         _encoder_cython.encode_units(
-            spatial,
+            np.asarray(spatial),
             state.units[observer],
             observer,
             belief_dict,
@@ -601,7 +601,7 @@ def encode_state(
         )
         # Encode enemy units
         _encoder_cython.encode_units(
-            spatial,
+            np.asarray(spatial),
             state.units[1 - observer],
             observer,
             belief_dict,
@@ -648,19 +648,18 @@ def encode_state(
     _fill_unit_modifier_planes(spatial, state, observer)
 
     # ── Terrain cache building optimization ─────────────────────────────────
-    if USE_CYTHON_ENCODER and terrain_block is None:
-        from rl import _encoder_cython
+    if USE_CYTHON_ENCODER and _encoder_cython is not None and terrain_block is None:
         H_md = min(md.height, GRID_SIZE)
         W_md = min(md.width, GRID_SIZE)
         tids_live = np.empty((H_md, W_md), dtype=np.int32)
         for r in range(H_md):
             tids_live[r, :] = md.terrain[r][:W_md]
-        
+
         terrain_block = np.zeros(
             (GRID_SIZE, GRID_SIZE, N_TERRAIN_CHANNELS), dtype=np.float32
         )
         defense_block = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
-        
+
         _encoder_cython.build_terrain_cache(
             tids_live,
             terrain_block,

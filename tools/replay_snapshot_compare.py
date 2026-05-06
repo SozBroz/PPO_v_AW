@@ -322,19 +322,34 @@ def compare_properties(
                 f"property at ({prop.row},{prop.col}) tid={prop.terrain_id} "
                 f"engine_owner={prop.owner} php_expected={expected_owner}"
             )
-        # Compare capture points (scale: PHP 0-99 vs engine 0-20)
+        # Compare capture points
+        # PHP capture is 0-20 (20 = full, matching engine scale).
+        # Some older AWBW versions may use 0-99; we handle both:
+        # If php_capture > 20, assume 0-99 scale and convert; otherwise use as-is.
         eng_cp = prop.capture_points
-        # PHP capture is ticks (0-99) where 20 = full; scale to 0-20
-        php_cp_scaled = max(0, min(20, (php_capture * 20 + 49) // 99))
-        # Also check last_capture (should be 20 when fully owned)
-        if php_capture < 20:
-            # Building is being captured — engine should reflect progress
-            if eng_cp != php_cp_scaled and abs(eng_cp - php_cp_scaled) > 2:
-                out.append(
-                    f"property at ({prop.row},{prop.col}) capture_points "
-                    f"engine={eng_cp} php_scaled={php_cp_scaled} (php_raw={php_capture})"
-                )
+        if php_capture > 20:
+            # Scale from 0-99 to 0-20
+            php_cp_scaled = max(0, min(20, (php_capture * 20 + 49) // 99))
+        else:
+            # Already in 0-20 scale
+            php_cp_scaled = php_capture
+        # Only report divergence if difference is significant (> 2 to absorb minor drift)
+        if eng_cp != php_cp_scaled and abs(eng_cp - php_cp_scaled) > 2:
+            out.append(
+                f"property at ({prop.row},{prop.col}) capture_points "
+                f"engine={eng_cp} php_scaled={php_cp_scaled} (php_raw={php_capture})"
+            )
     return out
+
+
+def _php_int_optional(val, default=0):
+    """Convert a PHP value to int, treating 'N' and None as the default."""
+    if val is None or val == 'N':
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
 
 
 def compare_co_states(
@@ -344,12 +359,18 @@ def compare_co_states(
 ) -> list[str]:
     """Compare CO power meter and activation state.
 
-    PHP ``players[]`` carries ``co_power`` (current stars),
-    ``co_max_power`` (COP stars), ``co_max_spower`` (SCOP stars),
+    PHP ``players[]`` carries ``co_power`` (current charge, in units of 1000 per star),
+    ``co_max_power`` (COP threshold * 1000), ``co_max_spower`` (SCOP threshold * 1000),
     and ``co_power_on`` (1 if a power is active this turn).
 
-    Engine ``COState`` carries ``cop_stars``, ``scop_stars``,
-    ``cop_active``, ``scop_active``, and internal meter tracking.
+    Engine ``COState`` carries ``cop_stars``, ``scop_stars`` (threshold stars),
+    ``cop_active``, ``scop_active``, and ``power_bar`` (current charge in 0..max).
+
+    Comparison logic:
+    - PHP ``co_power // 1000`` gives stars charged (2500 → 2 stars)
+    - Engine ``power_bar // 1000`` gives stars charged (3000 → 3 stars)
+    - We compare these normalized values, allowing a tolerance of 1 star
+      to absorb minor timing differences (end-of-turn vs start-of-turn snapshots).
     """
     out: list[str] = []
     players = php_frame.get("players") or {}
@@ -364,26 +385,30 @@ def compare_co_states(
         if eng is None or eng < 0 or eng >= len(state.co_states):
             continue
         co_state = state.co_states[eng]
-        # Compare power activation
-        php_power_on = int(pl.get("co_power_on", 0) or 0)
+
+        # Compare power activation — 'N' means fogged, skip comparison
+        php_power_on = _php_int_optional(pl.get("co_power_on"), 0)
         engine_power_active = 1 if (co_state.cop_active or co_state.scop_active) else 0
         if php_power_on != engine_power_active:
             power_type = "COP" if co_state.cop_active else ("SCOP" if co_state.scop_active else "none")
             out.append(
                 f"P{eng} power_active engine={engine_power_active}({power_type}) php={php_power_on}"
             )
-        # Compare approximate meter (PHP uses stars; engine uses internal meter)
-        # Only check when COP/SCOP is not active (meter is consumed on activation)
+
+        # Compare charge meter (only when no power is active)
         if not co_state.cop_active and not co_state.scop_active:
-            php_stars = int(pl.get("co_power", 0) or 0)
-            # Engine meter: cop_stars is the threshold; we can't directly read
-            # current meter without exposing internal state.  Log what we can.
-            if php_stars > 0:
-                # Engine doesn't expose raw meter in COState — log for visibility
-                out.append(
-                    f"P{eng} php_co_power_stars={php_stars} "
-                    f"cop_stars={co_state.cop_stars} scop_stars={co_state.scop_stars}"
-                )
+            php_charge = _php_int_optional(pl.get("co_power"), 0)
+            if php_charge > 0:
+                # Both values are in units of 1000 per star; convert to integer stars
+                php_stars = php_charge // 1000
+                eng_stars = co_state.power_bar // 1000
+                # Allow 1-star tolerance (timing: snapshot at end-of-turn vs start-of-turn)
+                if abs(php_stars - eng_stars) > 1:
+                    out.append(
+                        f"P{eng} charge_mismatch: "
+                        f"php={php_stars} stars (raw={php_charge}) "
+                        f"engine={eng_stars} stars (power_bar={co_state.power_bar})"
+                    )
     return out
 
 

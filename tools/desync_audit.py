@@ -727,8 +727,10 @@ def _run_replay_instrumented(
     #   trailing-count); see §813+. **Pre-diff** second resync when
     #   ``enable_state_mismatch`` fixed tight-pairing drift (Agent C2, 2026-04-22).
     for env_i, (_pid, day, actions) in enumerate(envelopes):
+
         has_post_for_sync = n_frames > env_i + 1
         if frames is not None and env_i < len(frames):
+
             oracle_set_php_id_tile_cache(state, frames[env_i])
         else:
             setattr(state, "_oracle_php_id_to_rc", {})
@@ -742,6 +744,7 @@ def _run_replay_instrumented(
                 except (TypeError, ValueError, KeyError):
                     continue
                 pin[uid] = max(0, min(100, int(round(hp * 10))))
+
             # Phase 11J-FINAL-LASTMILE — End-repaired post-frame exclusion.
             #
             # When an envelope ends with an explicit ``End`` action, AWBW
@@ -845,6 +848,7 @@ def _run_replay_instrumented(
             progress.last_day = day
             progress.last_action_kind = str(obj.get("action") or "?")
             progress.last_envelope_index = env_i
+
             try:
                 apply_oracle_action_json(
                     state, obj, awbw_to_engine, envelope_awbw_player_id=_pid
@@ -1168,12 +1172,12 @@ def _run_replay_instrumented(
 
 def _classify(exc: Optional[Exception]) -> tuple[str, str, str]:
     """Return (class, exception_type, message) for the register row."""
-    print("[DEBUG] Checking exc is None", file=sys.stderr)
+
     if exc is None:
         return CLS_OK, "", ""
     et = type(exc).__name__
     msg = str(exc)
-    print("[DEBUG] Checking StateMismatchError", file=sys.stderr)
+
     if isinstance(exc, StateMismatchError):
         return _classify_state_mismatch(exc.diff_summary), et, msg
     if isinstance(exc, UnsupportedOracleAction):
@@ -1436,8 +1440,7 @@ def _audit_one(
     # between ``ok`` and ``oracle_gap`` from one process to the next.
     random.seed(_seed_for_game(seed, games_id))
 
-    print(f"[DEBUG] pair_catalog_cos_ids: meta keys = {list(meta.keys())[:10]}", file=sys.stderr)
-    print(f"[DEBUG] co_p0_id={meta.get('co_p0_id')!r}, co_p1_id={meta.get('co_p1_id')!r}", file=sys.stderr)
+
     co_p0, co_p1 = pair_catalog_cos_ids(meta)
     map_id = _meta_int(meta, "map_id")
     tier = str(meta.get("tier", ""))
@@ -1506,14 +1509,13 @@ def _audit_one(
         base.message = msg
         return base
 
-    print("[DEBUG] _audit_one: past inner try block", file=sys.stderr)
     progress = _ReplayProgress()
     # Phase 11K-FIRE-FRAC-COUNTER-SHIP — always pass ``frames`` so the
     # post-envelope ``units_id → internal_hp`` pin populates even when
     # ``enable_state_mismatch`` is False (the standard 936 audit path).
     # ``enable_state_mismatch`` still controls only the per-envelope
     # state-diff snapshotting; the pin is a separate, cheap precompute.
-    print("[DEBUG] About to call _run_replay_instrumented", file=sys.stderr)
+
     exc = _run_replay_instrumented(
         state,
         envelopes,
@@ -1523,18 +1525,16 @@ def _audit_one(
         enable_state_mismatch=enable_state_mismatch,
         hp_internal_tolerance=state_mismatch_hp_tolerance,
     )
-    print("[DEBUG] Setting envelopes_total", file=sys.stderr)
+
     base.envelopes_total = progress.envelopes_total
     base.envelopes_applied = progress.envelopes_applied
     base.actions_applied = progress.actions_applied
 
-    print("[DEBUG] Checking exc is None", file=sys.stderr)
     if exc is None:
         base.status = "ok"
         base.cls = CLS_OK
         return base
 
-    print("[DEBUG] Checking StateMismatchError", file=sys.stderr)
     if isinstance(exc, StateMismatchError):
         # Snapshot-diff lane: NOT a first oracle divergence — the engine
         # consumed every action without raising; the divergence is silent
