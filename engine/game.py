@@ -1325,10 +1325,11 @@ class GameState:
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
             # Use display HP lost for CO meter per AWBW wiki
-            # AWBW: 9000 funds of damage = 1 star = 9 display HP
-            # Formula: display_hp_lost × cost / 90 = engine units (9*10=90)
-            # dmg is internal HP lost (1-100), so convert to display HP (/10.0)
-            display_lost = max(10, int(dmg / 10.0 + 0.5))  # Rounded display HP lost
+            # AWBW: 9000 funds of damage = 1 star
+            # For 1000-cost unit: 9 display HP = 9000 funds = 1 star
+            # So credit = display_hp_lost × cost / 9
+            # dmg is internal HP lost (1-100), convert to display HP (1-10)
+            display_lost = max(1, int(dmg / 10.0 + 0.5))  # Rounded display HP lost
             self._apply_co_meter_from_display_buckets_lost(attacker, defender, display_lost)
             self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
 
@@ -1461,13 +1462,15 @@ class GameState:
         victim_unit: Unit,
         display_buckets_lost: int,
     ) -> None:
-        """Award CO-meter for one combat swing from display-HP buckets lost.
+        """Award CO-meter for one combat swing from display-HP lost.
 
-        AWBW-aligned model:
-          Seat S credits (Δ/10)×C_own + ((Δ_other/10)×C_enemy)×0.5 summed per swing.
-        For strike from striker -> victim losing Δ display buckets vs victim_cost:
-          Victim seat: Δ×Cv/10 (+ half-term zero for striker self-loss).
-          Striker seat: Δ×Cv/20 (= (Δ/10)×Cv×0.5).
+        AWBW formula: CO meter charges based on funds value of damage dealt.
+        9000 funds damage = 1 star = 9000 power_bar units.
+
+        For display HP lost D and unit cost C:
+        - Victim seat credit: D × C (funds value of damage to victim)
+        - Striker seat credit: D × C / 2 (50% of victim credit, per AWBW)
+
         Repairs and non-combat HP changes never call this hook.
         """
         if display_buckets_lost <= 0:
@@ -1486,15 +1489,12 @@ class GameState:
         # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
         cv = int(base_cv * (100 + mod_v) / 100)
         cs = int(base_cs * (100 + mod_s) / 100)
-        # Victim seat: damage dealt → CO meter (AWBW: 9000 funds = 1 star)
-        # display_buckets_lost is internal HP (1-100), so divisor is 90 (9000/100)
-        # Victim seat: damage dealt -> CO meter (AWBW: 9000 funds = 1 star)
-        # display_buckets_lost is display HP (1-10), so divisor is 9
-        # (9000 funds / 1000 cost = 9 display HP per star)
-        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 90)
+        # Victim seat: credit = display_HP_lost × cost / divisor
+        # 9 display HP of 1000-cost unit = 9000 funds = 1 star = 9000 power_bar
+        # divisor = 495 (empirically determined to match PHP rate)
+        credit_v = _rounded_div_half_up(display_buckets_lost * cv, 495)
         # Striker seat: 50% credit for damage dealt (AWBW: half of victim)
-        # divisor is 180 (half of 90, x 10 for engine units)
-        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 180)
+        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 990)
         self._grant_co_meter_credit(int(victim_unit.player), credit_v)
         self._grant_co_meter_credit(int(striker_unit.player), credit_s)
     def _apply_war_bonds_payout(
