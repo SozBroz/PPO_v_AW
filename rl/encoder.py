@@ -13,7 +13,7 @@ Output shape: (H, W, N_CHANNELS) where H=W=30 (padded), N_CHANNELS is:
   - 7 unit modifier channels at occupied cells:
     move_delta/10, attack_delta/100, defense_delta/100, luck_min/100,
     luck_max/100, indirect_min_range/10, indirect_max_range/10
-  Total: 28 + 2 + 15 + 15 + 3 + 6 + 1 + 7 = 77 spatial channels
+  Total: 28 + 2 + 15 + 15 + 3 + 6 + 1 + 2 + 7 = 79 spatial channels
 
 Plus scalar features (**ego-centric**, ``observer`` = engine seat of “me”):
   - funds[me], funds[enemy] (normalized by 50000)
@@ -46,7 +46,7 @@ for enemy units when a belief overlay is provided.
 **Checkpoint compatibility:** legacy 62-channel zips (single HP) load via
 ``rl.ckpt_compat.load_maskable_ppo_compat``. Stem weights are expanded by
 duplicating the old HP channel into ``hp_lo`` / ``hp_hi`` and zero-filling
-newer channel slices. The 70→77 / 17→16 unit-modifier migration is handled by
+newer channel slices. The 70→77 / 17→16 unit-modifier migration and 77→79 CO-tile-bonus migration is handled by
 the same best-effort state-dict transplant. Optimizer state is stripped when a
 migration is materialized because parameter shapes no longer line up with Adam
 moments. See ``docs/hp_belief.md``.
@@ -64,12 +64,15 @@ from engine.threat import compute_influence_planes
 from engine.unit import UnitType
 from rl.encoder_unit_features import modifier_features_for_unit
 
-# Flag to enable/disable Cython optimizations
-USE_CYTHON = True
+# Single Cython flag — check once at import time
+USE_CYTHON_ENCODER = os.environ.get("AWBW_USE_CYTHON_ENCODER", "1") == "1"
 try:
-    from . import _encoder_cython
+    from rl import _encoder_cython
+    if not USE_CYTHON_ENCODER:
+        _encoder_cython = None  # Force-off via env var
 except ImportError:
-    USE_CYTHON = False
+    USE_CYTHON_ENCODER = False
+    _encoder_cython = None
 
 GRID_SIZE = 30
 N_UNIT_CHANNELS = 28       # 14 unit types × 2 players
@@ -80,6 +83,7 @@ N_CAPTURE_EXTRA_CHANNELS = 3  # p0 progress, p1 progress, neutral-income mask
 # Influence planes (MASTER_SPEC / influence_channels_spec); see ``compute_influence_planes``.
 N_INFLUENCE_CHANNELS = 6
 N_DEFENSE_STARS_CHANNELS = 1
+N_CO_TILE_ATTACK_CHANNELS = 2
 N_UNIT_MODIFIER_CHANNELS = 7
 N_SPATIAL_CHANNELS = (
     N_UNIT_CHANNELS
@@ -89,8 +93,9 @@ N_SPATIAL_CHANNELS = (
     + N_CAPTURE_EXTRA_CHANNELS
     + N_INFLUENCE_CHANNELS
     + N_DEFENSE_STARS_CHANNELS
+    + N_CO_TILE_ATTACK_CHANNELS
     + N_UNIT_MODIFIER_CHANNELS
-)  # 77
+)  # 79
 
 # First channel index for the 6-plane influence block (63..68).
 N_INFLUENCE_CHANNEL_BASE = (
@@ -101,7 +106,12 @@ N_INFLUENCE_CHANNEL_BASE = (
     + N_CAPTURE_EXTRA_CHANNELS
 )
 N_DEFENSE_STARS_CHANNEL = N_INFLUENCE_CHANNEL_BASE + N_INFLUENCE_CHANNELS
-N_UNIT_MODIFIER_CHANNEL_BASE = N_DEFENSE_STARS_CHANNEL + N_DEFENSE_STARS_CHANNELS
+N_CO_TILE_ATTACK_CHANNEL_BASE = N_DEFENSE_STARS_CHANNEL + N_DEFENSE_STARS_CHANNELS
+N_UNIT_MODIFIER_CHANNEL_BASE = N_CO_TILE_ATTACK_CHANNEL_BASE + N_CO_TILE_ATTACK_CHANNELS
+CO_TILE_ATTACK_CHANNEL_NAMES: tuple[str, ...] = (
+    "co_tile_attack_bonus_me",
+    "co_tile_attack_bonus_enemy",
+)
 UNIT_MODIFIER_CHANNEL_NAMES: tuple[str, ...] = (
     "move_delta_norm",
     "attack_delta_norm",
@@ -111,7 +121,7 @@ UNIT_MODIFIER_CHANNEL_NAMES: tuple[str, ...] = (
     "indirect_min_range_norm",
     "indirect_max_range_norm",
 )
-N_SCALARS = 16
+N_SCALARS = 20
 
 # Terrain one-hot categories
 TERRAIN_CATEGORIES: dict[str, int] = {
@@ -283,6 +293,132 @@ def _get_terrain_category(terrain_id: int) -> int:
         return cached
     return _compute_terrain_category_uncached(terrain_id)
 
+def _co_tile_attack_bonus_for_category(
+    category: int,
+    defense_norm: float,
+    co_state,
+) -> float:
+    """Return terrain/property attack bonus as a normalized percentage.
+
+    This is a map-position feature, not a replacement for combat math.
+    It tells the NN how attractive a tile is for terrain-sensitive COs.
+    """
+    co_id = int(getattr(co_state, "co_id", -1))
+    cop_active = bool(getattr(co_state, "cop_active", False))
+    scop_active = bool(getattr(co_state, "scop_active", False))
+
+    # Olaf (co_id=9): +10% ATK/DEF in snow (D2D, AWBW amarriner page:
+    # "Unaffected by snow, but rain affects him the same as snow would for others."
+    # The wiki doesn't explicitly state a D2D snow bonus, but the hover tooltip in
+    # AWBW shows +10% ATK/DEF when snow is active for Olaf.
+    if co_id == 9:
+        weather = getattr(co_state, "_weather_cache", "clear")
+        if weather == "snow":
+            return 0.10  # terrain-independent +10% ATK/DEF
+        return 0.0
+
+
+    # Lash (co_id=16): +10% per defense star from the attacker's tile.
+    # AWBW canon: D2D = +10%/star; COP = no change (only DEF doubled);
+    # SCOP = +20%/star (ATK doubled). 
+    # Air/copter exclusion is handled in `combat.py` / `attack_value_for_unit()`.
+    # This is a map-position feature — the NN learns air units don't benefit.
+    if co_id == 16:
+        stars = max(0.0, float(defense_norm)) * 4.0
+        if scop_active:
+            return stars * 0.20   # +20%/star during SCOP
+        # D2D and COP: +10%/star (COP only doubles defense, not ATK)
+        return stars * 0.10
+
+    # AWBW canon: D2D = +10%/star; COP = no change (only DEF doubled);
+    # SCOP = +20%/star (ATK doubled). Air units excluded.
+    if co_id == 16:
+        cls = None
+        try:
+            from engine.unit import UNIT_STATS
+            if unit is not None:
+                cls = UNIT_STATS[unit.unit_type].unit_class
+        except Exception:
+            pass
+        if cls not in ("air", "copter"):
+            stars = max(0.0, float(defense_norm)) * 4.0
+            if scop_active:
+                return stars * 0.20   # +20%/star during SCOP
+            return stars * 0.10   # D2D and COP: +10%/star
+
+    # Koal: roads.
+    if co_id == 21:
+        if category == TERRAIN_CATEGORIES["road"]:
+            if scop_active:
+                return 0.30
+            if cop_active:
+                return 0.20
+            return 0.10
+        return 0.0
+
+    # Jake: plains/fields.
+    if co_id == 22:
+        if category == TERRAIN_CATEGORIES["plain"]:
+            if scop_active:
+                return 0.40
+            if cop_active:
+                return 0.20
+            return 0.10
+        return 0.0
+
+    # Kindle: urban/property tiles, excluding missile silos. The encoder's
+    # main terrain categories do not include silos as properties, so every
+    # property category here is a valid urban bonus tile.
+    if co_id == 23:
+        if category in (
+            TERRAIN_CATEGORIES["city"],
+            TERRAIN_CATEGORIES["base"],
+            TERRAIN_CATEGORIES["airport"],
+            TERRAIN_CATEGORIES["port"],
+            TERRAIN_CATEGORIES["hq"],
+            TERRAIN_CATEGORIES["lab"],
+        ):
+            if scop_active:
+                return 1.30
+            if cop_active:
+                return 0.80
+            return 0.40
+        return 0.0
+
+    return 0.0
+
+
+def _fill_co_tile_attack_bonus_planes(
+    spatial: np.ndarray,
+    state: GameState,
+    observer: int,
+    terrain_block: np.ndarray,
+    defense_block: np.ndarray,
+) -> None:
+    """Fill observer-relative CO tile attack bonus planes.
+
+    Channel 0 of this block is for observer/me. Channel 1 is for enemy.
+    """
+    base = N_CO_TILE_ATTACK_CHANNEL_BASE
+    seats = (int(observer), 1 - int(observer))
+    for rel_idx, seat in enumerate(seats):
+        co_state = state.co_states[seat]
+        if int(getattr(co_state, "co_id", -1)) not in (16, 21, 22, 23):
+            continue
+        out_ch = base + rel_idx
+        for r in range(GRID_SIZE):
+            for c in range(GRID_SIZE):
+                # Empty padded rows/cols have all-zero terrain channels.
+                if not np.any(terrain_block[r, c, :]):
+                    continue
+                category = int(np.argmax(terrain_block[r, c, :]))
+                spatial[r, c, out_ch] = _co_tile_attack_bonus_for_category(
+                    category,
+                    float(defense_block[r, c]),
+                    co_state,
+                )
+
+
 
 def _fill_unit_modifier_planes(spatial: np.ndarray, state: GameState, observer: int) -> None:
     """
@@ -349,20 +485,15 @@ def encode_state(
     """
     H = min(state.map_data.height, GRID_SIZE)
     W = min(state.map_data.width, GRID_SIZE)
-    
-    # Feature flag for Cython
-    USE_CYTHON = os.environ.get("AWBW_USE_CYTHON_ENCODER", "1") == "1" and CYTHON_AVAILABLE
-    
-    # Memory-efficient channel encoding
-    # Use float16 for spatial data to reduce memory footprint
-    spatial_dtype = np.float16 if os.environ.get("AWBW_USE_FLOAT16", "0") == "1" else np.float32
-    
-    # Use more compact representation for unit channels
-    UNIT_CHANNEL_COMPRESSION = int(os.environ.get("AWBW_UNIT_CHANNEL_COMPRESSION", "1"))
 
     if out_spatial is not None:
         spatial = out_spatial
-        spatial.fill(0.0)
+        # Handle both numpy arrays and Cython memoryviews
+        if hasattr(spatial, 'fill'):
+            spatial.fill(0.0)
+        else:
+            # Memoryview — use slice assignment
+            spatial[...] = 0.0
     else:
         spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
 
@@ -386,7 +517,7 @@ def encode_state(
         defense_block = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
     np.copyto(
-        spatial[:, :, terrain_ch_offset : terrain_ch_offset + N_TERRAIN_CHANNELS],
+        np.asarray(spatial)[:, :, terrain_ch_offset : terrain_ch_offset + N_TERRAIN_CHANNELS],
         terrain_block,
     )
 
@@ -397,8 +528,7 @@ def encode_state(
     neutral_inc_ch = cap_ch1 + 1
     
     # Use Cython for property encoding if available
-    if USE_CYTHON:
-        from rl import _encoder_cython
+    if USE_CYTHON_ENCODER and _encoder_cython is not None:
         _encoder_cython.encode_properties(
             spatial,
             state,
@@ -452,8 +582,7 @@ def encode_state(
     hp_hi_ch = N_UNIT_CHANNELS + 1
     
     # Use Cython for unit encoding if available
-    if USE_CYTHON:
-        from . import _encoder_cython
+    if USE_CYTHON_ENCODER and _encoder_cython is not None:
         # BeliefState stores UnitBelief in _beliefs; expose as id -> belief for Cython.
         belief_dict = (
             {b.unit_id: b for b in belief.all()} if belief is not None else {}
@@ -513,13 +642,13 @@ def encode_state(
                 spatial[r, c, hp_lo_ch] = hp_lo
                 spatial[r, c, hp_hi_ch] = hp_hi
 
-    # ── Unit modifier planes (70..76) ───────────────────────────────────────
+    # ── Unit modifier planes (72..78) ───────────────────────────────────────
     # Kept in Python even when Cython is enabled so we reuse engine movement and
     # combat helpers directly instead of duplicating CO-specific rules in C++.
     _fill_unit_modifier_planes(spatial, state, observer)
 
     # ── Terrain cache building optimization ─────────────────────────────────
-    if USE_CYTHON and terrain_block is None:
+    if USE_CYTHON_ENCODER and terrain_block is None:
         from rl import _encoder_cython
         H_md = min(md.height, GRID_SIZE)
         W_md = min(md.width, GRID_SIZE)
@@ -560,49 +689,68 @@ def encode_state(
     spatial[:, :, infl_base + 5] = c_en
 
     # ── Map-static defense stars (channel 69) ────────────────────────────────
-    np.copyto(spatial[:, :, N_DEFENSE_STARS_CHANNEL], defense_block)
+    np.copyto(np.asarray(spatial)[:, :, N_DEFENSE_STARS_CHANNEL], defense_block)
+    
+    # ── CO-specific tile attack bonuses (channels 70..71) ────────────────────
+    _fill_co_tile_attack_bonus_planes(spatial, state, observer, terrain_block, defense_block)
 
     # ── Scalar features (ego-centric) ───────────────────────────────────────
     enemy = 1 - int(observer)
     co_me = state.co_states[observer]
     co_en = state.co_states[enemy]
 
-    # Normalise power bar against the current SCOP threshold (grows with power_uses)
-    def _norm_power(co_state) -> float:
-        denom = co_state._scop_threshold
-        if denom <= 0 or denom >= 10**11:
-            return 0.0
-        return min(1.0, float(co_state.power_bar) / denom)
-
     weather = getattr(state, "weather", "clear")
     my_turn = 1.0 if int(state.active_player) == int(observer) else 0.0
+
+    # Power meter encoding — what humans see when hovering the CO power bar:
+    #   * power_bar   — raw funds-equivalent power accumulated
+    #   * cop_stars   — stars needed for COP (0 for Von Bolt, None→0)
+    #   * scop_stars  — stars needed for SCOP
+    # The NN can trivially compute progress ratios from these.
+    def _cop_stars_norm(cs) -> float:
+        s = cs.cop_stars
+        if s is None:
+            return 0.0
+        return min(10.0, float(s)) / 10.0
+
+    def _scop_stars_norm(cs) -> float:
+        return min(10.0, float(cs.scop_stars)) / 10.0
+
     if out_scalars is not None:
         scalars = out_scalars
         scalars[0] = state.funds[observer] / 50_000.0
         scalars[1] = state.funds[enemy] / 50_000.0
-        scalars[2] = _norm_power(co_me)
-        scalars[3] = _norm_power(co_en)
-        scalars[4] = float(co_me.cop_active)
-        scalars[5] = float(co_me.scop_active)
-        scalars[6] = float(co_en.cop_active)
-        scalars[7] = float(co_en.scop_active)
-        scalars[8] = state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS)))
-        scalars[9] = my_turn
-        scalars[10] = co_me.co_id / 30.0
-        scalars[11] = co_en.co_id / 30.0
-        scalars[12] = 1.0 if weather == "rain" else 0.0
-        scalars[13] = 1.0 if weather == "snow" else 0.0
-        scalars[14] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
-        scalars[15] = _income_share_for(state, observer)
+        scalars[2] = co_me.power_bar / 50_000.0          # raw power built
+        scalars[3] = _cop_stars_norm(co_me)              # COP cost in stars
+        scalars[4] = _scop_stars_norm(co_me)             # SCOP cost in stars
+        scalars[5] = float(co_me.cop_active)
+        scalars[6] = float(co_me.scop_active)
+        scalars[7] = co_en.power_bar / 50_000.0
+        scalars[8] = _cop_stars_norm(co_en)
+        scalars[9] = _scop_stars_norm(co_en)
+        scalars[10] = float(co_en.cop_active)
+        scalars[11] = float(co_en.scop_active)
+        scalars[12] = state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS)))
+        scalars[13] = my_turn
+        scalars[14] = co_me.co_id / 30.0
+        scalars[15] = co_en.co_id / 30.0
+        scalars[16] = 1.0 if weather == "rain" else 0.0
+        scalars[17] = 1.0 if weather == "snow" else 0.0
+        scalars[18] = getattr(state, "co_weather_segments_remaining", 0) / 2.0
+        scalars[19] = _income_share_for(state, observer)
     else:
         scalars = np.array(
             [
                 state.funds[observer] / 50_000.0,
                 state.funds[enemy] / 50_000.0,
-                _norm_power(co_me),
-                _norm_power(co_en),
+                co_me.power_bar / 50_000.0,          # raw power
+                _cop_stars_norm(co_me),
+                _scop_stars_norm(co_me),
                 float(co_me.cop_active),
                 float(co_me.scop_active),
+                co_en.power_bar / 50_000.0,
+                _cop_stars_norm(co_en),
+                _scop_stars_norm(co_en),
                 float(co_en.cop_active),
                 float(co_en.scop_active),
                 state.turn / max(1, int(getattr(state, "max_turns", MAX_TURNS))),
@@ -644,7 +792,8 @@ def _income_share_for(state: GameState, observer: int) -> float:
 # 62:     neutral income mask     (owner None, income-contributing)
 # 63-68:  influence planes        (threat/reach/capture-ETA me × 3, enemy × 3)
 # 69:     defense stars           (/4, map-static)
-# 70-76:  unit modifiers          (move/atk/def/luck/indirect)
+# 70-71:  CO tile attack bonus planes (me/enemy)
+# 72-78:  unit modifiers          (move/atk/def/luck/indirect)
 
 CHANNEL_GROUPS = {
     "units_me":         (0, 14),
@@ -658,13 +807,15 @@ CHANNEL_GROUPS = {
     "neutral_income":   (62, 63),
     "influence":        (63, 69),
     "defense_stars":    (69, 70),
-    "unit_modifiers":   (70, 77),
+    "co_tile_attack_bonus": (70, 72),
+    "unit_modifiers":   (72, 79),
 }
 
 SCALAR_LABELS = [
     "funds_me", "funds_enemy",
-    "co_power_bar_me", "co_power_bar_enemy",
+    "power_bar_me", "cop_stars_me", "scop_stars_me",
     "cop_active_me", "scop_active_me",
+    "power_bar_enemy", "cop_stars_enemy", "scop_stars_enemy",
     "cop_active_enemy", "scop_active_enemy",
     "turn_norm", "my_turn",
     "co_id_me", "co_id_enemy",

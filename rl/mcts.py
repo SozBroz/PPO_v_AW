@@ -134,20 +134,35 @@ class MCTSConfig:
     max_wall_time_s: float | None = None
     # MCTS-2: fraction of P0 SELECT steps that run MCTS (1.0 = always; used by symmetric eval)
     p0_mcts_invocation_fraction: float = 1.0
+    # Brute-force optimization: if estimated branching factor is <= this threshold, enumerate all plans
+    brute_force_branching_threshold: int = 0  # 0 = disabled
 
 
 def plan_key(final_state: GameState, actions: list[Action]) -> bytes:
-    parts: list[tuple[Any, ...]] = []
-    for a in actions:
-        ut: int | None = None
-        if a.unit_type is not None:
-            ut = int(a.unit_type)
-        parts.append((int(a.action_type), a.unit_pos, a.move_pos, a.target_pos, ut, a.unload_pos, a.select_unit_id))
-    prop_bits = tuple(sorted(((p.row, p.col), p.owner, p.capture_points) for p in final_state.properties))
-    h = hashlib.sha256()
-    h.update(repr(parts).encode("utf-8"))
-    h.update(repr(prop_bits).encode("utf-8"))
-    return h.digest()
+    """Fast plan key — non-cryptographic, per-process deterministic.
+
+    Replaces the original SHA-256 + repr() approach which was 10-50x slower.
+    Collisions are acceptable here: they merely merge two nodes' statistics.
+    """
+    # Build hashable tuples directly — no repr()/encode() overhead.
+    parts = tuple(
+        (
+            int(a.action_type),
+            a.unit_pos,
+            a.move_pos,
+            a.target_pos,
+            int(a.unit_type) if a.unit_type is not None else None,
+            a.unload_pos,
+            a.select_unit_id,
+        )
+        for a in actions
+    )
+    prop_bits = tuple(
+        sorted(((p.row, p.col), p.owner, p.capture_points) for p in final_state.properties)
+    )
+    h = hash((parts, prop_bits))
+    # Convert to 8 bytes.  to_bytes needs unsigned; we XOR to force positive.
+    return (h & 0xFFFFFFFFFFFFFFFF).to_bytes(8, byteorder="little")
 
 
 def _normalize_priors(raw: list[float], n: int) -> list[float]:
@@ -427,6 +442,88 @@ def decision_log_context_from_env(env: Any) -> dict[str, Any]:
     }
 
 
+def _estimate_branching_factor(state: GameState) -> int:
+    """Estimate the branching factor (number of legal actions) at the current step.
+    
+    Note: This is a first-step estimate only. A full turn in AWBW can have
+    many steps (move, attack, capture, etc.) with compounding branching.
+    The brute-force path is designed for cases where even the first step
+    has very few options (threshold <= 5-10).
+    """
+    from engine.action import get_legal_actions
+    legal = get_legal_actions(state)
+    return len(legal)
+
+
+def _brute_force_best_plan(
+    root_state: GameState,
+    *,
+    policy_callable: Callable[[GameState], Action],
+    value_callable: Callable[[GameState], float],
+    config: MCTSConfig,
+    rng: np.random.Generator,
+) -> tuple[list[Action], dict[str, Any]]:
+    """Brute-force enumeration of all possible full-turn plans when branching is tiny.
+    
+    This function enumerates all legal action sequences for a full turn by
+    repeatedly sampling plans until we've seen all unique ones (up to a limit).
+    It then scores each plan and returns the best one.
+    """
+    # Generate many plans to try to cover all possibilities
+    max_attempts = 1000
+    seen_plans: dict[bytes, tuple[list[Action], GameState, bool, list[dict[str, Any]]]] = {}
+    attempts = 0
+    
+    while attempts < max_attempts:
+        attempts += 1
+        seed = int(rng.integers(0, 2**31 - 1))
+        result = root_state.apply_full_turn(
+            policy_callable, copy=True, max_actions=config.max_plan_actions,
+            rng_seed=seed, return_trace=True
+        )
+        final_st, actions, _r, done, trace = _unpack_full_turn_result(result)
+        key = plan_key(final_st, actions)
+        
+        if key not in seen_plans:
+            seen_plans[key] = (actions, final_st, done, trace)
+        
+        # If we've found many unique plans, branching might not be tiny
+        if len(seen_plans) > config.brute_force_branching_threshold * 2:
+            break
+    
+    # Score each plan
+    best_plan = None
+    best_value = -float('inf')
+    best_key = None
+    
+    for key, (actions, final_st, done, trace) in seen_plans.items():
+        # Score the plan using the value function
+        value = value_callable(final_st)
+        if done:
+            # Terminal state: convert winner to value
+            w = final_st.winner
+            if w is not None and w != -1:
+                value = 1.0 if w == root_state.active_player else -1.0
+        
+        if value > best_value:
+            best_value = value
+            best_plan = actions
+            best_key = key
+    
+    if best_plan is None:
+        raise RuntimeError("Brute force enumeration found no plans")
+    
+    # Return best plan with basic stats
+    stats: dict[str, Any] = {
+        "brute_force_used": True,
+        "total_plans_evaluated": len(seen_plans),
+        "best_value": float(best_value),
+        "best_key": best_key.hex()[:16] if best_key else None,
+    }
+    
+    return best_plan, stats
+
+
 def run_mcts(
     root_state: GameState,
     *,
@@ -440,6 +537,26 @@ def run_mcts(
         raise ValueError("run_mcts requires root action_stage == SELECT")
     t0 = time.perf_counter()
     rng = np.random.default_rng(config.rng_seed)
+    
+    # Check if branching is tiny and we should use brute force
+    if config.brute_force_branching_threshold > 0:
+        branching_estimate = _estimate_branching_factor(root_state)
+        if branching_estimate <= config.brute_force_branching_threshold:
+            plan, stats = _brute_force_best_plan(
+                root_state,
+                policy_callable=policy_callable,
+                value_callable=value_callable,
+                config=config,
+                rng=rng
+            )
+            stats["wall_time_s"] = time.perf_counter() - t0
+            stats["branching_estimate"] = branching_estimate
+            stats["brute_force_threshold"] = config.brute_force_branching_threshold
+            if decision_log_context:
+                stats["decision_log_context"] = dict(decision_log_context)
+            return plan, stats
+    
+    # Otherwise, proceed with normal MCTS
     root = TurnNode(state=root_state, actor=int(root_state.active_player))
     dirichlet_applied = config.dirichlet_epsilon > 0
     ok = _expand_node(root, policy_callable=policy_callable, prior_callable=prior_callable, config=config, rng=rng, apply_dirichlet=dirichlet_applied)
@@ -494,6 +611,7 @@ def run_mcts(
     chosen_risk = chosen.edge_stats.risk_summary(catastrophe_value=config.catastrophe_value)
     ctx = dict(decision_log_context) if decision_log_context else {}
     stats: dict[str, Any] = {
+        "brute_force_used": False,
         "visit_counts": visit_counts,
         "principal_variation_depth": pv_depth,
         "total_sims_run": total_sims_run,

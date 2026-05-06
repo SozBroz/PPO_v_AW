@@ -177,6 +177,8 @@ TRUNCATION_PENALTY_ENV = "AWBW_TRUNCATION_PENALTY"
 # End-turn "hoarding" penalty: subtract when learner ends turn with bank above threshold.
 HOARD_FUNDS_THRESHOLD_ENV = "AWBW_HOARD_FUNDS_THRESHOLD"
 HOARD_PENALTY_ENV = "AWBW_HOARD_PENALTY"
+# End-turn "building punishment": subtract when learner ends turn with owned bases but didn't build.
+BUILD_PUNISHMENT_ENV = "AWBW_BUILD_PUNISHMENT"
 # Terminal shaping: ``AWBW_INCOME_TERM_COEF`` × (income_props_p0 − p1) / cap_limit when episode ends.
 INCOME_TERM_COEF_ENV = "AWBW_INCOME_TERM_COEF"
 # When ``1``, zero all BUILD action-mask entries except ``INFANTRY`` (narrow bootstrap).
@@ -1118,6 +1120,14 @@ class AWBWEnv(gym.Env):
         if self._hoard_penalty < 0.0:
             self._hoard_penalty = 0.0
 
+        # Building punishment: END_TURN with owned bases but no build (read once at spawn).
+        try:
+            self._build_punishment = float(os.environ.get(BUILD_PUNISHMENT_ENV, "0") or 0.0)
+        except ValueError:
+            self._build_punishment = 0.0
+        if self._build_punishment < 0.0:
+            self._build_punishment = 0.0
+
         # Reward shaping mode + Φ coefficients — read once per env instance
         # so SubprocVecEnv workers inherit a stable value at spawn. Restart
         # the run to change. See plan rl_capture-combat_recalibration.
@@ -1692,6 +1702,7 @@ class AWBWEnv(gym.Env):
         self._episode_reward_capture_interrupt_cumulative: list[float] = [0.0, 0.0]
         self._episode_reward_enemy_property_loss_cumulative: list[float] = [0.0, 0.0]
         self._episode_reward_phi_potential_delta_cumulative: list[float] = [0.0, 0.0]
+        self._episode_reward_build_punishment_cumulative: list[float] = [0.0, 0.0]
         # Snapshot opponent reload count at episode start so we can
         # report per-episode reloads in the log record.
         self._opponent_reloads_at_start: int = int(
@@ -1873,6 +1884,7 @@ class AWBWEnv(gym.Env):
         sparse_total = 0.0
         done = False
         rc = {"learner_engine_signed_sparse_capture": 0.0}
+        build_action_taken = False
         # Opening-book candidate lists are built with capture MOVE gate off; engine
         # step uses the same legality so masks and STEP-GATE agree.
         _step_capture_ctx: Any = (
@@ -1884,6 +1896,9 @@ class AWBWEnv(gym.Env):
             for sub in (candidate.first, candidate.second):
                 if sub is None:
                     continue
+                # Track if any BUILD action was taken this turn
+                if sub.action_type == ActionType.BUILD:
+                    build_action_taken = True
                 phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag, _phi_as_mag = (
                     self._phi_power_activation_and_attack_bonus(
                         sub, acting, self.state, learner_frame=True
@@ -2119,6 +2134,24 @@ class AWBWEnv(gym.Env):
             hoard_pen_v = -float(self._hoard_penalty)
             reward -= float(self._hoard_penalty)
         rc["end_turn_hoard_penalty"] = hoard_pen_v
+
+        # Building punishment: END_TURN with owned bases but no build
+        build_punish_v = 0.0
+        if (
+            self._build_punishment > 0.0
+            and self.state is not None
+            and action.action_type == ActionType.END_TURN
+            and not build_action_taken
+            and self._player_has_bases(self.state, acting)
+        ):
+            # Punishment equal to being down 30k unit value to opponent (increased from 6k)
+            # Since phi_alpha is the army value coefficient, being down 30k is -30000 * phi_alpha
+            punishment = -30000.0 * self._phi_alpha
+            build_punish_v = punishment
+            reward += punishment
+        rc["end_turn_build_punishment"] = build_punish_v
+        if build_punish_v != 0.0 and hasattr(self, "_episode_reward_build_punishment_cumulative"):
+            self._episode_reward_build_punishment_cumulative[acting] += float(build_punish_v)
 
         # Partial win at the P0 step cap: engine never emits ±1 without a terminal, so
         # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a
@@ -2481,6 +2514,7 @@ class AWBWEnv(gym.Env):
         rc_actor: dict[str, float] = {
             "acting_engine_sparse_plus_capture_shaping": 0.0,
         }
+        build_action_taken = False
         book_steers_capture = self._peek_learner_book_flat_safe_ungated() is not None
         _dg_step_capture_ctx: Any = (
             _without_capture_move_gate()
@@ -2491,6 +2525,9 @@ class AWBWEnv(gym.Env):
             for sub in (candidate.first, candidate.second):
                 if sub is None:
                     continue
+                # Track if any BUILD action was taken this turn
+                if sub.action_type == ActionType.BUILD:
+                    build_action_taken = True
                 phi_power_b, phi_power_b_act, phi_power_rc, _phi_pa_mag_dg, _phi_as_mag_dg = (
                     self._phi_power_activation_and_attack_bonus(
                         sub, acting, self.state, learner_frame=False
@@ -2669,6 +2706,25 @@ class AWBWEnv(gym.Env):
                 except ValueError:
                     pass
         rc["truncation_penalty_awbw_trunc"] = float(trunc_pen_v)
+
+        # Building punishment: END_TURN with owned bases but no build
+        build_punish_v = 0.0
+        if (
+            self._build_punishment > 0.0
+            and self.state is not None
+            and action is not None
+            and action.action_type == ActionType.END_TURN
+            and not build_action_taken
+            and self._player_has_bases(self.state, acting)
+        ):
+            # Punishment equal to being down 30k unit value to opponent (increased from 6k)
+            # Since phi_alpha is the army value coefficient, being down 30k is -30000 * phi_alpha
+            punishment = -30000.0 * self._phi_alpha
+            build_punish_v = punishment
+            reward += punishment
+        rc["end_turn_build_punishment"] = build_punish_v
+        if build_punish_v != 0.0 and hasattr(self, "_episode_reward_build_punishment_cumulative"):
+            self._episode_reward_build_punishment_cumulative[acting] += float(build_punish_v)
 
         _rc_sum = sum(rc.values())
         rc["_component_sum_gap"] = float(reward - _rc_sum)
@@ -3375,6 +3431,17 @@ class AWBWEnv(gym.Env):
             for p in state.properties
             if (int(p.row), int(p.col)) in pre_cells and p.owner == int(new_owner_seat)
         )
+
+    def _player_has_bases(self, state: GameState, seat: int) -> bool:
+        """Check if player has any bases (factories, airports, ports) they own."""
+        for prop in state.properties:
+            if prop.owner == seat and (
+                bool(getattr(prop, "is_base", False)) or
+                bool(getattr(prop, "is_airport", False)) or
+                bool(getattr(prop, "is_port", False))
+            ):
+                return True
+        return False
 
     def _phi_enemy_kill_one_time_bonus(
         self, pre_enemy_alive: dict[int, tuple[UnitType, int]]
@@ -4137,6 +4204,7 @@ class AWBWEnv(gym.Env):
                     "designed_desires_checkpoint": float(getattr(self, "_episode_reward_designed_desires_cumulative", [0.0, 0.0])[0]),
                     "capture_interrupt": float(getattr(self, "_episode_reward_capture_interrupt_cumulative", [0.0, 0.0])[0]),
                     "enemy_property_loss": float(getattr(self, "_episode_reward_enemy_property_loss_cumulative", [0.0, 0.0])[0]),
+                    "build_punishment": float(getattr(self, "_episode_reward_build_punishment_cumulative", [0.0, 0.0])[0]),
                     "sparse_terminal": float(getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[0]),
                     "phi_day_cap_terminal_replacement": float(
                         getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[0]
@@ -4156,6 +4224,7 @@ class AWBWEnv(gym.Env):
                     "designed_desires_checkpoint": float(getattr(self, "_episode_reward_designed_desires_cumulative", [0.0, 0.0])[1]),
                     "capture_interrupt": float(getattr(self, "_episode_reward_capture_interrupt_cumulative", [0.0, 0.0])[1]),
                     "enemy_property_loss": float(getattr(self, "_episode_reward_enemy_property_loss_cumulative", [0.0, 0.0])[1]),
+                    "build_punishment": float(getattr(self, "_episode_reward_build_punishment_cumulative", [0.0, 0.0])[1]),
                     "sparse_terminal": float(getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[1]),
                     "phi_day_cap_terminal_replacement": float(
                         getattr(self, "_episode_reward_sparse_cumulative", [0.0, 0.0])[1]

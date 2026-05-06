@@ -12,6 +12,7 @@ place.
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
@@ -28,6 +29,19 @@ from engine.combat import damage_range
 from engine.game import GameState
 from engine.terrain import get_terrain
 from engine.unit import UNIT_STATS, Unit, UnitType
+
+# Try to import Cython-optimized version
+try:
+    from . import _candidate_actions_cython
+    CANDIDATE_CYTHON_AVAILABLE = True
+except ImportError:
+    CANDIDATE_CYTHON_AVAILABLE = False
+    _candidate_actions_cython = None  # noqa: F401 — used when available
+
+USE_CANDIDATE_CYTHON = (
+    CANDIDATE_CYTHON_AVAILABLE
+    and os.environ.get("AWBW_USE_CANDIDATE_CYTHON", "1") == "1"
+)
 
 MAX_CANDIDATES = 4096
 CANDIDATE_FEATURE_DIM = 24
@@ -246,6 +260,8 @@ def _fill_preview_features(f: np.ndarray, preview: dict[str, float]) -> None:
 
 
 def candidate_to_features(state: GameState, cand: CandidateAction) -> np.ndarray:
+    if USE_CANDIDATE_CYTHON:
+        return _candidate_actions_cython.candidate_to_features_cython(state, cand)
     action = cand.terminal_action
     ut: UnitType | None = action.unit_type
     if action.unit_pos is not None:
@@ -383,12 +399,33 @@ def candidate_arrays(
     state: GameState,
     *,
     max_candidates: int = MAX_CANDIDATES,
+    feats_buf: np.ndarray | None = None,
+    mask_buf: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[CandidateAction]]:
+    """Enumerate candidates and return padded feature array + mask + candidate list.
+
+    Optional *feats_buf* / *mask_buf* let callers reuse allocations across
+    repeated calls (e.g. inside a rollout loop) — pass pre-allocated arrays
+    of the correct shape to skip the alloc entirely.
+    """
     cands = enumerate_candidates(state)
-    feats = np.zeros((max_candidates, CANDIDATE_FEATURE_DIM), dtype=np.float32)
-    mask = np.zeros((max_candidates,), dtype=bool)
     n = min(len(cands), max_candidates)
+
+    # Reuse or allocate feature buffer.
+    if feats_buf is not None and feats_buf.shape == (max_candidates, CANDIDATE_FEATURE_DIM):
+        feats = feats_buf
+    else:
+        feats = np.zeros((max_candidates, CANDIDATE_FEATURE_DIM), dtype=np.float32)
+
+    # Reuse or allocate mask buffer; always reset the active slice.
+    if mask_buf is not None and mask_buf.shape == (max_candidates,):
+        mask = mask_buf
+        mask[:n] = True
+        mask[n:] = False
+    else:
+        mask = np.zeros((max_candidates,), dtype=bool)
+        mask[:n] = True
+
     for i in range(n):
         feats[i] = candidate_to_features(state, cands[i])
-        mask[i] = True
     return feats, mask, cands

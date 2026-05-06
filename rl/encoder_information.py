@@ -59,10 +59,14 @@ NOT_IN_OBSERVATION: frozenset[str] = frozenset(
 SCALAR_NAMES: tuple[str, ...] = (
     "funds_me",
     "funds_enemy",
-    "power_norm_me",
-    "power_norm_enemy",
+    "power_bar_me",
+    "cop_stars_me",
+    "scop_stars_me",
     "cop_active_me",
     "scop_active_me",
+    "power_bar_enemy",
+    "cop_stars_enemy",
+    "scop_stars_enemy",
     "cop_active_enemy",
     "scop_active_enemy",
     "turn_norm",
@@ -78,43 +82,28 @@ SCALAR_NAMES: tuple[str, ...] = (
 
 @dataclass
 class RecoveredScalars:
-    """Inferred values from the 16-d scalar vector (``encode_state`` order)."""
+    """Inferred values from the 20-d scalar vector (``encode_state`` order)."""
 
     raw: np.ndarray
     funds_me: float
     funds_enemy: float
-    co_id_me: int
-    co_id_enemy: int
+    power_bar_me: float
+    cop_stars_me: int
+    scop_stars_me: int
+    cop_active_me: float
+    scop_active_me: float
+    power_bar_enemy: float
+    cop_stars_enemy: int
+    scop_stars_enemy: int
+    cop_active_enemy: float
+    scop_active_enemy: float
     turn_index: float
     my_turn: float
+    co_id_me: int
+    co_id_enemy: int
     weather_rain: float
     weather_snow: float
     co_weather_segments: float
-
-
-@dataclass
-class RecoveredObservation:
-    """Best-effort decode of spatial (H, W, C) within ``height x width`` map."""
-
-    height: int
-    width: int
-    terrain_category: np.ndarray
-    """(H, W) int, category index 0..14; ``-1`` for invalid."""
-    defense_norm: np.ndarray
-    unit_channel: np.ndarray
-    """(H, W) int: 0..27 unit one-hot index, or ``-1`` none, ``-2`` multiple."""
-    hp_lo: np.ndarray
-    hp_hi: np.ndarray
-    property_hot: np.ndarray
-    """(H, W, 15) as in encoder: 5 ptypes * 3 ownership."""
-    cap_me: np.ndarray
-    cap_enemy: np.ndarray
-    neutral_income: np.ndarray
-    influence: np.ndarray
-    """(H, W, 6)"""
-    unit_modifiers: np.ndarray
-    """(H, W, 7): see ``rl.encoder.UNIT_MODIFIER_CHANNEL_NAMES``."""
-    scalars: RecoveredScalars
 
 
 def _as_float32(a: np.ndarray) -> np.ndarray:
@@ -129,15 +118,25 @@ def decode_scalars(scalars: np.ndarray) -> RecoveredScalars:
         raise ValueError(f"expected {N_SCALARS} scalars, got {s.shape[0]}")
     return RecoveredScalars(
         raw=s.astype(np.float64),
-        funds_me=float(s[0] * 50_000.0),
-        funds_enemy=float(s[1] * 50_000.0),
-        co_id_me=int(round(float(s[10] * 30.0))),
-        co_id_enemy=int(round(float(s[11] * 30.0))),
-        turn_index=float(s[8]),
-        my_turn=float(s[9]),
-        weather_rain=float(s[12]),
-        weather_snow=float(s[13]),
-        co_weather_segments=float(s[14] * 2.0),
+        funds_me=float(s[0]) * 50_000.0,
+        funds_enemy=float(s[1]) * 50_000.0,
+        power_bar_me=float(s[2]) * 50_000.0,
+        cop_stars_me=int(round(float(s[3]) * 10.0)),
+        scop_stars_me=int(round(float(s[4]) * 10.0)),
+        cop_active_me=float(s[5]),
+        scop_active_me=float(s[6]),
+        power_bar_enemy=float(s[7]) * 50_000.0,
+        cop_stars_enemy=int(round(float(s[8]) * 10.0)),
+        scop_stars_enemy=int(round(float(s[9]) * 10.0)),
+        cop_active_enemy=float(s[10]),
+        scop_active_enemy=float(s[11]),
+        turn_index=float(s[12]),
+        my_turn=float(s[13]),
+        co_id_me=int(round(float(s[14]) * 30.0)),
+        co_id_enemy=int(round(float(s[15]) * 30.0)),
+        weather_rain=float(s[16]),
+        weather_snow=float(s[17]),
+        co_weather_segments=float(s[18]) * 2.0,
     )
 
 
@@ -149,10 +148,20 @@ def decode_scalars_with_max_turns(scalars: np.ndarray, max_turns: int) -> Recove
         raw=rs.raw,
         funds_me=rs.funds_me,
         funds_enemy=rs.funds_enemy,
+        power_bar_me=rs.power_bar_me,
+        cop_stars_me=rs.cop_stars_me,
+        scop_stars_me=rs.scop_stars_me,
+        cop_active_me=rs.cop_active_me,
+        scop_active_me=rs.scop_active_me,
+        power_bar_enemy=rs.power_bar_enemy,
+        cop_stars_enemy=rs.cop_stars_enemy,
+        scop_stars_enemy=rs.scop_stars_enemy,
+        cop_active_enemy=rs.cop_active_enemy,
+        scop_active_enemy=rs.scop_active_enemy,
+        turn_index=float(s[12]) * mt,
+        my_turn=rs.my_turn,
         co_id_me=rs.co_id_me,
         co_id_enemy=rs.co_id_enemy,
-        turn_index=float(s[8]) * mt,
-        my_turn=rs.my_turn,
         weather_rain=rs.weather_rain,
         weather_snow=rs.weather_snow,
         co_weather_segments=rs.co_weather_segments,
@@ -316,12 +325,6 @@ def _scalar_errors(true_state: GameState, observer: int, scalars: np.ndarray) ->
     co_en = true_state.co_states[enemy]
     max_t = max(1, int(getattr(true_state, "max_turns", MAX_TURNS)))
 
-    def norm_power_true(co_state) -> float:
-        denom = co_state._scop_threshold
-        if denom <= 0 or denom >= 10**11:
-            return 0.0
-        return min(1.0, float(co_state.power_bar) / denom)
-
     weather = getattr(true_state, "weather", "clear")
     n_income = sum(
         1 for p in true_state.properties if not p.is_comm_tower and not p.is_lab
@@ -333,14 +336,23 @@ def _scalar_errors(true_state: GameState, observer: int, scalars: np.ndarray) ->
             n_income
         )
 
-    # Expected encoded scalars (same as encoder)
+    # Expected encoded scalars (new 20-scalar layout)
+    def _stars_norm(stars) -> float:
+        if stars is None:
+            return 0.0
+        return min(10.0, float(stars)) / 10.0
+
     exp = [
         true_state.funds[observer] / 50_000.0,
         true_state.funds[enemy] / 50_000.0,
-        norm_power_true(co_me),
-        norm_power_true(co_en),
+        co_me.power_bar / 50_000.0,           # raw power bar
+        _stars_norm(co_me.cop_stars),            # COP stars (0 for Von Bolt)
+        _stars_norm(co_me.scop_stars),           # SCOP stars
         float(co_me.cop_active),
         float(co_me.scop_active),
+        co_en.power_bar / 50_000.0,
+        _stars_norm(co_en.cop_stars),
+        _stars_norm(co_en.scop_stars),
         float(co_en.cop_active),
         float(co_en.scop_active),
         true_state.turn / max_t,
