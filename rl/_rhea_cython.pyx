@@ -112,22 +112,19 @@ def simulate_genome_cython(
 
         cand = scored[idx][1]
 
-        # Re-validate: the candidate must still be legal in the current state.
-        # The genome index was generated for the original state; after previous
-        # actions mutate `sim`, the ranked ordering may have shifted.
-        _feats2, mask2, cands2 = candidate_arrays(sim, max_candidates=MAX_CANDIDATES)
-        legal2 = [c for i, c in enumerate(cands2) if i < len(mask2) and bool(mask2[i])]
-        # Use semantic equivalence, not identity — candidate objects are
-        # recreated each time candidate_arrays() is called.
-        cand_equiv = False
-        for c in legal2:
-            if c.kind == cand.kind and c.first == cand.first and c.second == cand.second:
-                cand_equiv = True
-                break
-        if not cand_equiv:
-            # Candidate is no longer legal — skip it and mark illegal
-            illegal += 1
-            continue
+        # Re-validate: the candidate must still be applicable in the current state.
+        # The genome index was generated for the ORIGINAL state; after previous
+        # actions mutate `sim`, the candidate may no longer be applicable.
+        # Instead of skipping (wasting a genome slot), pick the
+        # top-ranked candidate for the CURRENT state.
+        if cand not in legal:
+            # Candidate is no longer legal/applicable — use best available
+            if ranked:
+                cand = ranked[0]  # Best candidate for current state
+            else:
+                # No candidates at all — skip
+                illegal += 1
+                continue
 
         ok = _apply_candidate_fast(sim, cand)
         if not ok:

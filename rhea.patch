@@ -1,0 +1,538 @@
+*** Begin Patch
+*** Add File: rl/value_net.py
++from __future__ import annotations
++
++from pathlib import Path
++
++import numpy as np
++import torch
++import torch.nn as nn
++
++from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS
++from rl.network import TRUNK_CHANNELS, SCALAR_PLANES, FUSED_CHANNELS, _ResBlock128
++
++
++class AWBWValueNet(nn.Module):
++    """
++    Value-only copy of the PPO board evaluator.
++
++    This intentionally keeps the same spatial/scalar representation as the PPO
++    trunk, while removing candidate-action tensors, policy logits, masks,
++    log-probs, entropy, and rollout-buffer policy machinery.
++    """
++
++    def __init__(self, hidden_size: int = 256, trunk_blocks: int = 10) -> None:
++        super().__init__()
++        self.stem = nn.Sequential(
++            nn.Conv2d(N_SPATIAL_CHANNELS, TRUNK_CHANNELS, kernel_size=3, padding=1),
++            nn.ReLU(inplace=True),
++        )
++        self.trunk_blocks = nn.ModuleList([_ResBlock128() for _ in range(trunk_blocks)])
++        self.scalar_to_plane = nn.Linear(N_SCALARS, SCALAR_PLANES)
++        self.value_head = nn.Sequential(
++            nn.Linear(FUSED_CHANNELS, hidden_size),
++            nn.ReLU(inplace=True),
++            nn.Linear(hidden_size, 1),
++        )
++
++    def forward(self, spatial: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
++        # spatial: [B, 30, 30, C]
++        with torch.amp.autocast(
++            "cuda",
++            dtype=torch.float16,
++            enabled=(spatial.device.type == "cuda"),
++        ):
++            x = spatial.permute(0, 3, 1, 2).contiguous()
++            x = self.stem(x)
++            for blk in self.trunk_blocks:
++                x = blk(x)
++
++            b = scalars.shape[0]
++            scalar_planes = self.scalar_to_plane(scalars).view(b, SCALAR_PLANES, 1, 1)
++            scalar_planes = scalar_planes.expand(-1, -1, GRID_SIZE, GRID_SIZE)
++            fused = torch.cat([x, scalar_planes], dim=1)
++            pooled = torch.nn.functional.adaptive_avg_pool2d(fused, (1, 1)).flatten(1)
++
++        return self.value_head(pooled.float()).squeeze(-1)
++
++
++@torch.no_grad()
++def evaluate_value_np(
++    model: AWBWValueNet,
++    spatial: np.ndarray,
++    scalars: np.ndarray,
++    *,
++    device: str | torch.device = "cuda",
++) -> float:
++    model.eval()
++    dev = torch.device(device)
++    spatial_t = torch.as_tensor(spatial, dtype=torch.float32, device=dev).unsqueeze(0)
++    scalars_t = torch.as_tensor(scalars, dtype=torch.float32, device=dev).unsqueeze(0)
++    return float(model(spatial_t, scalars_t).item())
++
++
++def load_value_from_maskable_ppo_zip(
++    checkpoint_path: str | Path,
++    *,
++    device: str | torch.device = "cuda",
++) -> AWBWValueNet:
++    """
++    Best-effort transplant from the current MaskablePPO checkpoint.
++
++    Loads same-name, same-shape board-trunk/value tensors. Depending on your
++    SB3 policy layout, the critic MLP may be owned outside the features
++    extractor; this function therefore prints what was actually loaded instead
++    of pretending the transplant is guaranteed perfect.
++    """
++    from sb3_contrib import MaskablePPO
++
++    dev = torch.device(device)
++    ppo = MaskablePPO.load(str(checkpoint_path), device=dev)
++
++    value = AWBWValueNet().to(dev)
++    src = ppo.policy.state_dict()
++    dst = value.state_dict()
++
++    transplanted: dict[str, torch.Tensor] = {}
++    prefixes = [
++        "features_extractor.",
++        "policy.features_extractor.",
++        "",
++    ]
++
++    for dst_key, dst_tensor in dst.items():
++        for prefix in prefixes:
++            src_key = prefix + dst_key
++            if src_key in src and tuple(src[src_key].shape) == tuple(dst_tensor.shape):
++                transplanted[dst_key] = src[src_key].detach().clone()
++                break
++
++    missing, unexpected = value.load_state_dict(transplanted, strict=False)
++
++    print("[value_net] loaded", len(transplanted), "tensors from PPO checkpoint")
++    print("[value_net] missing:", list(missing)[:20], "..." if len(missing) > 20 else "")
++    print("[value_net] unexpected:", unexpected)
++
++    return value
++
+*** Add File: rl/rhea_fitness.py
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Optional
++
++import numpy as np
++
++from engine.game import GameState
++from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS, encode_state
++from rl.env import AWBWEnv
++from rl.value_net import AWBWValueNet, evaluate_value_np
++
++
++@dataclass(slots=True)
++class RheaFitnessBreakdown:
++    phi_delta: float
++    value: float
++    illegal_penalty: float
++    total: float
++
++
++class RheaFitness:
++    """
++    One-turn fitness for RHEA.
++
++    Scores exactly this bracket:
++
++        before acting seat's turn -> after acting seat's turn
++
++    It does not auto-run the opponent. The wider zero-sum learning/evaluation
++    contract remains outside the inner RHEA planner.
++    """
++
++    def __init__(
++        self,
++        env_template: AWBWEnv,
++        value_model: Optional[AWBWValueNet] = None,
++        *,
++        device: str = "cuda",
++        reward_weight: float = 0.90,
++        value_weight: float = 0.10,
++        illegal_gene_penalty: float = 0.02,
++    ) -> None:
++        self.env_template = env_template
++        self.value_model = value_model
++        self.device = device
++        self.reward_weight = float(reward_weight)
++        self.value_weight = float(value_weight)
++        self.illegal_gene_penalty = float(illegal_gene_penalty)
++
++    def phi(self, state: GameState, observer_seat: int) -> float:
++        # Reuse AWBWEnv's tuned Φ without stepping the env.
++        # This is intentionally a first-pass bridge. Later, refactor _compute_phi
++        # into a pure function and call it from both AWBWEnv and RHEA.
++        old_state = self.env_template.state
++        old_seat = self.env_template._learner_seat
++        try:
++            self.env_template.state = state
++            self.env_template._learner_seat = int(observer_seat)
++            return float(self.env_template._compute_phi(state))
++        finally:
++            self.env_template.state = old_state
++            self.env_template._learner_seat = old_seat
++
++    def value(self, state: GameState, observer_seat: int) -> float:
++        if self.value_model is None:
++            return 0.0
++
++        spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
++        scalars = np.zeros((N_SCALARS,), dtype=np.float32)
++        encode_state(
++            state,
++            observer=int(observer_seat),
++            belief=None,
++            out_spatial=spatial,
++            out_scalars=scalars,
++        )
++        return evaluate_value_np(self.value_model, spatial, scalars, device=self.device)
++
++    def score(
++        self,
++        before: GameState,
++        after: GameState,
++        *,
++        observer_seat: int,
++        illegal_genes: int = 0,
++    ) -> RheaFitnessBreakdown:
++        phi_delta = self.phi(after, observer_seat) - self.phi(before, observer_seat)
++        v = self.value(after, observer_seat)
++        illegal_penalty = -self.illegal_gene_penalty * float(illegal_genes)
++
++        total = (
++            self.reward_weight * phi_delta
++            + self.value_weight * v
++            + illegal_penalty
++        )
++
++        return RheaFitnessBreakdown(
++            phi_delta=phi_delta,
++            value=v,
++            illegal_penalty=illegal_penalty,
++            total=total,
++        )
++
+*** Add File: engine/search_clone.py
++from __future__ import annotations
++
++import copy
++
++from engine.game import GameState
++
++
++def clone_for_search(state: GameState) -> GameState:
++    """
++    Correctness-first clone.
++
++    Replace this with a hand-rolled fast clone only after parity tests prove that
++    every mutable field touched by step/apply_full_turn is copied correctly.
++    """
++    return copy.deepcopy(state)
++
+*** Add File: rl/rhea.py
++from __future__ import annotations
++
++from dataclasses import dataclass
++import random
++from typing import Optional
++
++from engine.search_clone import clone_for_search
++from engine.game import GameState
++from rl.candidate_actions import (
++    MAX_CANDIDATES,
++    CandidateAction,
++    CandidateKind,
++    candidate_arrays,
++)
++from rl.rhea_fitness import RheaFitness, RheaFitnessBreakdown
++
++
++@dataclass(slots=True)
++class RheaConfig:
++    population: int = 32
++    generations: int = 6
++    elite: int = 4
++    mutation_rate: float = 0.20
++    max_actions_per_turn: int = 128
++    top_k_per_state: int = 24
++    reward_weight: float = 0.90
++    value_weight: float = 0.10
++    seed: Optional[int] = None
++
++
++@dataclass(slots=True)
++class RheaResult:
++    actions: list
++    score: float
++    breakdown: RheaFitnessBreakdown
++    illegal_genes: int
++    generations: int
++
++
++class RheaPlanner:
++    def __init__(self, fitness: RheaFitness, config: RheaConfig) -> None:
++        self.fitness = fitness
++        self.cfg = config
++        self.rng = random.Random(config.seed)
++
++    def choose_full_turn(self, state: GameState) -> RheaResult:
++        acting_seat = int(state.active_player)
++        before = state
++
++        population = [self._random_genome(before) for _ in range(self.cfg.population)]
++        best: tuple[float, list[int], list, RheaFitnessBreakdown, int] | None = None
++
++        for _gen in range(self.cfg.generations):
++            scored = []
++            for genome in population:
++                after, actions, illegal = self._simulate_genome(before, genome)
++                breakdown = self.fitness.score(
++                    before,
++                    after,
++                    observer_seat=acting_seat,
++                    illegal_genes=illegal,
++                )
++                scored.append((breakdown.total, genome, actions, breakdown, illegal))
++
++            scored.sort(key=lambda x: x[0], reverse=True)
++
++            if best is None or scored[0][0] > best[0]:
++                best = scored[0]
++
++            elites = scored[: max(1, self.cfg.elite)]
++            next_pop: list[list[int]] = [list(g) for _, g, _, _, _ in elites]
++
++            while len(next_pop) < self.cfg.population:
++                p1 = self.rng.choice(elites)[1]
++                p2 = self.rng.choice(elites)[1]
++                child = self._crossover(p1, p2)
++                self._mutate(child)
++                next_pop.append(child)
++
++            population = next_pop
++
++        assert best is not None
++        score, _genome, actions, breakdown, illegal = best
++        return RheaResult(
++            actions=actions,
++            score=float(score),
++            breakdown=breakdown,
++            illegal_genes=int(illegal),
++            generations=self.cfg.generations,
++        )
++
++    def _random_genome(self, state: GameState) -> list[int]:
++        # Genome stores ranked candidate choices. At each simulated state,
++        # gene[i] means “pick rank gene[i] from the local candidate menu.”
++        return [
++            self.rng.randrange(max(1, self.cfg.top_k_per_state))
++            for _ in range(self.cfg.max_actions_per_turn)
++        ]
++
++    def _crossover(self, a: list[int], b: list[int]) -> list[int]:
++        if not a:
++            return list(b)
++        cut = self.rng.randrange(0, len(a))
++        return list(a[:cut]) + list(b[cut:])
++
++    def _mutate(self, genome: list[int]) -> None:
++        for i in range(len(genome)):
++            if self.rng.random() < self.cfg.mutation_rate:
++                genome[i] = self.rng.randrange(max(1, self.cfg.top_k_per_state))
++
++    def _simulate_genome(
++        self,
++        state: GameState,
++        genome: list[int],
++    ) -> tuple[GameState, list, int]:
++        sim = clone_for_search(state)
++        acting = int(sim.active_player)
++        actions = []
++        illegal = 0
++
++        for gene in genome:
++            if sim.winner is not None:
++                break
++            if int(sim.active_player) != acting:
++                break
++
++            _feats, mask, cands = candidate_arrays(sim, max_candidates=MAX_CANDIDATES)
++            legal = [c for i, c in enumerate(cands) if i < len(mask) and bool(mask[i])]
++            if not legal:
++                break
++
++            ranked = self._rank_candidates_cheap(sim, legal)
++            if not ranked:
++                break
++
++            idx = int(gene)
++            if idx >= len(ranked):
++                illegal += 1
++                idx = len(ranked) - 1
++
++            cand = ranked[idx]
++            ok = self._apply_candidate(sim, cand)
++            if not ok:
++                illegal += 1
++                break
++
++            actions.append(cand.first)
++            if cand.second is not None:
++                actions.append(cand.second)
++
++        # If genome did not naturally pass the turn, force END_TURN if legal.
++        if sim.winner is None and int(sim.active_player) == acting:
++            _feats, mask, cands = candidate_arrays(sim, max_candidates=MAX_CANDIDATES)
++            legal = [c for i, c in enumerate(cands) if i < len(mask) and bool(mask[i])]
++            enders = [
++                c for c in legal
++                if c.kind == CandidateKind.END_TURN
++                or c.terminal_action.action_type.name == "END_TURN"
++            ]
++            if enders:
++                self._apply_candidate(sim, enders[0])
++                actions.append(enders[0].terminal_action)
++
++        return sim, actions, illegal
++
++    def _rank_candidates_cheap(
++        self,
++        state: GameState,
++        cands: list[CandidateAction],
++    ) -> list[CandidateAction]:
++        """
++        Cheap ordering only. RHEA still chooses among these candidates.
++        """
++        scored: list[tuple[float, CandidateAction]] = []
++
++        for c in cands:
++            f = c.preview
++            score = 0.0
++
++            # Candidate preview feature layout from rl/candidate_actions.py.
++            # Capture features around 8..11, attack-trade features around 12..23.
++            if f is not None:
++                score += 2.0 * float(f[10])       # capture completes
++                score += 1.0 * float(f[8])        # capture progress
++                score += 0.25 * float(f[11])      # property value
++                score += 1.25 * float(f[17])      # enemy value removed max
++                score += 0.75 * float(f[16])      # enemy value removed min
++                score -= 0.80 * float(f[19])      # own value lost max
++                score += 0.50 * float(f[21])      # target killed max
++                score -= 1.00 * float(f[22])      # attacker killed
++
++            if (
++                c.kind == CandidateKind.END_TURN
++                or c.terminal_action.action_type.name == "END_TURN"
++            ):
++                score -= 0.5
++
++            if c.kind == CandidateKind.MOVE_WAIT:
++                score -= 0.1
++
++            scored.append((score, c))
++
++        scored.sort(key=lambda x: x[0], reverse=True)
++        return [c for _, c in scored[: self.cfg.top_k_per_state]]
++
++    def _apply_candidate(self, state: GameState, cand: CandidateAction) -> bool:
++        try:
++            state.step(cand.first)
++            if cand.second is not None and state.winner is None:
++                state.step(cand.second)
++            return True
++        except Exception:
++            return False
++
+*** Add File: scripts/eval_rhea_one_game.py
++from __future__ import annotations
++
++import argparse
++import random
++
++from rl.env import AWBWEnv
++from rl.rhea import RheaConfig, RheaPlanner
++from rl.rhea_fitness import RheaFitness
++from rl.value_net import load_value_from_maskable_ppo_zip
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--checkpoint", type=str, required=True)
++    parser.add_argument("--map-id", type=int, default=171596)
++    parser.add_argument("--co-p0", type=int, default=14)
++    parser.add_argument("--co-p1", type=int, default=14)
++    parser.add_argument("--device", type=str, default="cuda")
++    parser.add_argument("--population", type=int, default=32)
++    parser.add_argument("--generations", type=int, default=6)
++    parser.add_argument("--value-weight", type=float, default=0.10)
++    parser.add_argument("--reward-weight", type=float, default=0.90)
++    parser.add_argument("--max-days", type=int, default=30)
++    args = parser.parse_args()
++
++    # Constructor signatures may differ in local branches. If this fails, pass
++    # the same env construction kwargs used by scripts/start_solo_training.py.
++    env = AWBWEnv(
++        map_id=args.map_id,
++        co_p0=args.co_p0,
++        co_p1=args.co_p1,
++        max_days=args.max_days,
++    )
++    env.reset()
++
++    value_model = load_value_from_maskable_ppo_zip(args.checkpoint, device=args.device)
++
++    fitness = RheaFitness(
++        env_template=env,
++        value_model=value_model,
++        device=args.device,
++        reward_weight=args.reward_weight,
++        value_weight=args.value_weight,
++    )
++    planner = RheaPlanner(
++        fitness,
++        RheaConfig(
++            population=args.population,
++            generations=args.generations,
++            reward_weight=args.reward_weight,
++            value_weight=args.value_weight,
++            seed=random.randrange(1 << 30),
++        ),
++    )
++
++    while env.state is not None and env.state.winner is None:
++        state = env.state
++        active = int(state.active_player)
++        result = planner.choose_full_turn(state)
++
++        print(
++            f"day={getattr(state, 'turn', '?')} active={active} "
++            f"score={result.score:.4f} "
++            f"phi={result.breakdown.phi_delta:.4f} "
++            f"v={result.breakdown.value:.4f} "
++            f"illegal={result.illegal_genes} "
++            f"actions={len(result.actions)}"
++        )
++
++        for action in result.actions:
++            if env.state is None or env.state.winner is not None:
++                break
++            if int(env.state.active_player) != active:
++                break
++            env.state.step(action)
++
++    print("winner:", None if env.state is None else env.state.winner)
++
++
++if __name__ == "__main__":
++    main()
++
+*** End Patch

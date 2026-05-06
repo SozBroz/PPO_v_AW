@@ -1,0 +1,1195 @@
+diff --git a/rl/env.py b/rl/env.py
+index 977f7ce..bce3606 100644
+--- a/rl/env.py
++++ b/rl/env.py
+@@ -704,6 +704,13 @@ class AWBWEnv(gym.Env):
+         live_snapshot_path: str | Path | None = None,
+         live_games_id: int | None = None,
+         live_fallback_curriculum: bool = True,
++        opening_book_path: str | Path | None = None,
++        opening_book_seats: str = "both",
++        opening_book_prob: float = 0.0,
++        opening_book_strict_co: bool = False,
++        opening_book_max_day: int | None = None,
++        opening_book_seed: int = 0,
++        opening_book_force_mask_for_learner: bool = True,
+     ) -> None:
+         super().__init__()
+ 
+@@ -714,6 +721,16 @@ class AWBWEnv(gym.Env):
+         self.tier_name = tier_name
+         self.curriculum_broad_prob = float(curriculum_broad_prob)
+         self.curriculum_tag = curriculum_tag
++        self._opening_book_path = str(opening_book_path) if opening_book_path else None
++        self._opening_book_seats = str(opening_book_seats or "both")
++        self._opening_book_prob = max(0.0, min(1.0, float(opening_book_prob)))
++        self._opening_book_strict_co = bool(opening_book_strict_co)
++        self._opening_book_max_day = (
++            int(opening_book_max_day) if opening_book_max_day is not None else None
++        )
++        self._opening_book_seed = int(opening_book_seed)
++        self._opening_book_force_mask_for_learner = bool(opening_book_force_mask_for_learner)
++        self._opening_book_manager: Any | None = None
+         self._max_env_steps: int | None = int(max_env_steps) if max_env_steps is not None else None
+         if max_p1_microsteps is not None:
+             self._max_p1_microsteps_cap: int | None = int(max_p1_microsteps)
+@@ -790,6 +807,25 @@ class AWBWEnv(gym.Env):
+         # the 2x per P1 policy microstep (mask + decode).
+         self._legal_cache: list[Action] | None = None
+ 
++        if self._opening_book_path:
++            try:
++                from rl.opening_book import TwoSidedOpeningBookManager
++
++                self._opening_book_manager = TwoSidedOpeningBookManager(
++                    self._opening_book_path,
++                    seats=self._opening_book_seats,
++                    prob=self._opening_book_prob,
++                    strict_co=self._opening_book_strict_co,
++                    max_day=self._opening_book_max_day,
++                    seed=self._opening_book_seed,
++                )
++            except Exception as exc:
++                print(
++                    f"[AWBWEnv] opening book disabled: failed to load "
++                    f"{self._opening_book_path!r}: {exc!r}"
++                )
++                self._opening_book_manager = None
++
+         self.state: Optional[GameState] = None
+         self._episode_info: dict[str, Any] = {}
+         self._diag_lines_this_ep: int = 0
+@@ -1206,6 +1242,8 @@ class AWBWEnv(gym.Env):
+         )
+         self._first_learner_capture_step: int | None = None
+ 
++        self._begin_opening_book_episode()
++
+         # HP belief overlays — one per seat. Seeded with the initial board so
+         # predeployed units start at their visible bucket (not exact HP) for the
+         # opposing observer. Engine keeps the exact 0-100 integer; these mirror
+@@ -1258,6 +1296,11 @@ class AWBWEnv(gym.Env):
+ 
+         self._p0_env_steps += 1
+ 
++        # Env-level opening book for the learner must be PPO-consistent: the
++        # action mask is forced to the book action in action_masks(), so here
++        # we only advance the cursor if PPO actually supplied that action.
++        self._maybe_commit_learner_opening_book_action(int(action_idx))
++
+         # Tier 1 (plan p0-capture-architecture-fix): with probability
+         # `learner_greedy_mix`, override the policy-sampled action with the
+         # capture-greedy teacher used by the cold opponent. DAGGER-lite —
+@@ -1486,8 +1529,93 @@ class AWBWEnv(gym.Env):
+         flag = os.environ.get(BUILD_MASK_INFANTRY_ONLY_ENV, "").strip().lower()
+         if flag in ("1", "true", "yes", "on"):
+             _strip_non_infantry_builds(mask, self.state, legal=legal)
++        mask = self._maybe_force_learner_opening_book_mask(mask)
+         return mask
+ 
++    def _begin_opening_book_episode(self) -> None:
++        mgr = getattr(self, "_opening_book_manager", None)
++        if mgr is None or self.state is None:
++            return
++        try:
++            co_ids = [
++                int(self.state.co_states[0].co_id),
++                int(self.state.co_states[1].co_id),
++            ]
++            mgr.on_episode_start(
++                episode_id=int(self._episode_id),
++                map_id=int(self.state.map_data.map_id),
++                co_ids=co_ids,
++            )
++            self._sync_opening_book_log()
++        except Exception as exc:
++            self._opening_book_log["opening_book_init_error"] = repr(exc)
++
++    def _sync_opening_book_log(self) -> None:
++        mgr = getattr(self, "_opening_book_manager", None)
++        if mgr is not None:
++            self._opening_book_log.update(mgr.log_fields())
++
++    def _maybe_force_learner_opening_book_mask(self, mask: np.ndarray) -> np.ndarray:
++        if (
++            not self._opening_book_force_mask_for_learner
++            or self.state is None
++            or int(self.state.active_player) != int(self._learner_seat)
++        ):
++            return mask
++        mgr = getattr(self, "_opening_book_manager", None)
++        if mgr is None:
++            return mask
++        a = mgr.peek_flat(
++            seat=int(self._learner_seat),
++            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
++            action_mask=mask,
++        )
++        self._sync_opening_book_log()
++        if a is None:
++            return mask
++        forced = np.zeros_like(mask, dtype=bool)
++        forced[int(a)] = True
++        return forced
++
++    def _maybe_commit_learner_opening_book_action(self, action_idx: int) -> None:
++        if (
++            not self._opening_book_force_mask_for_learner
++            or self.state is None
++            or int(self.state.active_player) != int(self._learner_seat)
++        ):
++            return
++        mgr = getattr(self, "_opening_book_manager", None)
++        if mgr is None:
++            return
++        # Validate against the current legal mask before committing.  If the
++        # mask was not forced or the model did not return the forced action,
++        # commit_flat marks the selected book line desynced instead of silently
++        # replacing the learner action.
++        _mout = self._action_mask_buf if self._use_preallocated_buffers else None
++        mask = _get_action_mask(self.state, out=_mout, legal=self._get_legal())
++        expected = mgr.peek_flat(
++            seat=int(self._learner_seat),
++            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
++            action_mask=mask,
++        )
++        if expected is not None:
++            mgr.commit_flat(seat=int(self._learner_seat), action_idx=int(action_idx))
++            self._sync_opening_book_log()
++
++    def _suggest_opening_book_for_active(self, mask: np.ndarray) -> int | None:
++        if self.state is None:
++            return None
++        mgr = getattr(self, "_opening_book_manager", None)
++        if mgr is None:
++            return None
++        a = mgr.suggest_flat(
++            seat=int(self.state.active_player),
++            calendar_turn=int(getattr(self.state, "turn", 0) or 0),
++            action_mask=mask,
++        )
++        self._sync_opening_book_log()
++        return int(a) if a is not None else None
++
+     def render(self) -> str | None:
+         if self.render_mode == "ansi" and self.state is not None:
+             return self.state.render_ascii()
+@@ -2036,10 +2164,14 @@ class AWBWEnv(gym.Env):
+             legal = self._get_legal()
+             _mout = self._action_mask_buf if self._use_preallocated_buffers else None
+             mask = _get_action_mask(self.state, out=_mout, legal=legal)
+-            try:
+-                opp_idx = int(self.opponent_policy(obs, mask))
+-            except Exception:
+-                opp_idx = -1
++            book_idx = self._suggest_opening_book_for_active(mask)
++            if book_idx is not None:
++                opp_idx = int(book_idx)
++            else:
++                try:
++                    opp_idx = int(self.opponent_policy(obs, mask))
++                except Exception:
++                    opp_idx = -1
+ 
+             action = _flat_to_action(opp_idx, self.state, legal=legal)
+             if action is None:
+diff --git a/rl/opening_book.py b/rl/opening_book.py
+index 2834d0c..cb26396 100644
+--- a/rl/opening_book.py
++++ b/rl/opening_book.py
+@@ -1,10 +1,15 @@
+-"""
+-Load JSONL opening books and suggest legal flat actions for the opponent seat.
++"""Two-sided opening-book support for AWBW training.
++
++The runtime unit is still a flat action-index book because that is what the
++human-demo ingest currently emits.  This module deliberately treats CO IDs as
++metadata by default: books are indexed by ``(map_id, seat)`` and only filtered by
++CO if a caller explicitly opts in with ``strict_co=True``.
+ 
+-Each line is an object with ``map_id``, ``seat``, ``horizon_days``, and
+-``action_indices`` (ordered flat indices from human demo ingest).
+-``horizon_days`` of 0 means no per-day cap; length is the list of
+-``action_indices`` (typical for books built from truncated pro replays).
++The important design point is PPO correctness: learner-side books should be
++used by *forcing the legal-action mask* to the next book action, not by silently
++replacing the sampled action after PPO has already recorded a different action.
++Opponent-side books can be selected directly because opponent actions are not
++stored in the learner rollout buffer.
+ """
+ from __future__ import annotations
+ 
+@@ -14,7 +19,7 @@ import random
+ import time
+ from dataclasses import dataclass, field
+ from pathlib import Path
+-from typing import Any
++from typing import Any, Iterable
+ 
+ import numpy as np
+ 
+@@ -23,11 +28,13 @@ _AGENT_DEBUG_LOG_PATH = Path(__file__).parent.parent / "debug-a6d5a1.log"
+ _AGENT_DEBUG_SESSION_ID = "a6d5a1"
+ 
+ 
+-def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
++def _agent_debug_log(
++    hypothesis_id: str, location: str, message: str, data: dict[str, Any]
++) -> None:
+     try:
+         payload = {
+             "sessionId": _AGENT_DEBUG_SESSION_ID,
+-            "runId": "pre-fix",
++            "runId": "opening-book-env-refactor",
+             "hypothesisId": hypothesis_id,
+             "location": location,
+             "message": message,
+@@ -41,7 +48,7 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict
+ # endregion
+ 
+ 
+-@dataclass
++@dataclass(frozen=True)
+ class _Book:
+     book_id: str
+     map_id: int
+@@ -49,42 +56,75 @@ class _Book:
+     co_id: int | None
+     horizon_days: int
+     action_indices: list[int]
++    source_game_id: int | None = None
++    session_id: str | None = None
+ 
+ 
+ @dataclass
+ class OpeningBookIndex:
+-    """Index books by (map_id, seat)."""
++    """Index flat-action opening books by map and engine seat."""
+ 
+     by_map_seat: dict[tuple[int, int], list[_Book]] = field(default_factory=dict)
+ 
+     @classmethod
+-    def from_jsonl(cls, path: Path) -> "OpeningBookIndex":
++    def from_jsonl(cls, path: Path | str) -> "OpeningBookIndex":
+         idx = cls()
+         with open(path, encoding="utf-8") as f:
+-            for line in f:
++            for line_no, line in enumerate(f, start=1):
+                 line = line.strip()
+                 if not line:
+                     continue
+                 o = json.loads(line)
+-                b = _Book(
+-                    book_id=str(o.get("book_id", "")),
+-                    map_id=int(o.get("map_id", 0) or 0),
+-                    seat=int(o.get("seat", 0) or 0),
+-                    co_id=(
+-                        int(o["co_id"])
+-                        if o.get("co_id") is not None
+-                        else None
+-                    ),
+-                    horizon_days=int(o.get("horizon_days", 0) or 0),
+-                    action_indices=[int(x) for x in (o.get("action_indices") or [])],
+-                )
+-                key = (b.map_id, b.seat)
+-                idx.by_map_seat.setdefault(key, []).append(b)
++
++                # Accept either the legacy per-seat schema or a simple joint schema
++                # with ``seats: {"0": {"action_indices": [...]}, "1": ...}``.
++                if isinstance(o.get("seats"), dict):
++                    for seat_s, payload in o["seats"].items():
++                        if not isinstance(payload, dict):
++                            continue
++                        b = _book_from_obj(o, int(seat_s), payload, line_no)
++                        if b is not None:
++                            idx.by_map_seat.setdefault((b.map_id, b.seat), []).append(b)
++                    continue
++
++                b = _book_from_obj(o, int(o.get("seat", 0) or 0), o, line_no)
++                if b is not None:
++                    idx.by_map_seat.setdefault((b.map_id, b.seat), []).append(b)
+         return idx
+ 
+ 
++def _book_from_obj(
++    root: dict[str, Any], seat: int, payload: dict[str, Any], line_no: int
++) -> _Book | None:
++    try:
++        map_id = int(root.get("map_id", 0) or 0)
++        action_indices = [int(x) for x in (payload.get("action_indices") or [])]
++    except Exception:
++        return None
++    if map_id <= 0 or seat not in (0, 1) or not action_indices:
++        return None
++    co_id_raw = payload.get("co_id", root.get("co_id"))
++    co_id = int(co_id_raw) if co_id_raw not in (None, "", 0, "0") else None
++    base_book_id = str(root.get("joint_book_id") or root.get("book_id") or f"line{line_no}")
++    if "joint_book_id" in root or isinstance(root.get("seats"), dict):
++        book_id = f"{base_book_id}_s{seat}"
++    else:
++        book_id = base_book_id
++    source_game = root.get("source_game_id")
++    return _Book(
++        book_id=book_id,
++        map_id=map_id,
++        seat=seat,
++        co_id=co_id,
++        horizon_days=int(root.get("horizon_days", payload.get("horizon_days", 0)) or 0),
++        action_indices=action_indices,
++        source_game_id=int(source_game) if source_game not in (None, "", 0, "0") else None,
++        session_id=str(root.get("book_session_id") or root.get("session_id") or "") or None,
++    )
++
++
+ class OpeningBookController:
+-    """Per-episode: pick a book, step through ``action_indices`` if still legal."""
++    """Per-episode cursor for one engine seat."""
+ 
+     def __init__(
+         self,
+@@ -99,10 +139,8 @@ class OpeningBookController:
+         self._seat = int(seat)
+         self._strict_co = bool(strict_co)
+         self._rng = rng
+-        mct = max_calendar_turn
+-        if mct is not None and int(mct) <= 0:
+-            mct = None
+-        self._max_calendar_turn: int | None = mct
++        mct = max_calendar_turn if max_calendar_turn is not None and int(max_calendar_turn) > 0 else None
++        self._max_calendar_turn = mct
+         self._book: _Book | None = None
+         self._cursor = 0
+         self._episode_token: int | None = None
+@@ -111,8 +149,13 @@ class OpeningBookController:
+         self.desync = False
+         self.desync_reason: str | None = None
+         self.book_id: str | None = None
+-        self._debug_events = 0
+-        self.suggest_calls: int = 0
++        self.suggest_calls = 0
++        self.episode_enabled = False
++        self.candidate_count = 0
++
++    @property
++    def seat(self) -> int:
++        return self._seat
+ 
+     def on_episode_start(
+         self,
+@@ -120,10 +163,11 @@ class OpeningBookController:
+         episode_id: int,
+         map_id: int,
+         co_id_for_seat: int | None,
++        enabled: bool,
+     ) -> None:
+-        if self._episode_token == episode_id:
++        if self._episode_token == int(episode_id):
+             return
+-        self._episode_token = episode_id
++        self._episode_token = int(episode_id)
+         self._cursor = 0
+         self.actions_used = 0
+         self.fallbacks = 0
+@@ -131,165 +175,69 @@ class OpeningBookController:
+         self.desync_reason = None
+         self.book_id = None
+         self._book = None
+-        self._debug_events = 0
+         self.suggest_calls = 0
++        self.episode_enabled = bool(enabled)
+         cands = list(self._index.by_map_seat.get((int(map_id), int(self._seat)), ()))
++        self.candidate_count = len(cands)
+         if self._strict_co and co_id_for_seat is not None:
+             cands = [b for b in cands if b.co_id is None or b.co_id == int(co_id_for_seat)]
+-        # region agent log
+         _agent_debug_log(
+-            "H6,H7,H8",
++            "opening-book",
+             "rl/opening_book.py:OpeningBookController.on_episode_start",
+             "opening book episode lookup",
+             {
+                 "episode_id": int(episode_id),
+                 "map_id": int(map_id),
+                 "seat": int(self._seat),
++                "enabled": bool(enabled),
+                 "strict_co": bool(self._strict_co),
+                 "co_id_for_seat": co_id_for_seat,
+                 "candidate_count": len(cands),
+-                "indexed_keys_count": len(self._index.by_map_seat),
+             },
+         )
+-        # endregion
+-        if not cands:
++        if not enabled or not cands:
+             return
+         self._book = self._rng.choice(cands)
+         self.book_id = self._book.book_id
+-        # region agent log
+-        _agent_debug_log(
+-            "H7,H8",
+-            "rl/opening_book.py:OpeningBookController.on_episode_start",
+-            "opening book selected",
+-            {
+-                "episode_id": int(episode_id),
+-                "book_id": self.book_id,
+-                "map_id": int(self._book.map_id),
+-                "seat": int(self._book.seat),
+-                "co_id": self._book.co_id,
+-                "horizon_days": int(self._book.horizon_days),
+-                "action_count": len(self._book.action_indices),
+-            },
+-        )
+-        # endregion
+ 
+-    def suggest_flat(
+-        self,
+-        *,
+-        calendar_turn: int,
+-        action_mask: np.ndarray,
+-    ) -> int | None:
+-        """Next legal flat action from the selected book line, or ``None`` if unavailable."""
++    def peek_flat(self, *, calendar_turn: int, action_mask: np.ndarray) -> int | None:
++        return self._next_flat(calendar_turn=calendar_turn, action_mask=action_mask, advance=False)
++
++    def suggest_flat(self, *, calendar_turn: int, action_mask: np.ndarray) -> int | None:
++        return self._next_flat(calendar_turn=calendar_turn, action_mask=action_mask, advance=True)
++
++    def commit_flat(self, action_idx: int) -> None:
+         b = self._book
+-        if b is None or not b.action_indices:
+-            if self._debug_events < 3:
+-                self._debug_events += 1
+-                # region agent log
+-                _agent_debug_log(
+-                    "H7,H8",
+-                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                    "opening book unavailable for suggestion",
+-                    {
+-                        "calendar_turn": int(calendar_turn),
+-                        "book_id": self.book_id,
+-                        "has_book": b is not None,
+-                        "actions_used": int(self.actions_used),
+-                    },
+-                )
+-                # endregion
++        if b is None or self._cursor >= len(b.action_indices):
++            return
++        expected = int(b.action_indices[self._cursor])
++        if int(action_idx) == expected:
++            self._cursor += 1
++            self.actions_used += 1
++        else:
++            self._mark_desync("learner_action_not_book")
++
++    def _next_flat(self, *, calendar_turn: int, action_mask: np.ndarray, advance: bool) -> int | None:
++        b = self._book
++        if b is None or not b.action_indices or not self.episode_enabled:
+             return None
+         self.suggest_calls += 1
+-        if self._max_calendar_turn is not None and int(calendar_turn) > int(
+-            self._max_calendar_turn
+-        ):
+-            if self._debug_events < 3:
+-                self._debug_events += 1
+-                # region agent log
+-                _agent_debug_log(
+-                    "H8",
+-                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                    "opening book blocked by max calendar turn",
+-                    {
+-                        "calendar_turn": int(calendar_turn),
+-                        "max_calendar_turn": int(self._max_calendar_turn),
+-                        "book_id": self.book_id,
+-                    },
+-                )
+-                # endregion
++        if self._max_calendar_turn is not None and int(calendar_turn) > int(self._max_calendar_turn):
+             return None
+         if b.horizon_days and int(calendar_turn) > int(b.horizon_days):
+-            if self._debug_events < 3:
+-                self._debug_events += 1
+-                # region agent log
+-                _agent_debug_log(
+-                    "H8",
+-                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                    "opening book blocked by horizon days",
+-                    {
+-                        "calendar_turn": int(calendar_turn),
+-                        "horizon_days": int(b.horizon_days),
+-                        "book_id": self.book_id,
+-                    },
+-                )
+-                # endregion
+             return None
+         if self._cursor >= len(b.action_indices):
+-            if self._debug_events < 3:
+-                self._debug_events += 1
+-                # region agent log
+-                _agent_debug_log(
+-                    "H8",
+-                    "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                    "opening book exhausted",
+-                    {
+-                        "cursor": int(self._cursor),
+-                        "action_count": len(b.action_indices),
+-                        "book_id": self.book_id,
+-                    },
+-                )
+-                # endregion
+             return None
+         ai = int(b.action_indices[self._cursor])
+-        if ai < 0 or ai >= action_mask.shape[0]:
++        if ai < 0 or ai >= int(action_mask.shape[0]):
+             self._mark_desync("flat_out_of_range")
+-            # region agent log
+-            _agent_debug_log(
+-                "H8",
+-                "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                "opening book desync: flat out of range",
+-                {"book_id": self.book_id, "cursor": int(self._cursor), "action_index": int(ai), "mask_size": int(action_mask.shape[0])},
+-            )
+-            # endregion
+             return None
+         if not bool(action_mask[ai]):
+             self._mark_desync("action_not_legal")
+-            # region agent log
+-            _agent_debug_log(
+-                "H8",
+-                "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                "opening book desync: action not legal",
+-                {"book_id": self.book_id, "cursor": int(self._cursor), "action_index": int(ai), "legal_count": int(np.asarray(action_mask, dtype=bool).sum())},
+-            )
+-            # endregion
+             return None
+-        self._cursor += 1
+-        self.actions_used += 1
+-        if self._debug_events < 3:
+-            self._debug_events += 1
+-            # region agent log
+-            _agent_debug_log(
+-                "H8",
+-                "rl/opening_book.py:OpeningBookController.suggest_flat",
+-                "opening book action used",
+-                {
+-                    "book_id": self.book_id,
+-                    "calendar_turn": int(calendar_turn),
+-                    "action_index": int(ai),
+-                    "cursor_after": int(self._cursor),
+-                    "actions_used": int(self.actions_used),
+-                },
+-            )
+-            # endregion
++        if advance:
++            self._cursor += 1
++            self.actions_used += 1
+         return ai
+ 
+     def _mark_desync(self, reason: str) -> None:
+@@ -297,9 +245,128 @@ class OpeningBookController:
+         self.desync_reason = reason
+         self._book = None
+ 
++    def log_fields(self) -> dict[str, Any]:
++        p = "p1" if self._seat == 1 else "p0"
++        return {
++            f"opening_book_id_{p}": self.book_id,
++            f"opening_book_used_{p}": bool(self.actions_used),
++            f"opening_book_actions_{p}": int(self.actions_used),
++            f"opening_book_desync_{p}": bool(self.desync),
++            f"opening_book_fallback_reason_{p}": self.desync_reason,
++            f"opening_book_episode_enabled_{p}": bool(self.episode_enabled),
++            f"opening_book_suggest_calls_{p}": int(self.suggest_calls),
++            f"opening_book_candidate_count_{p}": int(self.candidate_count),
++        }
++
++
++class TwoSidedOpeningBookManager:
++    """Owns per-seat book controllers for an AWBWEnv episode."""
++
++    def __init__(
++        self,
++        path: str | Path,
++        *,
++        seats: str | Iterable[int] = "both",
++        prob: float = 1.0,
++        strict_co: bool = False,
++        max_day: int | None = None,
++        seed: int = 0,
++    ) -> None:
++        self.index = OpeningBookIndex.from_jsonl(Path(path))
++        self.prob = max(0.0, min(1.0, float(prob)))
++        self.strict_co = bool(strict_co)
++        self.rng = random.Random(int(seed))
++        self.enabled_seats = _parse_seats(seats)
++        self.controllers = {
++            0: OpeningBookController(
++                self.index,
++                seat=0,
++                strict_co=self.strict_co,
++                rng=random.Random(int(seed) + 101),
++                max_calendar_turn=max_day,
++            ),
++            1: OpeningBookController(
++                self.index,
++                seat=1,
++                strict_co=self.strict_co,
++                rng=random.Random(int(seed) + 202),
++                max_calendar_turn=max_day,
++            ),
++        }
++
++    def on_episode_start(
++        self,
++        *,
++        episode_id: int,
++        map_id: int,
++        co_ids: list[int | None],
++    ) -> None:
++        use_episode = self.prob > 0.0 and self.rng.random() < self.prob
++        for seat, ctl in self.controllers.items():
++            ctl.on_episode_start(
++                episode_id=episode_id,
++                map_id=map_id,
++                co_id_for_seat=co_ids[seat] if 0 <= seat < len(co_ids) else None,
++                enabled=bool(use_episode and seat in self.enabled_seats),
++            )
++
++    def peek_flat(
++        self, *, seat: int, calendar_turn: int, action_mask: np.ndarray
++    ) -> int | None:
++        ctl = self.controllers.get(int(seat))
++        if ctl is None:
++            return None
++        return ctl.peek_flat(calendar_turn=calendar_turn, action_mask=action_mask)
++
++    def suggest_flat(
++        self, *, seat: int, calendar_turn: int, action_mask: np.ndarray
++    ) -> int | None:
++        ctl = self.controllers.get(int(seat))
++        if ctl is None:
++            return None
++        return ctl.suggest_flat(calendar_turn=calendar_turn, action_mask=action_mask)
++
++    def commit_flat(self, *, seat: int, action_idx: int) -> None:
++        ctl = self.controllers.get(int(seat))
++        if ctl is not None:
++            ctl.commit_flat(int(action_idx))
++
++    def log_fields(self) -> dict[str, Any]:
++        out: dict[str, Any] = {}
++        for ctl in self.controllers.values():
++            out.update(ctl.log_fields())
++        return out
++
++
++def _parse_seats(seats: str | Iterable[int]) -> set[int]:
++    if isinstance(seats, str):
++        raw = seats.strip().lower()
++        if raw in ("both", "all", "0,1", "1,0"):
++            return {0, 1}
++        if raw in ("p0", "0"):
++            return {0}
++        if raw in ("p1", "1"):
++            return {1}
++        if raw in ("none", "off", "false", "0.0"):
++            return set()
++        vals: set[int] = set()
++        for part in raw.replace(";", ",").split(","):
++            part = part.strip()
++            if part in ("0", "p0"):
++                vals.add(0)
++            elif part in ("1", "p1"):
++                vals.add(1)
++        return vals or {0, 1}
++    return {int(x) for x in seats if int(x) in (0, 1)}
++
+ 
+ class OpeningBookCheckpointOpponent:
+-    """Try opening book lines first, then delegate to a :class:`_CheckpointOpponent`."""
++    """Backward-compatible opponent wrapper.
++
++    New training should pass opening-book config to AWBWEnv instead.  This class
++    remains so old launch commands do not crash; it still controls only the
++    wrapped non-learner opponent.
++    """
+ 
+     def __init__(
+         self,
+@@ -315,27 +382,20 @@ class OpeningBookCheckpointOpponent:
+         import weakref
+ 
+         self._inner = inner
+-        self._index = OpeningBookIndex.from_jsonl(Path(book_path))
+         self._book_seat = int(book_seat)
+-        self._book_prob = float(max(0.0, min(1.0, book_prob)))
+-        md = max_day
+-        if md is not None and int(md) <= 0:
+-            md = None
+-        self._ctl = OpeningBookController(
+-            self._index,
+-            seat=self._book_seat,
+-            strict_co=bool(strict_co),
+-            rng=random.Random(int(seed) + 17),
+-            max_calendar_turn=md,
++        self._mgr = TwoSidedOpeningBookManager(
++            book_path,
++            seats=str(self._book_seat),
++            prob=book_prob,
++            strict_co=strict_co,
++            max_day=max_day,
++            seed=seed,
+         )
+-        self._prob_rng = random.Random(int(seed))
+         self._env_ref: Any = None
+         self._last_episode_id: int | None = None
+-        self._episode_use_book: bool = False
+         self._wref = weakref
+ 
+     def reload_pool(self, zip_paths: list[str] | None = None) -> int | None:
+-        """Delegate Phase 10c opponent pool refresh to the inner checkpoint opponent."""
+         fn = getattr(self._inner, "reload_pool", None)
+         if fn is None:
+             return None
+@@ -352,26 +412,18 @@ class OpeningBookCheckpointOpponent:
+ 
+     @property
+     def _model(self) -> Any:
+-        """Same checkpoint as P1 after book lines; used by spirit / heuristic value diag."""
+         return getattr(self._inner, "_model", None)
+ 
+     def needs_observation(self) -> bool:
+         fn = getattr(self._inner, "needs_observation", None)
+-        if fn is None:
+-            return True
+-        return bool(fn())
++        return True if fn is None else bool(fn())
+ 
+     def mode(self) -> str:
+-        if self._ctl.book_id:
+-            im = getattr(self._inner, "mode", None)
+-            inner_label = str(im()) if callable(im) else "checkpoint"
+-            return f"opening_book+{inner_label}"
+         im = getattr(self._inner, "mode", None)
+-        return str(im()) if callable(im) else "checkpoint"
++        inner_label = str(im()) if callable(im) else "checkpoint"
++        return f"opening_book+{inner_label}"
+ 
+     def __call__(self, obs: object, mask: object) -> int:
+-        import numpy as np
+-
+         env = self._env_ref() if self._env_ref is not None else None
+         st = getattr(env, "state", None) if env is not None else None
+         m = np.asarray(mask, dtype=bool)
+@@ -379,37 +431,25 @@ class OpeningBookCheckpointOpponent:
+             eid = int(getattr(env, "_episode_id", 0) or 0)
+             if eid != self._last_episode_id:
+                 self._last_episode_id = eid
+-                map_id = int(st.map_data.map_id)
+-                my_seat = int(self._book_seat)
+-                co_s = st.co_states[my_seat] if 0 <= my_seat < len(st.co_states) else None
+-                co_id = int(co_s.co_id) if co_s is not None else None
+-                self._ctl.on_episode_start(
+-                    episode_id=eid, map_id=map_id, co_id_for_seat=co_id
++                co_ids = [None, None]
++                try:
++                    co_ids = [int(st.co_states[0].co_id), int(st.co_states[1].co_id)]
++                except Exception:
++                    pass
++                self._mgr.on_episode_start(
++                    episode_id=eid,
++                    map_id=int(st.map_data.map_id),
++                    co_ids=co_ids,
+                 )
+-                self._episode_use_book = (
+-                    self._book_prob > 0.0
+-                    and self._ctl.book_id is not None
+-                    and self._prob_rng.random() < self._book_prob
++            if int(st.active_player) == int(self._book_seat):
++                a = self._mgr.suggest_flat(
++                    seat=self._book_seat,
++                    calendar_turn=int(getattr(st, "turn", 0) or 0),
++                    action_mask=m,
+                 )
+-        seat_ok = True
+-        if st is not None and env is not None:
+-            enemy_seat = int(getattr(env, "_enemy_seat", self._book_seat))
+-            active = int(st.active_player)
+-            seat_ok = (
+-                int(self._book_seat) == enemy_seat and active == int(self._book_seat)
+-            )
+-        use_book = (
+-            seat_ok
+-            and self._episode_use_book
+-            and bool(self._ctl._index.by_map_seat)
+-            and st is not None
+-        )
+-        if use_book:
+-            t = int(getattr(st, "turn", 0) or 0)
+-            a = self._ctl.suggest_flat(calendar_turn=t, action_mask=m)
+-            if a is not None:
+                 self._sync_log(env)
+-                return int(a)
++                if a is not None:
++                    return int(a)
+         act = int(self._inner(obs, m))
+         self._sync_log(env)
+         return act
+@@ -418,13 +458,5 @@ class OpeningBookCheckpointOpponent:
+         if env is None:
+             return
+         d = getattr(env, "_opening_book_log", None)
+-        if not isinstance(d, dict):
+-            return
+-        p = "p1" if int(self._book_seat) == 1 else "p0"
+-        d[f"opening_book_id_{p}"] = self._ctl.book_id
+-        d[f"opening_book_used_{p}"] = bool(self._ctl.actions_used)
+-        d[f"opening_book_actions_{p}"] = int(self._ctl.actions_used)
+-        d[f"opening_book_desync_{p}"] = bool(self._ctl.desync)
+-        d[f"opening_book_fallback_reason_{p}"] = self._ctl.desync_reason
+-        d[f"opening_book_episode_enabled_{p}"] = bool(self._episode_use_book)
+-        d[f"opening_book_suggest_calls_{p}"] = int(self._ctl.suggest_calls)
++        if isinstance(d, dict):
++            d.update(self._mgr.log_fields())
+diff --git a/rl/self_play.py b/rl/self_play.py
+index 0216071..c25c06d 100644
+--- a/rl/self_play.py
++++ b/rl/self_play.py
+@@ -1062,6 +1062,7 @@ class _PicklableEnvFactory:
+         "opponent_force_cpu",
+         "opening_book_path",
+         "opening_book_seat",
++        "opening_book_seats",
+         "opening_book_prob",
+         "opening_book_strict_co",
+         "opening_book_max_day",
+@@ -1092,6 +1093,7 @@ class _PicklableEnvFactory:
+         opponent_force_cpu: bool = False,
+         opening_book_path: str | None = None,
+         opening_book_seat: int = 1,
++        opening_book_seats: str | None = "both",
+         opening_book_prob: float = 1.0,
+         opening_book_strict_co: bool = False,
+         opening_book_max_day: int | None = None,
+@@ -1119,6 +1121,7 @@ class _PicklableEnvFactory:
+         self.opponent_force_cpu = bool(opponent_force_cpu)
+         self.opening_book_path = opening_book_path
+         self.opening_book_seat = int(opening_book_seat)
++        self.opening_book_seats = str(opening_book_seats or opening_book_seat)
+         self.opening_book_prob = float(opening_book_prob)
+         self.opening_book_strict_co = bool(opening_book_strict_co)
+         self.opening_book_max_day = opening_book_max_day
+@@ -1150,18 +1153,6 @@ class _PicklableEnvFactory:
+             inference_device=opp_dev,
+             gpu_infer_semaphore=self.gpu_infer_semaphore,
+         )
+-        if self.opening_book_path:
+-            from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
+-
+-            opponent = OpeningBookCheckpointOpponent(
+-                opponent,
+-                self.opening_book_path,
+-                book_seat=self.opening_book_seat,
+-                book_prob=self.opening_book_prob,
+-                strict_co=self.opening_book_strict_co,
+-                max_day=self.opening_book_max_day,
+-                seed=self.opening_book_seed + int(self.worker_index),
+-            )
+         env = AWBWEnv(
+             map_pool=self.map_pool,
+             opponent_policy=opponent,
+@@ -1176,6 +1167,13 @@ class _PicklableEnvFactory:
+             live_snapshot_path=self.live_snapshot_path,
+             live_games_id=self.live_games_id,
+             live_fallback_curriculum=self.live_fallback_curriculum,
++            opening_book_path=self.opening_book_path,
++            opening_book_seats=self.opening_book_seats,
++            opening_book_prob=self.opening_book_prob,
++            opening_book_strict_co=self.opening_book_strict_co,
++            opening_book_max_day=self.opening_book_max_day,
++            opening_book_seed=self.opening_book_seed + int(self.worker_index),
++            opening_book_force_mask_for_learner=True,
+         )
+         opponent.attach_env(env)
+         return ActionMasker(env, _mask_fn)
+@@ -1204,6 +1202,7 @@ def _make_env_factory(
+     opponent_force_cpu: bool = False,
+     opening_book_path: str | None = None,
+     opening_book_seat: int = 1,
++    opening_book_seats: str | None = "both",
+     opening_book_prob: float = 1.0,
+     opening_book_strict_co: bool = False,
+     opening_book_max_day: int | None = None,
+@@ -1233,6 +1232,7 @@ def _make_env_factory(
+         opponent_force_cpu=opponent_force_cpu,
+         opening_book_path=opening_book_path,
+         opening_book_seat=opening_book_seat,
++        opening_book_seats=opening_book_seats,
+         opening_book_prob=opening_book_prob,
+         opening_book_strict_co=opening_book_strict_co,
+         opening_book_max_day=opening_book_max_day,
+@@ -1629,6 +1629,7 @@ class SelfPlayTrainer:
+         async_log_rho_floor: float = -20.0,
+         opening_book_path: Path | str | None = None,
+         opening_book_seat: int = 1,
++        opening_book_seats: str | None = "both",
+         opening_book_prob: float = 1.0,
+         opening_book_strict_co: bool = False,
+         opening_book_max_day: int | None = None,
+@@ -1696,6 +1697,7 @@ class SelfPlayTrainer:
+             )
+             self.opening_book_path = None
+         self.opening_book_seat = int(opening_book_seat)
++        self.opening_book_seats = str(opening_book_seats or opening_book_seat)
+         self.opening_book_prob = float(max(0.0, min(1.0, float(opening_book_prob))))
+         self.opening_book_strict_co = bool(opening_book_strict_co)
+         self.opening_book_max_day = (
+@@ -1924,6 +1926,7 @@ class SelfPlayTrainer:
+             max_p1_microsteps=self.max_p1_microsteps,
+             opening_book_path=self.opening_book_path,
+             opening_book_seat=self.opening_book_seat,
++            opening_book_seats=self.opening_book_seats,
+             opening_book_prob=self.opening_book_prob,
+             opening_book_strict_co=self.opening_book_strict_co,
+             opening_book_max_day=self.opening_book_max_day,
+@@ -2037,18 +2040,6 @@ class SelfPlayTrainer:
+                 fleet_opponent_root=self.fleet_opponent_root,
+                 inference_device=opp_dev,
+             )
+-            if self.opening_book_path and n_live == 0:
+-                from rl.opening_book import OpeningBookCheckpointOpponent  # noqa: WPS433
+-
+-                opponent = OpeningBookCheckpointOpponent(
+-                    opponent,
+-                    self.opening_book_path,
+-                    book_seat=self.opening_book_seat,
+-                    book_prob=self.opening_book_prob,
+-                    strict_co=self.opening_book_strict_co,
+-                    max_day=self.opening_book_max_day,
+-                    seed=self.opening_book_seed,
+-                )
+             env = AWBWEnv(
+                 map_pool=self.map_pool,
+                 opponent_policy=opponent,
+@@ -2062,6 +2053,13 @@ class SelfPlayTrainer:
+                 max_p1_microsteps=self.max_p1_microsteps,
+                 live_snapshot_path=lpath,
+                 live_games_id=lgid,
++                opening_book_path=(self.opening_book_path if n_live == 0 else None),
++                opening_book_seats=self.opening_book_seats,
++                opening_book_prob=self.opening_book_prob,
++                opening_book_strict_co=self.opening_book_strict_co,
++                opening_book_max_day=self.opening_book_max_day,
++                opening_book_seed=self.opening_book_seed,
++                opening_book_force_mask_for_learner=True,
+             )
+             opponent.attach_env(env)
+             return ActionMasker(env, _mask_fn)
+diff --git a/tools/build_opening_book_both.py b/tools/build_opening_book_both.py
+new file mode 100644
+index 0000000..6ee90c1
+--- /dev/null
++++ b/tools/build_opening_book_both.py
+@@ -0,0 +1,160 @@
++#!/usr/bin/env python3
++"""Build CO-agnostic two-seat opening books from opening_demos.jsonl.
++
++This is the env-level opening-book builder used by the two-sided runtime in
++``rl.opening_book``.  It emits one JSONL row per ``(session_id, active_player)``
++with ordered flat ``action_indices``.  The default is to build both seats.
++
++CO IDs are preserved as metadata only.  Runtime matching is CO-agnostic unless a
++caller explicitly opts into ``strict_co=True``.
++"""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import random
++import sys
++from collections import defaultdict
++from pathlib import Path
++from typing import Any
++
++ROOT = Path(__file__).resolve().parents[1]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++
++def _parse_seats(raw: str) -> list[int]:
++    r = str(raw or "both").strip().lower()
++    if r in ("both", "all", "0,1", "1,0"):
++        return [0, 1]
++    if r in ("0", "p0"):
++        return [0]
++    if r in ("1", "p1"):
++        return [1]
++    raise ValueError("--seat must be 0, 1, p0, p1, or both")
++
++
++def _book_key_for_session(
++    map_id: int, seat: int, co_id: int | None, session_id: str, n_actions: int
++) -> str:
++    h = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8]
++    co = int(co_id) if co_id is not None else -1
++    return f"g{map_id}_s{seat}_co{co}_n{n_actions}_{h}"
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument("--demos", type=Path, required=True)
++    ap.add_argument("--out", type=Path, required=True)
++    ap.add_argument("--seat", type=str, default="both", help="0, 1, p0, p1, or both")
++    ap.add_argument(
++        "--dedupe",
++        type=str,
++        default="action_prefix",
++        choices=("action_prefix", "none"),
++    )
++    ap.add_argument(
++        "--top-k-per-map",
++        type=int,
++        default=0,
++        dest="top_k_per_map",
++        help="If >0, after dedupe cap to K random books per (map_id, seat).",
++    )
++    ap.add_argument("--seed", type=int, default=0)
++    args = ap.parse_args()
++    seats = _parse_seats(args.seat)
++    rng = random.Random(int(args.seed))
++
++    by_session_seat: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
++    with open(args.demos, encoding="utf-8") as f:
++        for line in f:
++            line = line.strip()
++            if not line:
++                continue
++            row = json.loads(line)
++            active = int(row.get("active_player", -1))
++            if active not in seats:
++                continue
++            sid = str(row.get("book_session_id") or row.get("session_id", "unknown"))
++            by_session_seat[(sid, active)].append(row)
++
++    books: list[dict[str, Any]] = []
++    for (sid, seat), rows in by_session_seat.items():
++        rows.sort(
++            key=lambda r: (
++                r.get("trace_index", 0),
++                r.get("awbw_turn", 0),
++                r.get("calendar_turn", 0),
++            )
++        )
++        if not rows:
++            continue
++        r0 = rows[0]
++        map_id = int(r0.get("map_id", 0) or 0)
++        action_indices = [int(r.get("action_idx", 0)) for r in rows]
++        if not action_indices:
++            continue
++        co0 = int(r0.get("co0", 0) or 0)
++        co1 = int(r0.get("co1", 0) or 0)
++        co_id: int | None = co0 if seat == 0 else co1
++        if co_id == 0:
++            co_id = None
++        tier = r0.get("tier")
++        tier_s = str(tier) if tier not in (None, "") else None
++        books.append(
++            {
++                "book_id": _book_key_for_session(map_id, seat, co_id, sid, len(action_indices)),
++                "source_game_id": int(r0.get("source_game_id", 0) or 0),
++                "map_id": map_id,
++                "seat": int(seat),
++                "co0": co0 if co0 else None,
++                "co1": co1 if co1 else None,
++                "co_id": co_id,
++                "co_name": None,
++                "tier": tier_s,
++                "horizon_days": 0,
++                "opening_player": 0,
++                "settings_hash": "unknown",
++                "session_id": sid,
++                "book_session_id": sid,
++                "action_indices": action_indices,
++                "validation": {
++                    "legal_replay": False,
++                    "source": "build_opening_book_both",
++                    "note": "CO-agnostic by default; validate before long training runs.",
++                },
++            }
++        )
++
++    if args.dedupe == "action_prefix":
++        seen: set[tuple[Any, ...]] = set()
++        kept: list[dict[str, Any]] = []
++        for b in books:
++            k = (b.get("map_id"), b.get("seat"), tuple(b.get("action_indices", ())[:12]))
++            if k in seen:
++                continue
++            seen.add(k)
++            kept.append(b)
++        books = kept
++
++    if int(args.top_k_per_map) > 0:
++        per: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
++        for b in books:
++            per[(int(b["map_id"]), int(b["seat"]))].append(b)
++        trimmed: list[dict[str, Any]] = []
++        for _key, bs in per.items():
++            rng.shuffle(bs)
++            trimmed.extend(bs[: int(args.top_k_per_map)])
++        books = trimmed
++
++    args.out.parent.mkdir(parents=True, exist_ok=True)
++    with open(args.out, "w", encoding="utf-8") as f:
++        for b in books:
++            f.write(json.dumps(b) + "\n")
++    print(f"[build_opening_book_both] seats={seats} books={len(books)} -> {args.out}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/train.py b/train.py
+index ed410a0..11e106d 100644
+--- a/train.py
++++ b/train.py
+@@ -446,12 +446,27 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
+     )
+     parser.add_argument(
+         "--opening-book", type=Path, default=None,
+-        help="JSONL from tools/build_opening_book.py; wraps checkpoint opponent (P1 book by default).",
++        help=(
++            "JSONL from tools/build_opening_book.py. Applied inside AWBWEnv so "
++            "P0 and/or P1 can use it during the opening."
++        ),
++    )
++    parser.add_argument(
++        "--opening-book-seat",
++        type=int,
++        default=1,
++        help="Deprecated compatibility alias; prefer --opening-book-seats.",
++    )
++    parser.add_argument(
++        "--opening-book-seats",
++        type=str,
++        default="both",
++        choices=("both", "p0", "p1", "0", "1", "none"),
++        help="Which engine seats may use opening books. Default: both.",
+     )
+-    parser.add_argument("--opening-book-seat", type=int, default=1, help="Engine seat the book encodes (1=P1).")
+     parser.add_argument(
+         "--opening-book-prob", type=float, default=1.0,
+-        help="Per microstep: probability of using the book when entries exist (0-1).",
++        help="Per episode probability of enabling the selected opening book lines (0-1).",
+     )
+     parser.add_argument(
+         "--opening-book-strict-co", action=argparse.BooleanOptionalAction, default=False,
+@@ -888,6 +903,7 @@ def main() -> None:
+         async_learner_forward_chunk=args.async_learner_forward_chunk,
+         opening_book_path=args.opening_book,
+         opening_book_seat=getattr(args, "opening_book_seat", 1),
++        opening_book_seats=getattr(args, "opening_book_seats", "both"),
+         opening_book_prob=getattr(args, "opening_book_prob", 1.0),
+         opening_book_strict_co=getattr(args, "opening_book_strict_co", False),
+         opening_book_max_day=(

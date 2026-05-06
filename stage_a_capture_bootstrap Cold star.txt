@@ -1,0 +1,17 @@
+stage_a_capture_bootstrap: Cold start with greedy_capture opponent, capture-move gate, Jess mirror
+stage_b_capture_competent: Capture solid; broaden cold opponent to greedy_mix
+stage_c_terrain_competent: Terrain competent; drop capture-move gate; minimal greedy mix
+stage_d_gl_std_map_pool_t4: All GL Std maps; fixed T4 Jess vs Jess (avoids Andy free-repair)
+stage_e_gl_mixed_ladder: Std maps; 100% broad (full random map/tier/CO within pool)
+stage_f_self_play_pure: 100% broad GL self-play mixture
+stage_g_mcts_eval_ready: Terminal stage with MCTS eval_only (baseline sims=16)
+Stage Progression Logic
+The curriculum advances based on competence metrics (capture sense, terrain usage, win rate, etc.) with minimum games required in each stage:
+
+Stage A: 200+ games, fast first capture (≤15 steps) + sustained capture volume (≥4)
+Stage B: 300+ games, terrain ≥0.52, capture sense ≥0.5, win rate ≥0.45
+Stage C: 500+ games, win rate ≥0.62, terrain ≥0.52, episode quality ≥0.72
+Stage D: 300+ games, win rate ≥0.58, terrain ≥0.48, capture sense ≥0.42
+Stage E: 400+ games, win rate ≥0.52, terrain ≥0.42, episode quality ≥0.68
+Stage F: 400+ games, same metrics as E
+Stage G: Terminal stage (requires 1M+ games, never advances automatically)

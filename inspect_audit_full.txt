@@ -1,0 +1,1220 @@
+﻿python : [desync_audit] catalogs: D:\awbw\data\amarriner_gl_std_catalog.json total_games=1532
+At C:\Users\phili\AppData\Local\Temp\ps-script-8d4a4917-737c-4c63-8fc7-3ac135ea1579.ps1:78 char:13
++ cd d:\awbw; python tools/desync_audit.py --register logs/desync_regis ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([desync_audit] ...otal_games=1532:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[desync_audit] zips_matched=1191 filtered_out_by_map_pool=0 filtered_out_by_co=0
+[1553655] state_mismatch_units         day~9 acts=221 | unit tile set mismatch only_in_php=[(1, 6, 7)] only_in_engine=[]
+[1605367] state_mismatch_units         day~8 acts=173 | unit tile set mismatch only_in_php=[(1, 9, 7), (1, 13, 13)] only_in_engine=[]
+[1607045] state_mismatch_units         day~7 acts=151 | unit tile set mismatch only_in_php=[(0, 12, 16)] only_in_engine=[]
+[1609216] state_mismatch_units         day~8 acts=217 | unit tile set mismatch only_in_php=[(0, 8, 12)] only_in_engine=[]
+[1609533] state_mismatch_multi         day~7 acts=131 | unit tile set mismatch only_in_php=[(1, 5, 3), (1, 16, 15), (1, 17, 16)] only_in_engine=[]
+[1609589] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 9, 7), (0, 15, 16)] only_in_engine=[]
+[1609626] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 6, 12), (0, 9, 11)] only_in_engine=[]
+[1610091] state_mismatch_multi         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 8, 12)] only_in_engine=[]; property at (7,7) captu
+[1611364] state_mismatch_units         day~8 acts=211 | unit tile set mismatch only_in_php=[(0, 14, 16)] only_in_engine=[]
+[1613840] state_mismatch_units         day~6 acts=109 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1614500] state_mismatch_units         day~7 acts=142 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1614598] state_mismatch_units         day~6 acts=123 | unit tile set mismatch only_in_php=[(0, 13, 15)] only_in_engine=[]
+[1614665] state_mismatch_units         day~6 acts=91 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1615143] state_mismatch_units         day~6 acts=112 | unit tile set mismatch only_in_php=[(0, 6, 12)] only_in_engine=[]
+[1615231] state_mismatch_units         day~6 acts=107 | unit tile set mismatch only_in_php=[(1, 9, 12)] only_in_engine=[]
+[1615566] state_mismatch_units         day~6 acts=94 | unit tile set mismatch only_in_php=[(1, 10, 8), (1, 12, 10)] only_in_engine=[]
+[1615789] state_mismatch_units         day~9 acts=215 | unit tile set mismatch only_in_php=[(1, 7, 9)] only_in_engine=[]
+[1616197] state_mismatch_units         day~8 acts=196 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1616284] state_mismatch_units         day~6 acts=121 | unit tile set mismatch only_in_php=[(0, 12, 18)] only_in_engine=[]
+[1617442] state_mismatch_units         day~7 acts=138 | unit tile set mismatch only_in_php=[(1, 11, 13), (1, 17, 18)] only_in_engine=[]
+[1617897] state_mismatch_units         day~7 acts=142 | unit tile set mismatch only_in_php=[(1, 16, 14)] only_in_engine=[]
+[1617950] state_mismatch_units         day~5 acts=85 | unit tile set mismatch only_in_php=[(0, 11, 11)] only_in_engine=[]
+[1618523] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1618770] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(0, 13, 13)] only_in_engine=[]
+[1618984] state_mismatch_turn          day~3 acts=54 | turn engine=3 php_day=4
+[1618986] ok                           day~None acts=190 | 
+[1619108] state_mismatch_units         day~9 acts=251 | unit tile set mismatch only_in_php=[(0, 3, 10), (0, 7, 9), (0, 9, 11)] only_in_engine=[]
+[1619117] state_mismatch_units         day~4 acts=103 | unit tile set mismatch only_in_php=[(0, 3, 6)] only_in_engine=[]
+[1619146] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 9, 19)] only_in_engine=[]
+[1619191] state_mismatch_multi         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 4, 15)] only_in_engine=[]; property at (5,15) capt
+[1619454] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(1, 10, 4)] only_in_engine=[]
+[1619474] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 4, 16)] only_in_engine=[]
+[1619504] state_mismatch_units         day~5 acts=88 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1619589] state_mismatch_units         day~8 acts=194 | unit tile set mismatch only_in_php=[(0, 6, 16)] only_in_engine=[]
+[1619686] state_mismatch_units         day~9 acts=199 | unit tile set mismatch only_in_php=[(1, 12, 12)] only_in_engine=[]
+[1619695] state_mismatch_multi         day~7 acts=197 | unit tile set mismatch only_in_php=[(1, 15, 11), (1, 15, 13), (1, 18, 5)] only_in_engine=[
+[1619785] state_mismatch_units         day~6 acts=121 | unit tile set mismatch only_in_php=[(0, 10, 16)] only_in_engine=[]
+[1619791] state_mismatch_units         day~6 acts=173 | unit tile set mismatch only_in_php=[(0, 12, 5), (0, 12, 6)] only_in_engine=[]
+[1619803] state_mismatch_multi         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 7, 10), (0, 17, 12)] only_in_engine=[]; property a
+[1619807] state_mismatch_units         day~7 acts=135 | unit tile set mismatch only_in_php=[(0, 7, 15)] only_in_engine=[]
+[1619832] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 10, 0)] only_in_engine=[]
+[1619846] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 3, 2)] only_in_engine=[]
+[1619894] ok                           day~None acts=108 | 
+[1620039] state_mismatch_multi         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 13, 11), (0, 16, 2)] only_in_engine=[]; property a
+[1620188] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 18)] only_in_engine=[]
+[1620232] state_mismatch_units         day~8 acts=150 | unit tile set mismatch only_in_php=[(1, 7, 13), (1, 11, 7)] only_in_engine=[]
+[1620301] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(1, 8, 1)] only_in_engine=[]
+[1620320] state_mismatch_units         day~6 acts=95 | unit tile set mismatch only_in_php=[(1, 2, 2), (1, 11, 11)] only_in_engine=[]
+[1620450] state_mismatch_units         day~9 acts=186 | unit tile set mismatch only_in_php=[(1, 12, 3)] only_in_engine=[]
+[1620558] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 15, 14)] only_in_engine=[]
+[1620579] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1620585] state_mismatch_multi         day~8 acts=168 | unit tile set mismatch only_in_php=[(1, 3, 17)] only_in_engine=[]; property at (10,0) capt
+[1620633] state_mismatch_units         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 9, 7)] only_in_engine=[]
+[1620704] state_mismatch_units         day~5 acts=164 | unit tile set mismatch only_in_php=[(0, 4, 12)] only_in_engine=[]
+[1621170] state_mismatch_units         day~7 acts=139 | unit tile set mismatch only_in_php=[(0, 5, 11), (0, 5, 17)] only_in_engine=[]
+[1621299] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 13, 15)] only_in_engine=[]
+[1621335] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 11, 7)] only_in_engine=[]
+[1621355] state_mismatch_units         day~7 acts=124 | unit tile set mismatch only_in_php=[(1, 11, 6), (1, 11, 12)] only_in_engine=[]
+[1621395] state_mismatch_units         day~7 acts=127 | unit tile set mismatch only_in_php=[(1, 8, 1)] only_in_engine=[]
+[1621409] state_mismatch_units         day~8 acts=167 | unit tile set mismatch only_in_php=[(1, 10, 5)] only_in_engine=[]
+[1621417] ok                           day~None acts=42 | 
+[1621434] state_mismatch_multi         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]; P0 charge_mismatch: ph
+[1621507] state_mismatch_properties    day~8 acts=180 | property at (13,5) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1621552] state_mismatch_units         day~7 acts=163 | unit tile set mismatch only_in_php=[(0, 2, 2)] only_in_engine=[]
+[1621555] state_mismatch_units         day~7 acts=140 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1621557] state_mismatch_properties    day~8 acts=157 | property at (7,13) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1621635] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 7, 13), (1, 15, 3)] only_in_engine=[]
+[1621641] state_mismatch_turn          day~7 acts=122 | turn engine=7 php_day=8
+[1621674] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 14, 4)] only_in_engine=[]
+[1621707] state_mismatch_units         day~7 acts=138 | unit tile set mismatch only_in_php=[(0, 5, 20), (0, 10, 4)] only_in_engine=[]
+[1621898] state_mismatch_units         day~9 acts=244 | unit tile set mismatch only_in_php=[(0, 7, 12), (0, 8, 13)] only_in_engine=[]
+[1621986] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1621999] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 9, 17)] only_in_engine=[]
+[1622012] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1622104] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1622124] state_mismatch_units         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1622140] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(0, 7, 18)] only_in_engine=[]
+[1622224] state_mismatch_multi         day~9 acts=244 | unit tile set mismatch only_in_php=[(0, 14, 15)] only_in_engine=[]; P0 charge_mismatch: ph
+[1622260] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1622328] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1622360] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1622443] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1622448] state_mismatch_units         day~7 acts=142 | unit tile set mismatch only_in_php=[(1, 10, 8), (1, 11, 11)] only_in_engine=[]
+[1622452] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 3, 15), (1, 15, 3)] only_in_engine=[]
+[1622453] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1622501] state_mismatch_units         day~7 acts=168 | unit tile set mismatch only_in_php=[(1, 2, 13)] only_in_engine=[]
+[1622502] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1622528] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 4, 3), (0, 5, 4), (0, 11, 20)] only_in_engine=[]
+[1622610] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1622712] state_mismatch_units         day~8 acts=172 | unit tile set mismatch only_in_php=[(0, 16, 5)] only_in_engine=[]
+[1622714] state_mismatch_units         day~9 acts=227 | unit tile set mismatch only_in_php=[(0, 2, 11), (0, 13, 13), (0, 14, 13), (0, 17, 15)] onl
+[1622837] state_mismatch_properties    day~6 acts=148 | property at (14,13) capture_points engine=5 php_scaled=20 (php_raw=20)
+[1622871] state_mismatch_multi         day~10 acts=254 | unit tile set mismatch only_in_php=[(0, 4, 15)] only_in_engine=[]; P0 charge_mismatch: php
+[1622910] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1622918] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1622949] ok                           day~None acts=25 | 
+[1622950] state_mismatch_units         day~7 acts=199 | unit tile set mismatch only_in_php=[(1, 11, 2), (1, 12, 14)] only_in_engine=[]
+[1622989] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(0, 5, 20), (0, 9, 6)] only_in_engine=[]
+[1623012] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1623014] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 6, 9)] only_in_engine=[]
+[1623065] ok                           day~None acts=61 | 
+[1623067] ok                           day~None acts=42 | 
+[1623070] ok                           day~None acts=39 | 
+[1623071] ok                           day~None acts=49 | 
+[1623078] ok                           day~None acts=53 | 
+[1623106] state_mismatch_multi         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 5, 10)] only_in_engine=[]; P1 charge_mismatch: php
+[1623121] ok                           day~None acts=42 | 
+[1623144] state_mismatch_units         day~7 acts=164 | unit tile set mismatch only_in_php=[(0, 2, 2), (0, 8, 10)] only_in_engine=[]
+[1623193] state_mismatch_units         day~6 acts=146 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1623243] ok                           day~None acts=78 | 
+[1623251] state_mismatch_units         day~7 acts=200 | unit tile set mismatch only_in_php=[(1, 10, 20), (1, 13, 6), (1, 15, 13)] only_in_engine=[
+[1623286] state_mismatch_units         day~9 acts=240 | unit tile set mismatch only_in_php=[(0, 12, 3), (0, 12, 4)] only_in_engine=[]
+[1623289] state_mismatch_units         day~6 acts=140 | unit tile set mismatch only_in_php=[(1, 9, 19)] only_in_engine=[]
+[1623386] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 12, 16)] only_in_engine=[]
+[1623484] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 1, 15)] only_in_engine=[]
+[1623496] state_mismatch_multi         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 1, 14)] only_in_engine=[]; property at (8,19) capt
+[1623564] ok                           day~None acts=50 | 
+[1623588] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 14, 2)] only_in_engine=[]
+[1623688] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(0, 3, 3)] only_in_engine=[]
+[1623697] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(1, 11, 11)] only_in_engine=[]
+[1623698] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(1, 9, 16)] only_in_engine=[]
+[1623738] state_mismatch_units         day~9 acts=190 | unit tile set mismatch only_in_php=[(1, 2, 16), (1, 5, 15)] only_in_engine=[]
+[1623752] state_mismatch_multi         day~5 acts=75 | unit tile set mismatch only_in_php=[(1, 11, 10)] only_in_engine=[]; property at (11,11) ca
+[1623770] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 4, 16)] only_in_engine=[]
+[1623772] state_mismatch_multi         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 7, 8)] only_in_engine=[]; property at (7,7) captur
+[1623861] state_mismatch_units         day~7 acts=139 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1623866] state_mismatch_units         day~5 acts=160 | unit tile set mismatch only_in_php=[(0, 2, 11)] only_in_engine=[]
+[1623867] state_mismatch_units         day~6 acts=121 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1623907] state_mismatch_units         day~5 acts=162 | unit tile set mismatch only_in_php=[(0, 5, 17), (0, 6, 13), (0, 8, 17)] only_in_engine=[]
+[1623908] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 6, 14)] only_in_engine=[]
+[1623944] state_mismatch_units         day~7 acts=208 | unit tile set mismatch only_in_php=[(0, 12, 5), (0, 19, 8), (0, 19, 10)] only_in_engine=[]
+[1623945] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1623951] state_mismatch_units         day~6 acts=186 | unit tile set mismatch only_in_php=[(1, 13, 3)] only_in_engine=[]
+[1623953] state_mismatch_units         day~6 acts=109 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1624026] state_mismatch_units         day~7 acts=140 | unit tile set mismatch only_in_php=[(0, 5, 15)] only_in_engine=[]
+[1624035] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1624068] ok                           day~None acts=94 | 
+[1624082] state_mismatch_units         day~9 acts=217 | unit tile set mismatch only_in_php=[(1, 7, 5), (1, 8, 4), (1, 9, 9), (1, 10, 10), (1, 11, 
+[1624097] state_mismatch_units         day~5 acts=123 | unit tile set mismatch only_in_php=[(0, 8, 22)] only_in_engine=[]
+[1624141] state_mismatch_units         day~6 acts=101 | unit tile set mismatch only_in_php=[(0, 7, 10)] only_in_engine=[]
+[1624165] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 9, 16), (1, 12, 13)] only_in_engine=[]
+[1624181] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 15, 3)] only_in_engine=[]
+[1624183] state_mismatch_units         day~7 acts=142 | unit tile set mismatch only_in_php=[(0, 4, 4)] only_in_engine=[]
+[1624251] state_mismatch_units         day~6 acts=120 | unit tile set mismatch only_in_php=[(0, 8, 7)] only_in_engine=[]
+[1624281] state_mismatch_properties    day~9 acts=251 | property at (7,9) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1624307] state_mismatch_units         day~7 acts=127 | unit tile set mismatch only_in_php=[(1, 16, 15)] only_in_engine=[]
+[1624316] state_mismatch_units         day~6 acts=97 | unit tile set mismatch only_in_php=[(1, 15, 9)] only_in_engine=[]
+[1624375] state_mismatch_units         day~4 acts=61 | unit tile set mismatch only_in_php=[(1, 1, 15)] only_in_engine=[]
+[1624421] state_mismatch_multi         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 4, 14), (1, 9, 10)] only_in_engine=[]; P1 charge_m
+[1624450] state_mismatch_units         day~5 acts=165 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1624489] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1624523] ok                           day~None acts=79 | 
+[1624545] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1624590] state_mismatch_units         day~6 acts=146 | unit tile set mismatch only_in_php=[(1, 15, 4)] only_in_engine=[]
+[1624624] ok                           day~None acts=75 | 
+[1624634] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 11, 2)] only_in_engine=[]
+[1624635] state_mismatch_units         day~8 acts=163 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1624637] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 12, 21)] only_in_engine=[]
+[1624641] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1624648] ok                           day~None acts=67 | 
+[1624667] ok                           day~None acts=34 | 
+[1624668] state_mismatch_multi         day~5 acts=124 | unit tile set mismatch only_in_php=[(1, 5, 18)] only_in_engine=[]; property at (5,17) capt
+[1624670] state_mismatch_units         day~7 acts=201 | unit tile set mismatch only_in_php=[(1, 5, 16), (1, 10, 15), (1, 15, 3)] only_in_engine=[]
+[1624686] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 2, 18)] only_in_engine=[]
+[1624687] state_mismatch_units         day~9 acts=225 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1624721] state_mismatch_multi         day~9 acts=208 | unit tile set mismatch only_in_php=[(0, 8, 17)] only_in_engine=[]; property at (13,5) capt
+[1624722] ok                           day~None acts=44 | 
+[1624758] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1624764] state_mismatch_units         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 16, 16)] only_in_engine=[]
+[1624780] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 4, 6)] only_in_engine=[]
+[1624783] state_mismatch_properties    day~9 acts=220 | property at (9,11) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1624788] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 15, 3)] only_in_engine=[]
+[1624789] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1624805] state_mismatch_units         day~7 acts=126 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1624806] state_mismatch_units         day~5 acts=123 | unit tile set mismatch only_in_php=[(0, 8, 22)] only_in_engine=[]
+[1624827] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1624835] state_mismatch_units         day~6 acts=105 | unit tile set mismatch only_in_php=[(0, 12, 10)] only_in_engine=[]
+[1624842] ok                           day~None acts=171 | 
+[1624843] state_mismatch_units         day~6 acts=149 | unit tile set mismatch only_in_php=[(0, 14, 5)] only_in_engine=[]
+[1624861] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 3, 14)] only_in_engine=[]
+[1624862] state_mismatch_properties    day~9 acts=189 | property at (7,13) capture_points engine=20 php_scaled=10 (php_raw=10)
+[1624891] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 5, 10)] only_in_engine=[]
+[1624908] state_mismatch_multi         day~6 acts=123 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]; property at (9,16) captu
+[1624922] state_mismatch_units         day~4 acts=84 | unit tile set mismatch only_in_php=[(1, 3, 14)] only_in_engine=[]
+[1624923] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1624935] state_mismatch_units         day~8 acts=191 | unit tile set mismatch only_in_php=[(0, 4, 1)] only_in_engine=[]
+[1624953] state_mismatch_units         day~6 acts=172 | unit tile set mismatch only_in_php=[(0, 9, 23), (0, 12, 5)] only_in_engine=[]
+[1624973] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1625060] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1625085] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(1, 12, 14)] only_in_engine=[]
+[1625093] state_mismatch_units         day~7 acts=166 | unit tile set mismatch only_in_php=[(0, 5, 1)] only_in_engine=[]
+[1625115] state_mismatch_multi         day~5 acts=134 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]; property at (3,14) captu
+[1625116] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 7, 19)] only_in_engine=[]
+[1625118] state_mismatch_units         day~6 acts=171 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]
+[1625119] ok                           day~None acts=65 | 
+[1625131] state_mismatch_units         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1625134] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1625137] state_mismatch_units         day~8 acts=150 | unit tile set mismatch only_in_php=[(1, 8, 2)] only_in_engine=[]
+[1625138] ok                           day~None acts=63 | 
+[1625152] ok                           day~None acts=53 | 
+[1625162] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 6, 11), (0, 10, 19)] only_in_engine=[]
+[1625167] ok                           day~None acts=102 | 
+[1625178] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 14, 3)] only_in_engine=[]
+[1625211] state_mismatch_units         day~7 acts=132 | unit tile set mismatch only_in_php=[(0, 11, 6)] only_in_engine=[]
+[1625234] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 4, 15)] only_in_engine=[]
+[1625241] ok                           day~None acts=70 | 
+[1625242] ok                           day~None acts=53 | 
+[1625263] state_mismatch_units         day~6 acts=101 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1625278] state_mismatch_units         day~7 acts=130 | unit tile set mismatch only_in_php=[(1, 7, 3)] only_in_engine=[]
+[1625290] state_mismatch_units         day~7 acts=144 | unit tile set mismatch only_in_php=[(1, 11, 7), (1, 18, 20)] only_in_engine=[]
+[1625297] state_mismatch_units         day~9 acts=233 | unit tile set mismatch only_in_php=[(0, 4, 0), (0, 4, 1), (0, 5, 2), (0, 5, 3)] only_in_en
+[1625330] ok                           day~None acts=50 | 
+[1625340] ok                           day~None acts=26 | 
+[1625394] state_mismatch_turn          day~6 acts=101 | turn engine=6 php_day=7
+[1625412] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 13, 17)] only_in_engine=[]
+[1625414] state_mismatch_units         day~6 acts=171 | unit tile set mismatch only_in_php=[(0, 10, 10)] only_in_engine=[]
+[1625425] ok                           day~None acts=7 | 
+[1625512] ok                           day~None acts=18 | 
+[1625568] state_mismatch_multi         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 14, 3)] only_in_engine=[]; property at (15,3) capt
+[1625580] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 4, 9), (0, 15, 5)] only_in_engine=[]
+[1625581] ok                           day~None acts=65 | 
+[1625610] state_mismatch_units         day~9 acts=216 | unit tile set mismatch only_in_php=[(1, 13, 13)] only_in_engine=[]
+[1625621] state_mismatch_units         day~8 acts=183 | unit tile set mismatch only_in_php=[(1, 8, 7)] only_in_engine=[]
+[1625633] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1625657] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1625662] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(0, 2, 1)] only_in_engine=[]
+[1625681] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 6, 10)] only_in_engine=[]
+[1625697] state_mismatch_multi         day~9 acts=235 | unit tile set mismatch only_in_php=[(1, 7, 5)] only_in_engine=[]; property at (6,5) captur
+[1625784] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1625791] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 18)] only_in_engine=[]
+[1625804] state_mismatch_units         day~8 acts=210 | unit tile set mismatch only_in_php=[(0, 5, 4), (0, 5, 5)] only_in_engine=[]
+[1625822] ok                           day~None acts=18 | 
+[1625833] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1625844] state_mismatch_units         day~8 acts=163 | unit tile set mismatch only_in_php=[(1, 13, 5), (1, 14, 4), (1, 14, 5)] only_in_engine=[]
+[1625905] state_mismatch_units         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 9, 17), (1, 10, 17)] only_in_engine=[]
+[1625906] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1625916] state_mismatch_units         day~8 acts=168 | unit tile set mismatch only_in_php=[(0, 10, 12), (0, 15, 4)] only_in_engine=[]
+[1625963] ok                           day~None acts=48 | 
+[1625994] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(0, 13, 15)] only_in_engine=[]
+[1626030] state_mismatch_units         day~8 acts=165 | unit tile set mismatch only_in_php=[(1, 7, 5)] only_in_engine=[]
+[1626038] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 7, 2)] only_in_engine=[]
+[1626091] state_mismatch_units         day~4 acts=128 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1626119] state_mismatch_multi         day~6 acts=168 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]; property at (7,13) cap
+[1626132] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 3, 15), (0, 15, 3)] only_in_engine=[]
+[1626164] state_mismatch_units         day~8 acts=172 | unit tile set mismatch only_in_php=[(0, 8, 10)] only_in_engine=[]
+[1626165] ok                           day~None acts=33 | 
+[1626181] state_mismatch_units         day~6 acts=107 | unit tile set mismatch only_in_php=[(1, 9, 16)] only_in_engine=[]
+[1626223] state_mismatch_units         day~7 acts=175 | unit tile set mismatch only_in_php=[(1, 13, 17)] only_in_engine=[]
+[1626236] state_mismatch_units         day~4 acts=124 | unit tile set mismatch only_in_php=[(0, 5, 4)] only_in_engine=[]
+[1626237] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 7, 12)] only_in_engine=[]
+[1626268] state_mismatch_properties    day~9 acts=184 | property at (7,17) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1626278] state_mismatch_units         day~6 acts=87 | unit tile set mismatch only_in_php=[(1, 15, 4)] only_in_engine=[]
+[1626284] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1626313] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1626330] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 7, 7)] only_in_engine=[]
+[1626377] state_mismatch_units         day~7 acts=119 | unit tile set mismatch only_in_php=[(1, 5, 15)] only_in_engine=[]
+[1626385] state_mismatch_multi         day~6 acts=148 | unit tile set mismatch only_in_php=[(0, 13, 17), (0, 14, 14), (0, 15, 13)] only_in_engine=
+[1626386] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 3, 6)] only_in_engine=[]
+[1626396] state_mismatch_units         day~7 acts=201 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1626437] state_mismatch_multi         day~6 acts=118 | unit tile set mismatch only_in_php=[(0, 16, 16)] only_in_engine=[]; P0 charge_mismatch: ph
+[1626517] state_mismatch_units         day~6 acts=94 | unit tile set mismatch only_in_php=[(1, 3, 4)] only_in_engine=[]
+[1626529] state_mismatch_multi         day~8 acts=169 | unit tile set mismatch only_in_php=[(0, 5, 20), (0, 7, 8)] only_in_engine=[]; P0 charge_mi
+[1626597] ok                           day~None acts=5 | 
+[1626601] state_mismatch_multi         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 15, 14)] only_in_engine=[]; property at (6,11) cap
+[1626628] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1626642] state_mismatch_units         day~8 acts=150 | unit tile set mismatch only_in_php=[(1, 6, 0), (1, 7, 13)] only_in_engine=[]
+[1626655] state_mismatch_properties    day~6 acts=148 | property at (15,13) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1626658] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 10, 3)] only_in_engine=[]
+[1626703] ok                           day~None acts=56 | 
+[1626722] state_mismatch_units         day~6 acts=93 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1626723] state_mismatch_units         day~8 acts=151 | unit tile set mismatch only_in_php=[(1, 6, 10)] only_in_engine=[]
+[1626724] state_mismatch_properties    day~6 acts=102 | property at (5,17) capture_points engine=10 php_scaled=20 (php_raw=20); property at (11,6)
+[1626732] ok                           day~None acts=53 | 
+[1626763] state_mismatch_units         day~8 acts=190 | unit tile set mismatch only_in_php=[(1, 17, 18), (1, 18, 20)] only_in_engine=[]
+[1626772] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(1, 10, 8), (1, 18, 20)] only_in_engine=[]
+[1626780] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1626803] state_mismatch_properties    day~7 acts=133 | property at (7,7) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1626806] state_mismatch_units         day~4 acts=107 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1626837] state_mismatch_units         day~9 acts=216 | unit tile set mismatch only_in_php=[(1, 3, 6)] only_in_engine=[]
+[1626896] state_mismatch_units         day~5 acts=147 | unit tile set mismatch only_in_php=[(0, 9, 1), (0, 14, 8)] only_in_engine=[]
+[1626916] state_mismatch_units         day~6 acts=128 | unit tile set mismatch only_in_php=[(0, 12, 18)] only_in_engine=[]
+[1626973] state_mismatch_units         day~9 acts=247 | unit tile set mismatch only_in_php=[(0, 4, 1), (0, 9, 22)] only_in_engine=[]
+[1626980] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 12, 16)] only_in_engine=[]
+[1626991] state_mismatch_units         day~9 acts=245 | unit tile set mismatch only_in_php=[(0, 13, 13), (0, 14, 14)] only_in_engine=[]
+[1627004] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 3, 4)] only_in_engine=[]
+[1627024] state_mismatch_multi         day~9 acts=241 | unit tile set mismatch only_in_php=[(1, 8, 0), (1, 8, 1), (1, 10, 21)] only_in_engine=[]; 
+[1627034] state_mismatch_units         day~10 acts=300 | unit tile set mismatch only_in_php=[(0, 13, 13)] only_in_engine=[]
+[1627054] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 3, 13)] only_in_engine=[]
+[1627066] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 16, 5)] only_in_engine=[]
+[1627070] state_mismatch_units         day~6 acts=91 | unit tile set mismatch only_in_php=[(1, 6, 10)] only_in_engine=[]
+[1627071] state_mismatch_units         day~6 acts=85 | unit tile set mismatch only_in_php=[(1, 9, 5)] only_in_engine=[]
+[1627093] state_mismatch_units         day~6 acts=129 | unit tile set mismatch only_in_php=[(1, 8, 19), (1, 15, 5)] only_in_engine=[]
+[1627094] state_mismatch_multi         day~7 acts=147 | unit tile set mismatch only_in_php=[(0, 4, 1), (0, 9, 17)] only_in_engine=[]; P0 charge_mi
+[1627100] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 9, 18)] only_in_engine=[]
+[1627110] state_mismatch_units         day~7 acts=156 | unit tile set mismatch only_in_php=[(0, 8, 7)] only_in_engine=[]
+[1627116] state_mismatch_units         day~7 acts=123 | unit tile set mismatch only_in_php=[(1, 1, 4)] only_in_engine=[]
+[1627130] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(1, 16, 16)] only_in_engine=[]
+[1627131] state_mismatch_units         day~6 acts=167 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1627152] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1627221] state_mismatch_multi         day~8 acts=170 | unit tile set mismatch only_in_php=[(0, 8, 12), (0, 11, 7), (0, 13, 5), (0, 13, 6)] only_i
+[1627245] state_mismatch_units         day~7 acts=199 | unit tile set mismatch only_in_php=[(1, 4, 15)] only_in_engine=[]
+[1627298] state_mismatch_units         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 5, 2), (1, 7, 5)] only_in_engine=[]
+[1627317] state_mismatch_units         day~6 acts=123 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1627323] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 17, 12)] only_in_engine=[]
+[1627324] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 8, 20)] only_in_engine=[]
+[1627326] state_mismatch_units         day~7 acts=135 | unit tile set mismatch only_in_php=[(0, 9, 13)] only_in_engine=[]
+[1627327] state_mismatch_units         day~7 acts=138 | unit tile set mismatch only_in_php=[(0, 10, 13)] only_in_engine=[]
+[1627328] state_mismatch_units         day~8 acts=172 | unit tile set mismatch only_in_php=[(0, 7, 14)] only_in_engine=[]
+[1627350] state_mismatch_units         day~8 acts=176 | unit tile set mismatch only_in_php=[(1, 7, 5)] only_in_engine=[]
+[1627361] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1627408] state_mismatch_units         day~8 acts=205 | unit tile set mismatch only_in_php=[(0, 5, 8)] only_in_engine=[]
+[1627409] ok                           day~None acts=108 | 
+[1627431] state_mismatch_units         day~8 acts=190 | unit tile set mismatch only_in_php=[(1, 11, 9), (1, 14, 12), (1, 18, 20)] only_in_engine=[
+[1627450] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 4, 14)] only_in_engine=[]
+[1627485] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 8, 12), (1, 10, 0)] only_in_engine=[]
+[1627494] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 5, 20), (1, 6, 14)] only_in_engine=[]
+[1627523] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1627530] state_mismatch_units         day~5 acts=85 | unit tile set mismatch only_in_php=[(0, 9, 16)] only_in_engine=[]
+[1627541] state_mismatch_multi         day~7 acts=230 | unit tile set mismatch only_in_php=[(1, 1, 12), (1, 4, 20), (1, 6, 20)] only_in_engine=[];
+[1627542] ok                           day~None acts=45 | 
+[1627557] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 6, 11)] only_in_engine=[]
+[1627559] ok                           day~None acts=97 | 
+[1627561] state_mismatch_units         day~8 acts=196 | unit tile set mismatch only_in_php=[(0, 13, 13)] only_in_engine=[]
+[1627563] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 5, 20)] only_in_engine=[]
+[1627564] state_mismatch_multi         day~8 acts=168 | unit tile set mismatch only_in_php=[(1, 6, 8), (1, 7, 5), (1, 8, 5)] only_in_engine=[]; pr
+[1627580] state_mismatch_units         day~8 acts=179 | unit tile set mismatch only_in_php=[(1, 17, 18)] only_in_engine=[]
+[1627591] state_mismatch_units         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 4, 11), (0, 6, 12)] only_in_engine=[]
+[1627593] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 7, 14)] only_in_engine=[]
+[1627594] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 4, 16)] only_in_engine=[]
+[1627609] state_mismatch_units         day~9 acts=234 | unit tile set mismatch only_in_php=[(1, 9, 21)] only_in_engine=[]
+[1627610] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15), (0, 11, 6)] only_in_engine=[]
+[1627612] state_mismatch_units         day~4 acts=119 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1627620] state_mismatch_units         day~5 acts=153 | unit tile set mismatch only_in_php=[(0, 7, 18)] only_in_engine=[]
+[1627622] state_mismatch_units         day~6 acts=112 | unit tile set mismatch only_in_php=[(0, 10, 0)] only_in_engine=[]
+[1627647] state_mismatch_units         day~6 acts=104 | unit tile set mismatch only_in_php=[(0, 12, 10)] only_in_engine=[]
+[1627657] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 7, 10), (0, 7, 19)] only_in_engine=[]
+[1627691] state_mismatch_units         day~7 acts=143 | unit tile set mismatch only_in_php=[(1, 9, 5)] only_in_engine=[]
+[1627696] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 6, 11)] only_in_engine=[]
+[1627729] ok                           day~None acts=300 | 
+[1627731] ok                           day~None acts=18 | 
+[1627732] state_mismatch_units         day~8 acts=156 | unit tile set mismatch only_in_php=[(1, 11, 5)] only_in_engine=[]
+[1627733] state_mismatch_co_state      day~7 acts=146 | P0 charge_mismatch: php=0.6 stars (raw=50000) engine=0.0 stars (power_bar=0)
+[1627770] state_mismatch_units         day~6 acts=104 | unit tile set mismatch only_in_php=[(0, 12, 10)] only_in_engine=[]
+[1627904] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 6, 9)] only_in_engine=[]
+[1627909] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 2, 20)] only_in_engine=[]
+[1627935] state_mismatch_units         day~6 acts=108 | unit tile set mismatch only_in_php=[(1, 11, 17)] only_in_engine=[]
+[1627953] ok                           day~None acts=53 | 
+[1627954] ok                           day~None acts=52 | 
+[1627969] ok                           day~None acts=94 | 
+[1627993] state_mismatch_units         day~7 acts=176 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1628008] state_mismatch_multi         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 1, 3), (0, 7, 13), (0, 12, 9)] only_in_engine=[]; 
+[1628009] state_mismatch_units         day~3 acts=84 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1628021] state_mismatch_properties    day~8 acts=182 | property at (15,18) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1628051] state_mismatch_units         day~8 acts=191 | unit tile set mismatch only_in_php=[(0, 9, 4), (0, 10, 0), (0, 11, 15)] only_in_engine=[]
+[1628086] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 13, 17)] only_in_engine=[]
+[1628095] state_mismatch_properties    day~8 acts=171 | property at (5,2) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1628155] ok                           day~None acts=76 | 
+[1628163] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(0, 9, 16)] only_in_engine=[]
+[1628190] state_mismatch_units         day~6 acts=108 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1628198] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1628211] state_mismatch_units         day~9 acts=231 | unit tile set mismatch only_in_php=[(1, 8, 5), (1, 10, 7), (1, 11, 10)] only_in_engine=[]
+[1628212] state_mismatch_units         day~5 acts=150 | unit tile set mismatch only_in_php=[(0, 4, 11), (0, 5, 17)] only_in_engine=[]
+[1628220] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 5, 2)] only_in_engine=[]
+[1628224] state_mismatch_multi         day~8 acts=147 | unit tile set mismatch only_in_php=[(1, 12, 9), (1, 13, 9)] only_in_engine=[]; P1 charge_m
+[1628226] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1628233] state_mismatch_units         day~7 acts=150 | unit tile set mismatch only_in_php=[(0, 9, 4)] only_in_engine=[]
+[1628236] state_mismatch_multi         day~6 acts=124 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]; property at (14,13) capt
+[1628255] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1628258] state_mismatch_co_state      day~8 acts=167 | P0 charge_mismatch: php=0.6 stars (raw=56000) engine=0.0 stars (power_bar=0); P1 charge_mi
+[1628268] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 14, 3)] only_in_engine=[]
+[1628287] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1628301] state_mismatch_units         day~9 acts=245 | unit tile set mismatch only_in_php=[(0, 5, 6)] only_in_engine=[]
+[1628322] state_mismatch_units         day~7 acts=119 | unit tile set mismatch only_in_php=[(1, 10, 7)] only_in_engine=[]
+[1628323] state_mismatch_units         day~4 acts=119 | unit tile set mismatch only_in_php=[(0, 4, 13), (0, 7, 2), (0, 15, 6)] only_in_engine=[]
+[1628324] state_mismatch_units         day~8 acts=157 | unit tile set mismatch only_in_php=[(1, 5, 15)] only_in_engine=[]
+[1628345] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 7, 12)] only_in_engine=[]
+[1628357] state_mismatch_multi         day~8 acts=168 | unit tile set mismatch only_in_php=[(1, 8, 6)] only_in_engine=[]; property at (10,0) captu
+[1628397] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 18, 20)] only_in_engine=[]
+[1628410] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 4, 9)] only_in_engine=[]
+[1628457] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 6, 11)] only_in_engine=[]
+[1628509] state_mismatch_units         day~6 acts=94 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1628539] state_mismatch_units         day~7 acts=110 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1628541] state_mismatch_units         day~7 acts=132 | unit tile set mismatch only_in_php=[(0, 3, 15), (0, 16, 0)] only_in_engine=[]
+[1628545] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 5, 14)] only_in_engine=[]
+[1628546] state_mismatch_units         day~6 acts=119 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1628574] state_mismatch_units         day~6 acts=128 | unit tile set mismatch only_in_php=[(1, 4, 1), (1, 8, 19), (1, 15, 5)] only_in_engine=[]
+[1628600] state_mismatch_units         day~8 acts=181 | unit tile set mismatch only_in_php=[(1, 10, 5), (1, 14, 16), (1, 17, 18)] only_in_engine=[
+[1628609] state_mismatch_multi         day~5 acts=165 | unit tile set mismatch only_in_php=[(0, 4, 11)] only_in_engine=[]; property at (5,17) capt
+[1628618] state_mismatch_units         day~6 acts=149 | unit tile set mismatch only_in_php=[(0, 9, 5)] only_in_engine=[]
+[1628622] state_mismatch_multi         day~7 acts=145 | unit tile set mismatch only_in_php=[(0, 7, 5)] only_in_engine=[]; P0 charge_mismatch: php=
+[1628632] state_mismatch_units         day~7 acts=176 | unit tile set mismatch only_in_php=[(1, 3, 12)] only_in_engine=[]
+[1628640] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1628657] state_mismatch_units         day~8 acts=180 | unit tile set mismatch only_in_php=[(1, 6, 5), (1, 11, 20)] only_in_engine=[]
+[1628722] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1628785] state_mismatch_units         day~4 acts=96 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1628796] state_mismatch_units         day~9 acts=190 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1628803] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 7, 12), (1, 15, 3)] only_in_engine=[]
+[1628807] state_mismatch_units         day~4 acts=61 | unit tile set mismatch only_in_php=[(1, 1, 15)] only_in_engine=[]
+[1628824] state_mismatch_units         day~7 acts=137 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1628861] state_mismatch_units         day~6 acts=175 | unit tile set mismatch only_in_php=[(0, 8, 12), (0, 14, 6), (0, 17, 8)] only_in_engine=[]
+[1628868] state_mismatch_units         day~6 acts=149 | unit tile set mismatch only_in_php=[(0, 1, 14), (0, 10, 5)] only_in_engine=[]
+[1628888] ok                           day~None acts=7 | 
+[1628918] state_mismatch_units         day~5 acts=130 | unit tile set mismatch only_in_php=[(1, 13, 16)] only_in_engine=[]
+[1628937] state_mismatch_units         day~7 acts=116 | unit tile set mismatch only_in_php=[(1, 4, 14)] only_in_engine=[]
+[1628953] state_mismatch_units         day~8 acts=172 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1628974] ok                           day~None acts=54 | 
+[1628975] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 13, 11)] only_in_engine=[]
+[1628985] state_mismatch_multi         day~7 acts=244 | unit tile set mismatch only_in_php=[(1, 12, 0), (1, 14, 5)] only_in_engine=[]; P0 charge_m
+[1629010] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1629016] ok                           day~None acts=93 | 
+[1629023] state_mismatch_units         day~7 acts=143 | unit tile set mismatch only_in_php=[(0, 11, 7)] only_in_engine=[]
+[1629032] state_mismatch_units         day~8 acts=150 | unit tile set mismatch only_in_php=[(1, 5, 16), (1, 7, 12)] only_in_engine=[]
+[1629034] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1629081] state_mismatch_units         day~6 acts=184 | unit tile set mismatch only_in_php=[(1, 12, 19)] only_in_engine=[]
+[1629082] state_mismatch_units         day~8 acts=168 | unit tile set mismatch only_in_php=[(1, 9, 4), (1, 10, 0)] only_in_engine=[]
+[1629092] state_mismatch_units         day~7 acts=151 | unit tile set mismatch only_in_php=[(0, 6, 18), (0, 12, 1)] only_in_engine=[]
+[1629103] ok                           day~None acts=18 | 
+[1629104] state_mismatch_units         day~8 acts=205 | unit tile set mismatch only_in_php=[(0, 4, 0)] only_in_engine=[]
+[1629118] state_mismatch_units         day~4 acts=112 | unit tile set mismatch only_in_php=[(0, 5, 4)] only_in_engine=[]
+[1629120] state_mismatch_units         day~7 acts=142 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1629152] ok                           day~None acts=63 | 
+[1629158] state_mismatch_multi         day~9 acts=183 | unit tile set mismatch only_in_php=[(1, 9, 5), (1, 10, 5)] only_in_engine=[]; P1 charge_mi
+[1629178] state_mismatch_units         day~5 acts=126 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1629180] state_mismatch_units         day~7 acts=126 | unit tile set mismatch only_in_php=[(1, 5, 18), (1, 10, 0)] only_in_engine=[]
+[1629216] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 5, 7)] only_in_engine=[]
+[1629237] state_mismatch_multi         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 13, 17), (0, 15, 14)] only_in_engine=[]; property 
+[1629270] state_mismatch_units         day~4 acts=93 | unit tile set mismatch only_in_php=[(1, 0, 12)] only_in_engine=[]
+[1629271] state_mismatch_multi         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 5, 9), (0, 7, 7)] only_in_engine=[]; P0 charge_mis
+[1629276] ok                           day~None acts=90 | 
+[1629277] ok                           day~None acts=22 | 
+[1629285] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(1, 17, 18)] only_in_engine=[]
+[1629287] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1629308] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1629319] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 9, 4)] only_in_engine=[]
+[1629324] state_mismatch_units         day~8 acts=156 | unit tile set mismatch only_in_php=[(1, 7, 2)] only_in_engine=[]
+[1629333] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 10, 10)] only_in_engine=[]
+[1629370] ok                           day~None acts=6 | 
+[1629383] state_mismatch_units         day~4 acts=115 | unit tile set mismatch only_in_php=[(0, 15, 6)] only_in_engine=[]
+[1629434] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1629445] state_mismatch_multi         day~6 acts=197 | unit tile set mismatch only_in_php=[(1, 14, 15)] only_in_engine=[]; property at (10,17) ca
+[1629447] state_mismatch_units         day~6 acts=128 | unit tile set mismatch only_in_php=[(1, 8, 19)] only_in_engine=[]
+[1629456] state_mismatch_units         day~8 acts=160 | unit tile set mismatch only_in_php=[(1, 5, 15)] only_in_engine=[]
+[1629457] state_mismatch_units         day~7 acts=200 | unit tile set mismatch only_in_php=[(1, 15, 10)] only_in_engine=[]
+[1629481] state_mismatch_units         day~5 acts=171 | unit tile set mismatch only_in_php=[(0, 4, 11), (0, 10, 17)] only_in_engine=[]
+[1629502] state_mismatch_units         day~8 acts=149 | unit tile set mismatch only_in_php=[(1, 9, 3)] only_in_engine=[]
+[1629512] state_mismatch_units         day~6 acts=110 | unit tile set mismatch only_in_php=[(0, 9, 4)] only_in_engine=[]
+[1629521] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 8, 14)] only_in_engine=[]
+[1629539] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 9, 17)] only_in_engine=[]
+[1629561] state_mismatch_units         day~7 acts=142 | unit tile set mismatch only_in_php=[(0, 1, 13), (0, 2, 13)] only_in_engine=[]
+[1629563] state_mismatch_multi         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 12, 4), (0, 12, 5)] only_in_engine=[]; P0 charge_m
+[1629599] state_mismatch_units         day~7 acts=137 | unit tile set mismatch only_in_php=[(0, 8, 17)] only_in_engine=[]
+[1629629] state_mismatch_units         day~5 acts=164 | unit tile set mismatch only_in_php=[(0, 6, 13)] only_in_engine=[]
+[1629650] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1629652] state_mismatch_units         day~6 acts=119 | unit tile set mismatch only_in_php=[(0, 5, 1), (0, 8, 5)] only_in_engine=[]
+[1629669] state_mismatch_multi         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 11, 13), (0, 15, 15)] only_in_engine=[]; P0 charge
+[1629670] state_mismatch_units         day~5 acts=124 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1629679] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1629699] state_mismatch_multi         day~6 acts=108 | unit tile set mismatch only_in_php=[(0, 9, 18)] only_in_engine=[]; property at (9,17) capt
+[1629716] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15), (0, 14, 2)] only_in_engine=[]
+[1629722] state_mismatch_units         day~9 acts=218 | unit tile set mismatch only_in_php=[(1, 3, 6), (1, 16, 12)] only_in_engine=[]
+[1629757] state_mismatch_units         day~9 acts=211 | unit tile set mismatch only_in_php=[(0, 3, 19), (0, 7, 13)] only_in_engine=[]
+[1629764] state_mismatch_units         day~6 acts=123 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1629773] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 11, 7)] only_in_engine=[]
+[1629777] state_mismatch_units         day~7 acts=119 | unit tile set mismatch only_in_php=[(1, 9, 6)] only_in_engine=[]
+[1629785] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 3, 13)] only_in_engine=[]
+[1629790] state_mismatch_multi         day~6 acts=129 | unit tile set mismatch only_in_php=[(1, 7, 19), (1, 8, 3), (1, 16, 4)] only_in_engine=[]; 
+[1629810] ok                           day~None acts=26 | 
+[1629816] state_mismatch_units         day~5 acts=109 | unit tile set mismatch only_in_php=[(0, 9, 12)] only_in_engine=[]
+[1629838] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(0, 5, 15)] only_in_engine=[]
+[1629921] state_mismatch_units         day~5 acts=128 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1629951] state_mismatch_multi         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]; property at (10,5) cap
+[1629965] state_mismatch_units         day~9 acts=221 | unit tile set mismatch only_in_php=[(1, 18, 11)] only_in_engine=[]
+[1629966] state_mismatch_units         day~6 acts=146 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1629969] state_mismatch_multi         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 15, 3)] only_in_engine=[]; property at (3,15) capt
+[1629985] state_mismatch_units         day~5 acts=80 | unit tile set mismatch only_in_php=[(0, 12, 9)] only_in_engine=[]
+[1629987] state_mismatch_units         day~6 acts=110 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1629998] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1629999] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 15, 16)] only_in_engine=[]
+[1630000] state_mismatch_units         day~9 acts=216 | unit tile set mismatch only_in_php=[(1, 3, 6), (1, 18, 11)] only_in_engine=[]
+[1630005] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 9, 15)] only_in_engine=[]
+[1630006] state_mismatch_multi         day~9 acts=212 | unit tile set mismatch only_in_php=[(1, 7, 0)] only_in_engine=[]; property at (7,5) captur
+[1630018] state_mismatch_properties    day~8 acts=166 | property at (7,5) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1630021] state_mismatch_units         day~5 acts=103 | unit tile set mismatch only_in_php=[(0, 6, 11), (0, 10, 15)] only_in_engine=[]
+[1630023] state_mismatch_units         day~7 acts=125 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1630036] state_mismatch_multi         day~9 acts=195 | unit tile set mismatch only_in_php=[(1, 10, 7), (1, 11, 6)] only_in_engine=[]; P0 charge_m
+[1630037] state_mismatch_units         day~7 acts=132 | unit tile set mismatch only_in_php=[(0, 15, 3)] only_in_engine=[]
+[1630038] state_mismatch_units         day~5 acts=137 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1630048] state_mismatch_units         day~9 acts=239 | unit tile set mismatch only_in_php=[(0, 15, 16)] only_in_engine=[]
+[1630051] state_mismatch_units         day~6 acts=108 | unit tile set mismatch only_in_php=[(0, 7, 19)] only_in_engine=[]
+[1630064] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 3, 12), (1, 9, 9)] only_in_engine=[]
+[1630075] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 4, 16)] only_in_engine=[]
+[1630082] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 9, 7)] only_in_engine=[]
+[1630117] state_mismatch_units         day~5 acts=124 | unit tile set mismatch only_in_php=[(1, 5, 17), (1, 14, 7)] only_in_engine=[]
+[1630126] state_mismatch_units         day~8 acts=156 | unit tile set mismatch only_in_php=[(1, 14, 15), (1, 14, 16)] only_in_engine=[]
+[1630129] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 6, 14)] only_in_engine=[]
+[1630138] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 3, 15)] only_in_engine=[]
+[1630151] state_mismatch_units         day~7 acts=139 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1630154] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 15, 18)] only_in_engine=[]
+[1630188] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 5, 1), (1, 12, 6)] only_in_engine=[]
+[1630194] ok                           day~None acts=7 | 
+[1630197] ok                           day~None acts=18 | 
+[1630202] state_mismatch_units         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 8, 15)] only_in_engine=[]
+[1630222] ok                           day~None acts=20 | 
+[1630223] ok                           day~None acts=3 | 
+[1630260] state_mismatch_units         day~5 acts=72 | unit tile set mismatch only_in_php=[(0, 12, 10)] only_in_engine=[]
+[1630261] state_mismatch_units         day~6 acts=174 | unit tile set mismatch only_in_php=[(0, 12, 11)] only_in_engine=[]
+[1630269] state_mismatch_units         day~7 acts=116 | unit tile set mismatch only_in_php=[(1, 3, 15), (1, 15, 3)] only_in_engine=[]
+[1630270] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 9, 5)] only_in_engine=[]
+[1630308] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 9, 9), (1, 14, 13)] only_in_engine=[]
+[1630309] state_mismatch_units         day~6 acts=118 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1630320] ok                           day~None acts=89 | 
+[1630340] state_mismatch_units         day~4 acts=115 | unit tile set mismatch only_in_php=[(0, 8, 1)] only_in_engine=[]
+[1630342] state_mismatch_units         day~5 acts=63 | unit tile set mismatch only_in_php=[(1, 7, 9)] only_in_engine=[]
+[1630353] state_mismatch_units         day~8 acts=178 | unit tile set mismatch only_in_php=[(1, 3, 6)] only_in_engine=[]
+[1630374] state_mismatch_properties    day~7 acts=133 | property at (16,0) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1630403] state_mismatch_units         day~7 acts=166 | unit tile set mismatch only_in_php=[(0, 2, 2), (0, 9, 12)] only_in_engine=[]
+[1630404] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 3, 15), (1, 15, 3)] only_in_engine=[]
+[1630442] state_mismatch_units         day~7 acts=143 | unit tile set mismatch only_in_php=[(0, 10, 11), (0, 11, 12), (0, 17, 18)] only_in_engine=
+[1630456] state_mismatch_units         day~7 acts=150 | unit tile set mismatch only_in_php=[(0, 5, 20), (0, 10, 0)] only_in_engine=[]
+[1630458] state_mismatch_units         day~5 acts=90 | unit tile set mismatch only_in_php=[(0, 9, 12)] only_in_engine=[]
+[1630459] state_mismatch_units         day~6 acts=122 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1630464] state_mismatch_units         day~6 acts=96 | unit tile set mismatch only_in_php=[(1, 16, 16)] only_in_engine=[]
+[1630488] state_mismatch_multi         day~7 acts=150 | unit tile set mismatch only_in_php=[(0, 10, 4)] only_in_engine=[]; property at (9,4) captu
+[1630490] ok                           day~None acts=10 | 
+[1630508] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 10, 12)] only_in_engine=[]
+[1630509] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1630515] state_mismatch_units         day~7 acts=120 | unit tile set mismatch only_in_php=[(1, 11, 6)] only_in_engine=[]
+[1630516] state_mismatch_units         day~7 acts=125 | unit tile set mismatch only_in_php=[(1, 2, 2)] only_in_engine=[]
+[1630531] state_mismatch_units         day~8 acts=186 | unit tile set mismatch only_in_php=[(1, 18, 20)] only_in_engine=[]
+[1630555] ok                           day~None acts=25 | 
+[1630629] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1630632] ok                           day~None acts=53 | 
+[1630646] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1630660] state_mismatch_units         day~8 acts=151 | unit tile set mismatch only_in_php=[(1, 7, 17)] only_in_engine=[]
+[1630669] state_mismatch_units         day~6 acts=92 | unit tile set mismatch only_in_php=[(1, 11, 6)] only_in_engine=[]
+[1630670] state_mismatch_units         day~6 acts=92 | unit tile set mismatch only_in_php=[(1, 6, 10)] only_in_engine=[]
+[1630671] state_mismatch_units         day~8 acts=157 | unit tile set mismatch only_in_php=[(1, 7, 13)] only_in_engine=[]
+[1630687] state_mismatch_units         day~7 acts=119 | unit tile set mismatch only_in_php=[(1, 12, 6)] only_in_engine=[]
+[1630701] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 10, 2)] only_in_engine=[]
+[1630719] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(0, 5, 11), (0, 7, 5)] only_in_engine=[]
+[1630731] state_mismatch_units         day~6 acts=98 | unit tile set mismatch only_in_php=[(1, 10, 8)] only_in_engine=[]
+[1630735] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 15, 3)] only_in_engine=[]
+[1630747] state_mismatch_units         day~5 acts=165 | unit tile set mismatch only_in_php=[(0, 5, 17), (0, 18, 8)] only_in_engine=[]
+[1630748] state_mismatch_multi         day~6 acts=110 | unit tile set mismatch only_in_php=[(0, 10, 4)] only_in_engine=[]; property at (9,4) captu
+[1630749] state_mismatch_units         day~8 acts=182 | unit tile set mismatch only_in_php=[(1, 10, 4)] only_in_engine=[]
+[1630780] state_mismatch_units         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 9, 17)] only_in_engine=[]
+[1630784] state_mismatch_units         day~8 acts=175 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1630794] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1630799] state_mismatch_units         day~9 acts=208 | unit tile set mismatch only_in_php=[(1, 7, 9), (1, 12, 9)] only_in_engine=[]
+[1630818] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 5, 9)] only_in_engine=[]
+[1630837] state_mismatch_units         day~5 acts=127 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1630847] state_mismatch_units         day~5 acts=165 | unit tile set mismatch only_in_php=[(0, 4, 11), (0, 4, 13)] only_in_engine=[]
+[1630865] state_mismatch_units         day~6 acts=93 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1630866] state_mismatch_units         day~5 acts=166 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1630867] ok                           day~None acts=94 | 
+[1630868] ok                           day~None acts=117 | 
+[1630869] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 3, 15)] only_in_engine=[]
+[1630898] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 16, 6)] only_in_engine=[]
+[1630900] state_mismatch_multi         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 6, 12)] only_in_engine=[]; property at (7,12) capt
+[1630911] state_mismatch_units         day~5 acts=125 | unit tile set mismatch only_in_php=[(1, 3, 14)] only_in_engine=[]
+[1630912] state_mismatch_units         day~5 acts=114 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1630918] state_mismatch_units         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1630931] state_mismatch_units         day~4 acts=52 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1630963] state_mismatch_units         day~7 acts=162 | unit tile set mismatch only_in_php=[(0, 5, 1)] only_in_engine=[]
+[1630968] state_mismatch_units         day~5 acts=158 | unit tile set mismatch only_in_php=[(0, 3, 11), (0, 7, 2)] only_in_engine=[]
+[1630983] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(1, 10, 5)] only_in_engine=[]
+[1630992] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1630995] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(1, 9, 6)] only_in_engine=[]
+[1631003] state_mismatch_units         day~7 acts=204 | unit tile set mismatch only_in_php=[(1, 7, 16)] only_in_engine=[]
+[1631018] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1631039] state_mismatch_multi         day~8 acts=174 | unit tile set mismatch only_in_php=[(1, 7, 5), (1, 9, 7), (1, 9, 21)] only_in_engine=[]; p
+[1631040] state_mismatch_units         day~7 acts=232 | unit tile set mismatch only_in_php=[(0, 12, 9)] only_in_engine=[]
+[1631054] state_mismatch_units         day~9 acts=267 | unit tile set mismatch only_in_php=[(0, 6, 12), (0, 7, 12), (0, 8, 1)] only_in_engine=[]
+[1631055] state_mismatch_units         day~6 acts=104 | unit tile set mismatch only_in_php=[(0, 7, 19)] only_in_engine=[]
+[1631068] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 9, 19)] only_in_engine=[]
+[1631089] state_mismatch_units         day~7 acts=175 | unit tile set mismatch only_in_php=[(1, 19, 10)] only_in_engine=[]
+[1631113] state_mismatch_units         day~6 acts=133 | unit tile set mismatch only_in_php=[(0, 12, 18)] only_in_engine=[]
+[1631133] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 15, 3)] only_in_engine=[]
+[1631150] state_mismatch_units         day~7 acts=123 | unit tile set mismatch only_in_php=[(1, 5, 12)] only_in_engine=[]
+[1631164] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 6, 13)] only_in_engine=[]
+[1631166] state_mismatch_units         day~5 acts=163 | unit tile set mismatch only_in_php=[(0, 9, 0)] only_in_engine=[]
+[1631170] ok                           day~None acts=54 | 
+[1631171] ok                           day~None acts=12 | 
+[1631178] state_mismatch_units         day~5 acts=87 | unit tile set mismatch only_in_php=[(0, 7, 7)] only_in_engine=[]
+[1631183] state_mismatch_units         day~5 acts=80 | unit tile set mismatch only_in_php=[(0, 10, 8)] only_in_engine=[]
+[1631194] state_mismatch_units         day~5 acts=124 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]
+[1631214] state_mismatch_units         day~6 acts=149 | unit tile set mismatch only_in_php=[(0, 7, 11), (0, 11, 14)] only_in_engine=[]
+[1631218] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 5, 14), (0, 17, 12)] only_in_engine=[]
+[1631257] state_mismatch_units         day~6 acts=101 | unit tile set mismatch only_in_php=[(0, 5, 9)] only_in_engine=[]
+[1631258] state_mismatch_units         day~6 acts=91 | unit tile set mismatch only_in_php=[(1, 6, 1)] only_in_engine=[]
+[1631264] state_mismatch_properties    day~5 acts=125 | property at (14,7) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1631266] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 3, 15)] only_in_engine=[]
+[1631273] state_mismatch_multi         day~9 acts=212 | unit tile set mismatch only_in_php=[(1, 3, 6), (1, 13, 13)] only_in_engine=[]; P0 charge_m
+[1631276] state_mismatch_units         day~7 acts=167 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1631286] state_mismatch_units         day~7 acts=122 | unit tile set mismatch only_in_php=[(1, 12, 10)] only_in_engine=[]
+[1631288] state_mismatch_units         day~7 acts=138 | unit tile set mismatch only_in_php=[(1, 8, 5)] only_in_engine=[]
+[1631289] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 3, 14)] only_in_engine=[]
+[1631290] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 3, 14)] only_in_engine=[]
+[1631298] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 11, 4)] only_in_engine=[]
+[1631302] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1631303] state_mismatch_units         day~7 acts=126 | unit tile set mismatch only_in_php=[(1, 6, 9), (1, 7, 7)] only_in_engine=[]
+[1631310] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 8, 20), (1, 9, 5)] only_in_engine=[]
+[1631319] state_mismatch_units         day~8 acts=172 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1631320] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 9, 21)] only_in_engine=[]
+[1631331] state_mismatch_multi         day~6 acts=139 | unit tile set mismatch only_in_php=[(0, 2, 16), (0, 5, 14), (0, 10, 4), (0, 13, 17)] only_
+[1631332] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 5, 11)] only_in_engine=[]
+[1631333] state_mismatch_units         day~7 acts=140 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1631349] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1631361] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(0, 4, 1)] only_in_engine=[]
+[1631364] state_mismatch_units         day~7 acts=119 | unit tile set mismatch only_in_php=[(1, 7, 17)] only_in_engine=[]
+[1631377] state_mismatch_units         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1631389] state_mismatch_units         day~8 acts=173 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1631393] state_mismatch_units         day~6 acts=94 | unit tile set mismatch only_in_php=[(1, 9, 4)] only_in_engine=[]
+[1631416] state_mismatch_properties    day~6 acts=129 | property at (15,5) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1631428] state_mismatch_units         day~7 acts=126 | unit tile set mismatch only_in_php=[(1, 6, 0), (1, 10, 8)] only_in_engine=[]
+[1631437] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 3, 20)] only_in_engine=[]
+[1631450] state_mismatch_units         day~3 acts=69 | unit tile set mismatch only_in_php=[(0, 3, 12)] only_in_engine=[]
+[1631458] state_mismatch_units         day~6 acts=93 | unit tile set mismatch only_in_php=[(1, 15, 9)] only_in_engine=[]
+[1631466] state_mismatch_units         day~7 acts=151 | unit tile set mismatch only_in_php=[(0, 10, 9)] only_in_engine=[]
+[1631483] state_mismatch_units         day~7 acts=159 | unit tile set mismatch only_in_php=[(0, 5, 2)] only_in_engine=[]
+[1631484] state_mismatch_units         day~6 acts=145 | unit tile set mismatch only_in_php=[(0, 5, 14), (0, 17, 12)] only_in_engine=[]
+[1631494] state_mismatch_units         day~8 acts=158 | unit tile set mismatch only_in_php=[(1, 8, 4)] only_in_engine=[]
+[1631495] state_mismatch_units         day~7 acts=121 | unit tile set mismatch only_in_php=[(1, 5, 13)] only_in_engine=[]
+[1631501] state_mismatch_units         day~8 acts=183 | unit tile set mismatch only_in_php=[(1, 6, 5), (1, 11, 16), (1, 11, 17)] only_in_engine=[]
+[1631502] state_mismatch_units         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 5, 20), (0, 8, 15)] only_in_engine=[]
+[1631503] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 7, 14)] only_in_engine=[]
+[1631509] state_mismatch_units         day~7 acts=141 | unit tile set mismatch only_in_php=[(1, 9, 16)] only_in_engine=[]
+[1631520] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1631528] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 7, 5)] only_in_engine=[]
+[1631554] state_mismatch_properties    day~5 acts=106 | property at (6,11) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1631563] state_mismatch_units         day~6 acts=176 | unit tile set mismatch only_in_php=[(1, 0, 12)] only_in_engine=[]
+[1631564] state_mismatch_units         day~5 acts=123 | unit tile set mismatch only_in_php=[(0, 8, 22)] only_in_engine=[]
+[1631566] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1631568] state_mismatch_units         day~4 acts=61 | unit tile set mismatch only_in_php=[(1, 12, 11)] only_in_engine=[]
+[1631570] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 15, 14)] only_in_engine=[]
+[1631578] ok                           day~None acts=42 | 
+[1631587] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 8, 1)] only_in_engine=[]
+[1631605] state_mismatch_units         day~8 acts=151 | unit tile set mismatch only_in_php=[(1, 5, 15)] only_in_engine=[]
+[1631613] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 7, 7)] only_in_engine=[]
+[1631621] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1631626] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 15, 14)] only_in_engine=[]
+[1631634] state_mismatch_properties    day~5 acts=121 | property at (13,3) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1631649] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 12, 9)] only_in_engine=[]
+[1631656] state_mismatch_units         day~6 acts=104 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1631658] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 6, 11)] only_in_engine=[]
+[1631669] state_mismatch_units         day~6 acts=89 | unit tile set mismatch only_in_php=[(1, 11, 6)] only_in_engine=[]
+[1631681] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 9, 15)] only_in_engine=[]
+[1631699] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 10)] only_in_engine=[]
+[1631700] ok                           day~None acts=64 | 
+[1631712] state_mismatch_units         day~8 acts=168 | unit tile set mismatch only_in_php=[(1, 8, 5)] only_in_engine=[]
+[1631718] ok                           day~None acts=92 | 
+[1631723] ok                           day~None acts=93 | 
+[1631742] state_mismatch_multi         day~7 acts=135 | unit tile set mismatch only_in_php=[(0, 5, 9), (0, 6, 12)] only_in_engine=[]; P0 charge_mi
+[1631754] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1631755] state_mismatch_units         day~9 acts=206 | unit tile set mismatch only_in_php=[(1, 12, 21)] only_in_engine=[]
+[1631767] state_mismatch_units         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 3, 5)] only_in_engine=[]
+[1631777] state_mismatch_properties    day~7 acts=127 | property at (5,20) capture_points engine=5 php_scaled=20 (php_raw=20)
+[1631780] state_mismatch_units         day~8 acts=209 | unit tile set mismatch only_in_php=[(0, 9, 13), (0, 9, 16)] only_in_engine=[]
+[1631787] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 14, 16)] only_in_engine=[]
+[1631788] state_mismatch_properties    day~9 acts=209 | property at (6,22) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1631800] state_mismatch_units         day~8 acts=172 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1631801] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 6, 11)] only_in_engine=[]
+[1631807] state_mismatch_units         day~6 acts=99 | unit tile set mismatch only_in_php=[(0, 14, 4)] only_in_engine=[]
+[1631808] state_mismatch_multi         day~7 acts=132 | unit tile set mismatch only_in_php=[(0, 7, 6)] only_in_engine=[]; P0 charge_mismatch: php=
+[1631825] ok                           day~None acts=18 | 
+[1631827] ok                           day~None acts=59 | 
+[1631833] state_mismatch_units         day~7 acts=203 | unit tile set mismatch only_in_php=[(1, 13, 23)] only_in_engine=[]
+[1631834] state_mismatch_units         day~8 acts=165 | unit tile set mismatch only_in_php=[(1, 5, 20)] only_in_engine=[]
+[1631840] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 8, 6)] only_in_engine=[]
+[1631841] state_mismatch_units         day~6 acts=105 | unit tile set mismatch only_in_php=[(0, 7, 2), (0, 7, 11)] only_in_engine=[]
+[1631850] state_mismatch_multi         day~8 acts=170 | unit tile set mismatch only_in_php=[(0, 8, 4), (0, 10, 2)] only_in_engine=[]; P0 charge_mi
+[1631857] ok                           day~None acts=1 | 
+[1631858] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 12, 16)] only_in_engine=[]
+[1631869] state_mismatch_units         day~7 acts=201 | unit tile set mismatch only_in_php=[(1, 17, 5)] only_in_engine=[]
+[1631881] state_mismatch_multi         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 7, 19)] only_in_engine=[]; property at (8,19) capt
+[1631882] state_mismatch_multi         day~7 acts=147 | unit tile set mismatch only_in_php=[(0, 6, 15), (0, 6, 16), (0, 9, 4), (0, 10, 3)] only_in
+[1631888] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 6, 11)] only_in_engine=[]
+[1631897] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(0, 8, 17)] only_in_engine=[]
+[1631899] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 6, 11), (0, 8, 16)] only_in_engine=[]
+[1631904] state_mismatch_units         day~6 acts=129 | unit tile set mismatch only_in_php=[(1, 9, 7), (1, 9, 19)] only_in_engine=[]
+[1631905] state_mismatch_units         day~5 acts=126 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1631907] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 6, 12)] only_in_engine=[]
+[1631913] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 8, 3)] only_in_engine=[]
+[1631914] state_mismatch_units         day~5 acts=141 | unit tile set mismatch only_in_php=[(1, 13, 16)] only_in_engine=[]
+[1631915] state_mismatch_units         day~8 acts=158 | unit tile set mismatch only_in_php=[(1, 15, 1)] only_in_engine=[]
+[1631928] state_mismatch_units         day~7 acts=175 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1631943] state_mismatch_multi         day~10 acts=270 | unit tile set mismatch only_in_php=[(1, 7, 9), (1, 9, 11), (1, 11, 13), (1, 17, 15)] only_
+[1631946] state_mismatch_units         day~6 acts=98 | unit tile set mismatch only_in_php=[(1, 11, 10)] only_in_engine=[]
+[1631950] ok                           day~None acts=171 | 
+[1631972] state_mismatch_units         day~5 acts=171 | unit tile set mismatch only_in_php=[(0, 5, 17), (0, 16, 7)] only_in_engine=[]
+[1631973] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 9, 10), (1, 11, 6)] only_in_engine=[]
+[1631990] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1631992] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 13, 3)] only_in_engine=[]
+[1631994] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1632006] state_mismatch_units         day~9 acts=186 | unit tile set mismatch only_in_php=[(1, 2, 18), (1, 18, 1), (1, 18, 2)] only_in_engine=[]
+[1632012] state_mismatch_units         day~8 acts=186 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1632038] ok                           day~None acts=47 | 
+[1632061] state_mismatch_units         day~9 acts=211 | unit tile set mismatch only_in_php=[(1, 5, 9)] only_in_engine=[]
+[1632063] state_mismatch_units         day~7 acts=145 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1632064] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 9, 4), (1, 10, 0)] only_in_engine=[]
+[1632070] state_mismatch_units         day~9 acts=191 | unit tile set mismatch only_in_php=[(1, 11, 7), (1, 12, 4)] only_in_engine=[]
+[1632105] ok                           day~None acts=23 | 
+[1632109] ok                           day~None acts=26 | 
+[1632116] ok                           day~None acts=94 | 
+[1632117] ok                           day~None acts=35 | 
+[1632124] state_mismatch_units         day~5 acts=124 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]
+[1632128] state_mismatch_properties    day~6 acts=127 | property at (10,5) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1632145] state_mismatch_units         day~7 acts=166 | unit tile set mismatch only_in_php=[(0, 3, 3), (0, 6, 5), (0, 12, 14)] only_in_engine=[]
+[1632152] state_mismatch_multi         day~6 acts=107 | unit tile set mismatch only_in_php=[(0, 4, 17)] only_in_engine=[]; property at (5,17) capt
+[1632178] state_mismatch_units         day~5 acts=87 | unit tile set mismatch only_in_php=[(1, 11, 9)] only_in_engine=[]
+[1632195] state_mismatch_units         day~8 acts=183 | unit tile set mismatch only_in_php=[(1, 8, 0)] only_in_engine=[]
+[1632198] state_mismatch_multi         day~6 acts=176 | unit tile set mismatch only_in_php=[(1, 2, 12), (1, 10, 17)] only_in_engine=[]; property a
+[1632199] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 11, 13)] only_in_engine=[]
+[1632202] state_mismatch_units         day~6 acts=202 | unit tile set mismatch only_in_php=[(0, 4, 20), (0, 12, 0)] only_in_engine=[]
+[1632212] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 6, 11)] only_in_engine=[]
+[1632213] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 11, 20)] only_in_engine=[]
+[1632218] state_mismatch_units         day~7 acts=155 | unit tile set mismatch only_in_php=[(0, 2, 1)] only_in_engine=[]
+[1632233] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1632234] state_mismatch_multi         day~9 acts=212 | unit tile set mismatch only_in_php=[(1, 8, 5)] only_in_engine=[]; property at (7,5) captur
+[1632237] state_mismatch_units         day~8 acts=179 | unit tile set mismatch only_in_php=[(0, 3, 18)] only_in_engine=[]
+[1632239] state_mismatch_units         day~9 acts=190 | unit tile set mismatch only_in_php=[(1, 9, 13), (1, 10, 14)] only_in_engine=[]
+[1632248] state_mismatch_properties    day~6 acts=128 | property at (8,1) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1632283] state_mismatch_units         day~7 acts=153 | unit tile set mismatch only_in_php=[(0, 10, 0)] only_in_engine=[]
+[1632289] state_mismatch_units         day~7 acts=143 | unit tile set mismatch only_in_php=[(1, 11, 11)] only_in_engine=[]
+[1632300] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 2, 14), (0, 8, 1)] only_in_engine=[]
+[1632313] ok                           day~None acts=42 | 
+[1632329] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 14, 2)] only_in_engine=[]
+[1632330] state_mismatch_units         day~9 acts=218 | unit tile set mismatch only_in_php=[(1, 12, 21)] only_in_engine=[]
+[1632345] state_mismatch_turn          day~3 acts=35 | turn engine=3 php_day=4
+[1632346] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 7, 19)] only_in_engine=[]
+[1632355] state_mismatch_units         day~6 acts=91 | unit tile set mismatch only_in_php=[(1, 11, 6)] only_in_engine=[]
+[1632363] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(0, 5, 15), (0, 17, 6)] only_in_engine=[]
+[1632380] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(1, 10, 5)] only_in_engine=[]
+[1632394] state_mismatch_units         day~8 acts=155 | unit tile set mismatch only_in_php=[(1, 11, 7)] only_in_engine=[]
+[1632403] state_mismatch_units         day~8 acts=173 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1632404] state_mismatch_units         day~5 acts=123 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]
+[1632415] state_mismatch_units         day~6 acts=129 | unit tile set mismatch only_in_php=[(1, 14, 8)] only_in_engine=[]
+[1632416] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 12, 16)] only_in_engine=[]
+[1632425] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1632426] state_mismatch_multi         day~7 acts=223 | unit tile set mismatch only_in_php=[(0, 7, 16)] only_in_engine=[]; P0 charge_mismatch: php
+[1632433] state_mismatch_units         day~7 acts=168 | unit tile set mismatch only_in_php=[(0, 5, 11)] only_in_engine=[]
+[1632439] state_mismatch_units         day~6 acts=108 | unit tile set mismatch only_in_php=[(0, 9, 10)] only_in_engine=[]
+[1632441] state_mismatch_units         day~8 acts=174 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1632444] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 18, 11)] only_in_engine=[]
+[1632447] state_mismatch_units         day~7 acts=130 | unit tile set mismatch only_in_php=[(1, 11, 11), (1, 12, 14), (1, 16, 16)] only_in_engine=
+[1632458] state_mismatch_units         day~8 acts=256 | unit tile set mismatch only_in_php=[(0, 7, 7), (0, 10, 5)] only_in_engine=[]
+[1632466] state_mismatch_units         day~4 acts=116 | unit tile set mismatch only_in_php=[(0, 3, 14)] only_in_engine=[]
+[1632475] state_mismatch_units         day~7 acts=137 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1632479] state_mismatch_units         day~8 acts=173 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1632493] state_mismatch_multi         day~6 acts=105 | unit tile set mismatch only_in_php=[(0, 7, 19)] only_in_engine=[]; property at (5,11) capt
+[1632494] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1632495] state_mismatch_units         day~7 acts=122 | unit tile set mismatch only_in_php=[(1, 5, 15)] only_in_engine=[]
+[1632504] state_mismatch_units         day~5 acts=91 | unit tile set mismatch only_in_php=[(1, 0, 17), (1, 13, 11)] only_in_engine=[]
+[1632535] ok                           day~None acts=9 | 
+[1632556] state_mismatch_units         day~8 acts=186 | unit tile set mismatch only_in_php=[(1, 18, 20)] only_in_engine=[]
+[1632558] state_mismatch_units         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 7, 5)] only_in_engine=[]
+[1632587] state_mismatch_multi         day~7 acts=196 | unit tile set mismatch only_in_php=[(1, 9, 16)] only_in_engine=[]; P1 charge_mismatch: php
+[1632593] state_mismatch_units         day~5 acts=144 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1632613] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 10), (1, 15, 4)] only_in_engine=[]
+[1632614] state_mismatch_multi         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 5, 11)] only_in_engine=[]; P0 charge_mismatch: php
+[1632626] state_mismatch_units         day~5 acts=146 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1632627] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1632661] state_mismatch_units         day~6 acts=85 | unit tile set mismatch only_in_php=[(1, 7, 12)] only_in_engine=[]
+[1632662] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 6, 1)] only_in_engine=[]
+[1632683] ok                           day~None acts=1 | 
+[1632702] state_mismatch_multi         day~7 acts=116 | unit tile set mismatch only_in_php=[(1, 9, 15), (1, 9, 16)] only_in_engine=[]; P0 charge_m
+[1632706] ok                           day~None acts=1 | 
+[1632707] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 15, 14)] only_in_engine=[]
+[1632709] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 15, 5)] only_in_engine=[]
+[1632710] state_mismatch_units         day~6 acts=129 | unit tile set mismatch only_in_php=[(0, 9, 16)] only_in_engine=[]
+[1632717] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1632723] ok                           day~None acts=116 | 
+[1632725] state_mismatch_units         day~7 acts=126 | unit tile set mismatch only_in_php=[(1, 7, 1)] only_in_engine=[]
+[1632770] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 8, 19)] only_in_engine=[]
+[1632771] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1632778] state_mismatch_units         day~6 acts=122 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1632786] state_mismatch_units         day~7 acts=186 | unit tile set mismatch only_in_php=[(1, 3, 13), (1, 14, 4)] only_in_engine=[]
+[1632793] state_mismatch_units         day~11 acts=352 | unit tile set mismatch only_in_php=[(0, 8, 13), (0, 15, 22)] only_in_engine=[]
+[1632800] state_mismatch_units         day~5 acts=104 | unit tile set mismatch only_in_php=[(0, 6, 24)] only_in_engine=[]
+[1632802] ok                           day~None acts=42 | 
+[1632805] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1632824] state_mismatch_units         day~7 acts=121 | unit tile set mismatch only_in_php=[(1, 2, 2)] only_in_engine=[]
+[1632825] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1632851] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1632853] state_mismatch_multi         day~8 acts=183 | unit tile set mismatch only_in_php=[(0, 14, 14)] only_in_engine=[]; P0 charge_mismatch: ph
+[1632872] state_mismatch_properties    day~4 acts=76 | property at (8,19) capture_points engine=5 php_scaled=20 (php_raw=20)
+[1632881] ok                           day~None acts=56 | 
+[1632884] state_mismatch_units         day~8 acts=204 | unit tile set mismatch only_in_php=[(0, 8, 0)] only_in_engine=[]
+[1632885] state_mismatch_units         day~8 acts=211 | unit tile set mismatch only_in_php=[(0, 8, 0)] only_in_engine=[]
+[1632897] state_mismatch_units         day~5 acts=74 | unit tile set mismatch only_in_php=[(0, 3, 14)] only_in_engine=[]
+[1632903] state_mismatch_units         day~8 acts=191 | unit tile set mismatch only_in_php=[(0, 0, 11)] only_in_engine=[]
+[1632905] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(0, 7, 19)] only_in_engine=[]
+[1632907] state_mismatch_units         day~5 acts=102 | unit tile set mismatch only_in_php=[(1, 14, 4)] only_in_engine=[]
+[1632908] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(0, 15, 8)] only_in_engine=[]
+[1632910] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(0, 6, 5), (0, 9, 16)] only_in_engine=[]
+[1632911] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1632912] state_mismatch_multi         day~8 acts=174 | unit tile set mismatch only_in_php=[(0, 11, 8)] only_in_engine=[]; property at (11,7) capt
+[1632918] state_mismatch_properties    day~5 acts=160 | property at (8,3) capture_points engine=20 php_scaled=10 (php_raw=10)
+[1632936] state_mismatch_units         day~6 acts=129 | unit tile set mismatch only_in_php=[(1, 4, 1)] only_in_engine=[]
+[1632938] state_mismatch_multi         day~7 acts=198 | unit tile set mismatch only_in_php=[(0, 9, 19)] only_in_engine=[]; property at (10,19) cap
+[1632941] state_mismatch_units         day~7 acts=237 | unit tile set mismatch only_in_php=[(0, 7, 16), (0, 20, 5)] only_in_engine=[]
+[1632948] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 7, 14)] only_in_engine=[]
+[1632949] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15), (0, 14, 3)] only_in_engine=[]
+[1632954] ok                           day~None acts=19 | 
+[1632965] state_mismatch_units         day~8 acts=152 | unit tile set mismatch only_in_php=[(1, 2, 16), (1, 7, 13)] only_in_engine=[]
+[1632968] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 8, 1)] only_in_engine=[]
+[1632969] ok                           day~None acts=2 | 
+[1632975] state_mismatch_units         day~6 acts=165 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]
+[1632976] state_mismatch_units         day~5 acts=177 | unit tile set mismatch only_in_php=[(0, 5, 12)] only_in_engine=[]
+[1632987] state_mismatch_units         day~7 acts=132 | unit tile set mismatch only_in_php=[(0, 4, 6)] only_in_engine=[]
+[1632989] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 5, 10)] only_in_engine=[]
+[1632990] state_mismatch_units         day~5 acts=148 | unit tile set mismatch only_in_php=[(0, 5, 17)] only_in_engine=[]
+[1633024] ok                           day~None acts=190 | 
+[1633026] state_mismatch_multi         day~9 acts=191 | unit tile set mismatch only_in_php=[(1, 3, 15), (1, 5, 13), (1, 11, 7)] only_in_engine=[];
+[1633027] state_mismatch_units         day~8 acts=168 | unit tile set mismatch only_in_php=[(1, 3, 8), (1, 3, 20), (1, 9, 1)] only_in_engine=[]
+[1633033] state_mismatch_units         day~7 acts=175 | unit tile set mismatch only_in_php=[(1, 16, 11), (1, 17, 12)] only_in_engine=[]
+[1633034] ok                           day~None acts=188 | 
+[1633058] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 11, 10)] only_in_engine=[]
+[1633060] state_mismatch_units         day~7 acts=137 | unit tile set mismatch only_in_php=[(1, 12, 20)] only_in_engine=[]
+[1633061] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 7, 12)] only_in_engine=[]
+[1633062] state_mismatch_units         day~8 acts=150 | unit tile set mismatch only_in_php=[(1, 4, 14), (1, 15, 9)] only_in_engine=[]
+[1633064] state_mismatch_units         day~5 acts=165 | unit tile set mismatch only_in_php=[(0, 4, 11)] only_in_engine=[]
+[1633101] state_mismatch_units         day~6 acts=108 | unit tile set mismatch only_in_php=[(0, 7, 19)] only_in_engine=[]
+[1633102] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(0, 10, 16)] only_in_engine=[]
+[1633132] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 5, 15), (0, 7, 7)] only_in_engine=[]
+[1633133] state_mismatch_units         day~8 acts=167 | unit tile set mismatch only_in_php=[(1, 7, 1)] only_in_engine=[]
+[1633139] state_mismatch_properties    day~8 acts=198 | property at (8,7) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1633140] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1633159] state_mismatch_units         day~5 acts=88 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1633162] state_mismatch_units         day~6 acts=125 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1633179] ok                           day~None acts=64 | 
+[1633184] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 3, 15)] only_in_engine=[]
+[1633217] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 10, 19), (0, 15, 14)] only_in_engine=[]
+[1633218] state_mismatch_units         day~9 acts=208 | unit tile set mismatch only_in_php=[(1, 18, 11)] only_in_engine=[]
+[1633224] state_mismatch_units         day~4 acts=102 | unit tile set mismatch only_in_php=[(0, 15, 6)] only_in_engine=[]
+[1633226] ok                           day~None acts=1 | 
+[1633227] state_mismatch_units         day~6 acts=98 | unit tile set mismatch only_in_php=[(1, 2, 2)] only_in_engine=[]
+[1633229] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 7, 17)] only_in_engine=[]
+[1633235] state_mismatch_units         day~7 acts=139 | unit tile set mismatch only_in_php=[(0, 4, 3), (0, 4, 14)] only_in_engine=[]
+[1633242] state_mismatch_units         day~5 acts=126 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1633270] ok                           day~None acts=1 | 
+[1633838] state_mismatch_units         day~8 acts=178 | unit tile set mismatch only_in_php=[(1, 4, 0), (1, 8, 3), (1, 14, 16)] only_in_engine=[]
+[1633844] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1633866] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 8, 19)] only_in_engine=[]
+[1633868] state_mismatch_units         day~5 acts=121 | unit tile set mismatch only_in_php=[(1, 0, 12)] only_in_engine=[]
+[1633870] state_mismatch_units         day~8 acts=183 | unit tile set mismatch only_in_php=[(1, 11, 17)] only_in_engine=[]
+[1633894] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 12, 16)] only_in_engine=[]
+[1633921] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 4, 8), (1, 6, 14)] only_in_engine=[]
+[1633922] state_mismatch_units         day~8 acts=185 | unit tile set mismatch only_in_php=[(1, 11, 9)] only_in_engine=[]
+[1633923] state_mismatch_units         day~8 acts=180 | unit tile set mismatch only_in_php=[(1, 9, 5), (1, 10, 9), (1, 17, 16)] only_in_engine=[]
+[1633932] state_mismatch_units         day~5 acts=166 | unit tile set mismatch only_in_php=[(0, 3, 12)] only_in_engine=[]
+[1633954] state_mismatch_units         day~6 acts=116 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1633961] state_mismatch_units         day~6 acts=109 | unit tile set mismatch only_in_php=[(0, 9, 4)] only_in_engine=[]
+[1633964] state_mismatch_units         day~8 acts=152 | unit tile set mismatch only_in_php=[(1, 8, 20)] only_in_engine=[]
+[1633977] state_mismatch_units         day~6 acts=95 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1633990] state_mismatch_units         day~4 acts=116 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1633997] ok                           day~None acts=6 | 
+[1634010] state_mismatch_multi         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 7, 5), (1, 8, 5)] only_in_engine=[]; property at (
+[1634030] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(1, 11, 9)] only_in_engine=[]
+[1634040] ok                           day~None acts=1 | 
+[1634041] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 9, 1)] only_in_engine=[]
+[1634043] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 8, 16), (1, 12, 9)] only_in_engine=[]
+[1634051] ok                           day~None acts=8 | 
+[1634054] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 5, 15)] only_in_engine=[]
+[1634061] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 4, 1)] only_in_engine=[]
+[1634065] state_mismatch_units         day~7 acts=158 | unit tile set mismatch only_in_php=[(0, 2, 2)] only_in_engine=[]
+[1634068] state_mismatch_units         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 11, 11)] only_in_engine=[]
+[1634070] state_mismatch_properties    day~7 acts=133 | property at (3,15) capture_points engine=5 php_scaled=20 (php_raw=20)
+[1634072] state_mismatch_units         day~6 acts=177 | unit tile set mismatch only_in_php=[(0, 3, 24)] only_in_engine=[]
+[1634080] state_mismatch_units         day~6 acts=119 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1634091] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 12, 15)] only_in_engine=[]
+[1634103] ok                           day~None acts=1 | 
+[1634104] state_mismatch_units         day~7 acts=147 | unit tile set mismatch only_in_php=[(0, 10, 2), (0, 12, 0), (0, 12, 9)] only_in_engine=[]
+[1634109] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 15, 10)] only_in_engine=[]
+[1634111] state_mismatch_units         day~5 acts=122 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1634118] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 3, 13), (1, 15, 13)] only_in_engine=[]
+[1634125] state_mismatch_properties    day~7 acts=147 | property at (9,4) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1634126] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 9, 2)] only_in_engine=[]
+[1634138] state_mismatch_units         day~6 acts=94 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1634140] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 9, 14)] only_in_engine=[]
+[1634146] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 14, 2)] only_in_engine=[]
+[1634189] state_mismatch_units         day~7 acts=168 | unit tile set mismatch only_in_php=[(1, 13, 7)] only_in_engine=[]
+[1634202] state_mismatch_units         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 9, 3)] only_in_engine=[]
+[1634210] ok                           day~None acts=1 | 
+[1634212] ok                           day~None acts=1 | 
+[1634213] ok                           day~None acts=108 | 
+[1634227] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1634228] ok                           day~None acts=1 | 
+[1634234] state_mismatch_units         day~7 acts=159 | unit tile set mismatch only_in_php=[(0, 2, 1)] only_in_engine=[]
+[1634243] ok                           day~None acts=1 | 
+[1634244] state_mismatch_multi         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 4)] only_in_engine=[]; property at (9,4) captu
+[1634245] ok                           day~None acts=1 | 
+[1634246] state_mismatch_multi         day~8 acts=199 | unit tile set mismatch only_in_php=[(0, 5, 5), (0, 5, 8)] only_in_engine=[]; property at (
+[1634254] ok                           day~None acts=6 | 
+[1634255] state_mismatch_units         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 7, 15)] only_in_engine=[]
+[1634256] state_mismatch_units         day~6 acts=110 | unit tile set mismatch only_in_php=[(0, 12, 10)] only_in_engine=[]
+[1634261] state_mismatch_units         day~7 acts=138 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1634267] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 2, 14)] only_in_engine=[]
+[1634268] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 3, 12)] only_in_engine=[]
+[1634277] state_mismatch_units         day~5 acts=123 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1634293] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 11, 2)] only_in_engine=[]
+[1634302] ok                           day~None acts=33 | 
+[1634303] ok                           day~None acts=6 | 
+[1634307] state_mismatch_units         day~7 acts=202 | unit tile set mismatch only_in_php=[(1, 11, 15), (1, 14, 12)] only_in_engine=[]
+[1634315] ok                           day~None acts=5 | 
+[1634316] state_mismatch_properties    day~9 acts=213 | property at (10,0) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1634318] state_mismatch_units         day~8 acts=151 | unit tile set mismatch only_in_php=[(1, 10, 5)] only_in_engine=[]
+[1634325] ok                           day~None acts=19 | 
+[1634326] ok                           day~None acts=4 | 
+[1634328] state_mismatch_properties    day~5 acts=164 | property at (5,17) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1634333] state_mismatch_units         day~5 acts=88 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1634344] ok                           day~None acts=1 | 
+[1634345] ok                           day~None acts=6 | 
+[1634348] state_mismatch_units         day~9 acts=243 | unit tile set mismatch only_in_php=[(0, 11, 13)] only_in_engine=[]
+[1634356] ok                           day~None acts=1 | 
+[1634357] state_mismatch_multi         day~8 acts=212 | unit tile set mismatch only_in_php=[(0, 5, 5), (0, 14, 16)] only_in_engine=[]; P0 charge_m
+[1634366] state_mismatch_properties    day~6 acts=149 | property at (8,19) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1634368] ok                           day~None acts=1 | 
+[1634369] state_mismatch_multi         day~9 acts=217 | unit tile set mismatch only_in_php=[(1, 7, 14), (1, 9, 3), (1, 9, 4)] only_in_engine=[]; P
+[1634402] state_mismatch_units         day~8 acts=179 | unit tile set mismatch only_in_php=[(1, 18, 20)] only_in_engine=[]
+[1634428] ok                           day~None acts=1 | 
+[1634452] state_mismatch_units         day~6 acts=107 | unit tile set mismatch only_in_php=[(0, 7, 7)] only_in_engine=[]
+[1634454] state_mismatch_units         day~6 acts=105 | unit tile set mismatch only_in_php=[(1, 8, 5), (1, 9, 16)] only_in_engine=[]
+[1634455] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 5, 14), (0, 19, 10)] only_in_engine=[]
+[1634456] state_mismatch_units         day~6 acts=128 | unit tile set mismatch only_in_php=[(0, 5, 3)] only_in_engine=[]
+[1634463] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(0, 6, 17)] only_in_engine=[]
+[1634472] ok                           day~None acts=1 | 
+[1634473] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 9, 5)] only_in_engine=[]
+[1634482] state_mismatch_units         day~6 acts=104 | unit tile set mismatch only_in_php=[(0, 12, 10)] only_in_engine=[]
+[1634485] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1634490] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 9, 12)] only_in_engine=[]
+[1634516] ok                           day~None acts=18 | 
+[1634517] state_mismatch_multi         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 7, 14), (0, 9, 12)] only_in_engine=[]; property at
+[1634522] state_mismatch_units         day~6 acts=123 | unit tile set mismatch only_in_php=[(0, 11, 9)] only_in_engine=[]
+[1634553] state_mismatch_units         day~7 acts=140 | unit tile set mismatch only_in_php=[(1, 10, 5)] only_in_engine=[]
+[1634557] state_mismatch_units         day~7 acts=141 | unit tile set mismatch only_in_php=[(1, 7, 3)] only_in_engine=[]
+[1634561] state_mismatch_units         day~7 acts=132 | unit tile set mismatch only_in_php=[(1, 3, 5)] only_in_engine=[]
+[1634571] state_mismatch_units         day~5 acts=164 | unit tile set mismatch only_in_php=[(0, 15, 6)] only_in_engine=[]
+[1634578] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 6, 19)] only_in_engine=[]
+[1634587] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 8, 19)] only_in_engine=[]
+[1634596] state_mismatch_units         day~6 acts=146 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1634598] ok                           day~None acts=3 | 
+[1634603] state_mismatch_multi         day~7 acts=134 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]; P0 charge_mismatch: php
+[1634618] state_mismatch_units         day~7 acts=143 | unit tile set mismatch only_in_php=[(1, 8, 7)] only_in_engine=[]
+[1634621] state_mismatch_units         day~7 acts=127 | unit tile set mismatch only_in_php=[(1, 6, 6)] only_in_engine=[]
+[1634627] state_mismatch_units         day~8 acts=218 | unit tile set mismatch only_in_php=[(0, 9, 21)] only_in_engine=[]
+[1634647] state_mismatch_units         day~5 acts=126 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1634661] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(0, 2, 1)] only_in_engine=[]
+[1634664] state_mismatch_multi         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 7, 1)] only_in_engine=[]; P0 charge_mismatch: php=
+[1634696] state_mismatch_units         day~5 acts=140 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1634717] state_mismatch_units         day~5 acts=124 | unit tile set mismatch only_in_php=[(0, 11, 24)] only_in_engine=[]
+[1634718] state_mismatch_units         day~7 acts=139 | unit tile set mismatch only_in_php=[(0, 6, 16), (0, 12, 7), (0, 13, 5)] only_in_engine=[]
+[1634720] state_mismatch_units         day~7 acts=202 | unit tile set mismatch only_in_php=[(1, 9, 19)] only_in_engine=[]
+[1634727] state_mismatch_units         day~7 acts=137 | unit tile set mismatch only_in_php=[(1, 17, 18)] only_in_engine=[]
+[1634740] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 9, 15), (0, 11, 13)] only_in_engine=[]
+[1634751] state_mismatch_units         day~5 acts=156 | unit tile set mismatch only_in_php=[(0, 2, 11), (0, 10, 17)] only_in_engine=[]
+[1634763] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 4, 16), (1, 15, 13)] only_in_engine=[]
+[1634769] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 10, 4)] only_in_engine=[]
+[1634777] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 16, 0)] only_in_engine=[]
+[1634778] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(1, 5, 11)] only_in_engine=[]
+[1634793] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 6, 8)] only_in_engine=[]
+[1634794] ok                           day~None acts=59 | 
+[1634802] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1634804] state_mismatch_properties    day~5 acts=172 | property at (4,13) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1634809] state_mismatch_units         day~7 acts=203 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]
+[1634814] state_mismatch_units         day~8 acts=180 | unit tile set mismatch only_in_php=[(1, 18, 20)] only_in_engine=[]
+[1634837] state_mismatch_units         day~4 acts=72 | unit tile set mismatch only_in_php=[(0, 4, 15)] only_in_engine=[]
+[1634864] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1634873] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 11, 7)] only_in_engine=[]
+[1634889] state_mismatch_multi         day~7 acts=151 | unit tile set mismatch only_in_php=[(0, 7, 7), (0, 7, 8)] only_in_engine=[]; property at (
+[1634893] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 10, 3)] only_in_engine=[]
+[1634936] ok                           day~None acts=34 | 
+[1634946] state_mismatch_units         day~3 acts=63 | unit tile set mismatch only_in_php=[(0, 4, 13)] only_in_engine=[]
+[1634961] state_mismatch_units         day~9 acts=220 | unit tile set mismatch only_in_php=[(1, 7, 9), (1, 7, 10), (1, 16, 13)] only_in_engine=[]
+[1634965] state_mismatch_units         day~7 acts=138 | unit tile set mismatch only_in_php=[(1, 18, 20)] only_in_engine=[]
+[1634973] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 12, 9)] only_in_engine=[]
+[1634975] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 7, 12)] only_in_engine=[]
+[1634979] state_mismatch_units         day~6 acts=107 | unit tile set mismatch only_in_php=[(1, 8, 5)] only_in_engine=[]
+[1634980] state_mismatch_units         day~9 acts=209 | unit tile set mismatch only_in_php=[(1, 11, 20)] only_in_engine=[]
+[1634986] state_mismatch_units         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 5, 2)] only_in_engine=[]
+[1634992] state_mismatch_units         day~6 acts=111 | unit tile set mismatch only_in_php=[(0, 2, 1), (0, 8, 7)] only_in_engine=[]
+[1634999] state_mismatch_units         day~7 acts=229 | unit tile set mismatch only_in_php=[(0, 5, 21)] only_in_engine=[]
+[1635000] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 8, 1)] only_in_engine=[]
+[1635001] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 3, 15), (1, 4, 14), (1, 7, 13), (1, 15, 3)] only_i
+[1635019] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1635025] state_mismatch_units         day~8 acts=211 | unit tile set mismatch only_in_php=[(0, 5, 1), (0, 7, 3)] only_in_engine=[]
+[1635033] state_mismatch_multi         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 8, 11)] only_in_engine=[]; P0 charge_mismatch: php
+[1635040] state_mismatch_properties    day~5 acts=110 | property at (1,15) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1635046] state_mismatch_units         day~5 acts=106 | unit tile set mismatch only_in_php=[(0, 5, 15)] only_in_engine=[]
+[1635047] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 12, 16)] only_in_engine=[]
+[1635054] state_mismatch_units         day~6 acts=171 | unit tile set mismatch only_in_php=[(0, 8, 12)] only_in_engine=[]
+[1635068] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1635069] state_mismatch_multi         day~9 acts=238 | unit tile set mismatch only_in_php=[(0, 6, 18), (0, 8, 15)] only_in_engine=[]; P1 charge_m
+[1635098] state_mismatch_units         day~8 acts=150 | unit tile set mismatch only_in_php=[(1, 7, 13), (1, 11, 5)] only_in_engine=[]
+[1635111] state_mismatch_units         day~7 acts=132 | unit tile set mismatch only_in_php=[(1, 17, 18)] only_in_engine=[]
+[1635118] ok                           day~None acts=3 | 
+[1635119] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 7, 13)] only_in_engine=[]
+[1635130] state_mismatch_units         day~8 acts=168 | unit tile set mismatch only_in_php=[(0, 5, 5)] only_in_engine=[]
+[1635132] state_mismatch_units         day~7 acts=140 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1635161] state_mismatch_multi         day~6 acts=149 | unit tile set mismatch only_in_php=[(0, 11, 15)] only_in_engine=[]; property at (10,19) ca
+[1635165] state_mismatch_units         day~7 acts=135 | unit tile set mismatch only_in_php=[(1, 11, 11)] only_in_engine=[]
+[1635175] ok                           day~None acts=5 | 
+[1635184] state_mismatch_properties    day~5 acts=91 | property at (14,14) capture_points engine=20 php_scaled=10 (php_raw=10)
+[1635188] state_mismatch_units         day~5 acts=147 | unit tile set mismatch only_in_php=[(1, 14, 7)] only_in_engine=[]
+[1635199] state_mismatch_units         day~8 acts=149 | unit tile set mismatch only_in_php=[(1, 9, 5)] only_in_engine=[]
+[1635203] state_mismatch_multi         day~7 acts=143 | unit tile set mismatch only_in_php=[(0, 6, 5), (0, 7, 7), (0, 12, 14)] only_in_engine=[]; 
+[1635218] state_mismatch_units         day~4 acts=115 | unit tile set mismatch only_in_php=[(0, 8, 1)] only_in_engine=[]
+[1635233] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1635240] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 11, 12)] only_in_engine=[]
+[1635245] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 15, 4)] only_in_engine=[]
+[1635250] state_mismatch_units         day~6 acts=101 | unit tile set mismatch only_in_php=[(0, 11, 6)] only_in_engine=[]
+[1635263] ok                           day~None acts=48 | 
+[1635277] state_mismatch_units         day~8 acts=196 | unit tile set mismatch only_in_php=[(0, 5, 2), (0, 8, 13)] only_in_engine=[]
+[1635299] state_mismatch_multi         day~8 acts=151 | unit tile set mismatch only_in_php=[(1, 10, 7)] only_in_engine=[]; P1 charge_mismatch: php
+[1635366] ok                           day~None acts=1 | 
+[1635390] ok                           day~None acts=1 | 
+[1635392] ok                           day~None acts=1 | 
+[1635397] ok                           day~None acts=1 | 
+[1635416] ok                           day~None acts=1 | 
+[1635418] state_mismatch_units         day~6 acts=108 | unit tile set mismatch only_in_php=[(0, 10, 12)] only_in_engine=[]
+[1635431] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1635438] state_mismatch_units         day~6 acts=92 | unit tile set mismatch only_in_php=[(1, 5, 16)] only_in_engine=[]
+[1635439] ok                           day~None acts=4 | 
+[1635445] state_mismatch_units         day~7 acts=219 | unit tile set mismatch only_in_php=[(0, 5, 21), (0, 12, 11)] only_in_engine=[]
+[1635490] ok                           day~None acts=1 | 
+[1635512] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 5, 20)] only_in_engine=[]
+[1635570] state_mismatch_units         day~7 acts=169 | unit tile set mismatch only_in_php=[(0, 5, 8)] only_in_engine=[]
+[1635643] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 9, 9)] only_in_engine=[]
+[1635644] state_mismatch_units         day~7 acts=126 | unit tile set mismatch only_in_php=[(1, 11, 0)] only_in_engine=[]
+[1635708] state_mismatch_multi         day~6 acts=148 | unit tile set mismatch only_in_php=[(1, 15, 13)] only_in_engine=[]; property at (5,21) cap
+[1635710] state_mismatch_units         day~7 acts=139 | unit tile set mismatch only_in_php=[(0, 5, 19)] only_in_engine=[]
+[1635711] ok                           day~None acts=26 | 
+[1635760] state_mismatch_units         day~5 acts=79 | unit tile set mismatch only_in_php=[(0, 16, 16)] only_in_engine=[]
+[1635763] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 18)] only_in_engine=[]
+[1635782] ok                           day~None acts=8 | 
+[1635783] state_mismatch_units         day~7 acts=200 | unit tile set mismatch only_in_php=[(1, 21, 2)] only_in_engine=[]
+[1635791] ok                           day~None acts=10 | 
+[1635797] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 6, 10)] only_in_engine=[]
+[1635837] ok                           day~None acts=14 | 
+[1635846] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1635895] state_mismatch_units         day~8 acts=168 | unit tile set mismatch only_in_php=[(0, 12, 3)] only_in_engine=[]
+[1635943] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1635957] ok                           day~None acts=12 | 
+[1635981] state_mismatch_units         day~7 acts=136 | unit tile set mismatch only_in_php=[(1, 18, 17)] only_in_engine=[]
+[1635989] state_mismatch_units         day~9 acts=240 | unit tile set mismatch only_in_php=[(0, 13, 13)] only_in_engine=[]
+[1636006] state_mismatch_units         day~7 acts=131 | unit tile set mismatch only_in_php=[(1, 8, 3)] only_in_engine=[]
+[1636014] ok                           day~None acts=74 | 
+[1636047] ok                           day~None acts=3 | 
+[1636071] ok                           day~None acts=33 | 
+[1636073] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1636103] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 2, 16), (0, 7, 20), (0, 15, 14)] only_in_engine=[]
+[1636113] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 5, 7)] only_in_engine=[]
+[1636114] state_mismatch_units         day~8 acts=195 | unit tile set mismatch only_in_php=[(0, 16, 16)] only_in_engine=[]
+[1636122] state_mismatch_multi         day~8 acts=165 | unit tile set mismatch only_in_php=[(1, 2, 6)] only_in_engine=[]; P1 charge_mismatch: php=
+[1636157] state_mismatch_units         day~6 acts=124 | unit tile set mismatch only_in_php=[(0, 10, 14)] only_in_engine=[]
+[1636165] state_mismatch_properties    day~6 acts=129 | property at (8,19) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1636179] ok                           day~None acts=42 | 
+[1636209] state_mismatch_units         day~7 acts=116 | unit tile set mismatch only_in_php=[(1, 2, 18)] only_in_engine=[]
+[1636226] state_mismatch_units         day~5 acts=87 | unit tile set mismatch only_in_php=[(1, 14, 13)] only_in_engine=[]
+[1636235] state_mismatch_units         day~6 acts=191 | unit tile set mismatch only_in_php=[(0, 2, 10), (0, 3, 9)] only_in_engine=[]
+[1636276] state_mismatch_units         day~8 acts=265 | unit tile set mismatch only_in_php=[(1, 2, 14), (1, 2, 15), (1, 2, 19)] only_in_engine=[]
+[1636287] state_mismatch_units         day~6 acts=147 | unit tile set mismatch only_in_php=[(1, 16, 5)] only_in_engine=[]
+[1636293] state_mismatch_units         day~5 acts=136 | unit tile set mismatch only_in_php=[(1, 10, 17), (1, 13, 3)] only_in_engine=[]
+[1636294] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1636318] state_mismatch_units         day~8 acts=186 | unit tile set mismatch only_in_php=[(0, 7, 13), (0, 11, 7), (0, 12, 8)] only_in_engine=[]
+[1636373] state_mismatch_units         day~10 acts=270 | unit tile set mismatch only_in_php=[(1, 0, 8), (1, 16, 13)] only_in_engine=[]
+[1636387] state_mismatch_units         day~5 acts=126 | unit tile set mismatch only_in_php=[(0, 8, 24)] only_in_engine=[]
+[1636394] state_mismatch_units         day~7 acts=149 | unit tile set mismatch only_in_php=[(0, 9, 16)] only_in_engine=[]
+[1636402] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1636412] state_mismatch_units         day~4 acts=76 | unit tile set mismatch only_in_php=[(0, 8, 1)] only_in_engine=[]
+[1636422] state_mismatch_units         day~6 acts=114 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1636436] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1636444] ok                           day~None acts=46 | 
+[1636445] ok                           day~None acts=20 | 
+[1636459] ok                           day~None acts=10 | 
+[1636463] state_mismatch_units         day~6 acts=170 | unit tile set mismatch only_in_php=[(0, 19, 13)] only_in_engine=[]
+[1636465] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 1, 15), (0, 8, 1)] only_in_engine=[]
+[1636491] ok                           day~None acts=27 | 
+[1636532] ok                           day~None acts=120 | 
+[1636547] state_mismatch_units         day~6 acts=128 | unit tile set mismatch only_in_php=[(1, 1, 15), (1, 8, 19)] only_in_engine=[]
+[1636548] state_mismatch_units         day~7 acts=127 | unit tile set mismatch only_in_php=[(1, 6, 16)] only_in_engine=[]
+[1636573] ok                           day~None acts=16 | 
+[1636592] state_mismatch_properties    day~7 acts=133 | property at (15,3) capture_points engine=20 php_scaled=10 (php_raw=10)
+[1636596] state_mismatch_units         day~8 acts=166 | unit tile set mismatch only_in_php=[(0, 13, 5)] only_in_engine=[]
+[1636599] ok                           day~None acts=8 | 
+[1636601] state_mismatch_units         day~11 acts=281 | unit tile set mismatch only_in_php=[(1, 15, 4)] only_in_engine=[]
+[1636640] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 6, 8)] only_in_engine=[]
+[1636658] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 6, 12)] only_in_engine=[]
+[1636662] state_mismatch_units         day~7 acts=118 | unit tile set mismatch only_in_php=[(1, 10, 3)] only_in_engine=[]
+[1636698] state_mismatch_units         day~7 acts=128 | unit tile set mismatch only_in_php=[(1, 10, 8), (1, 17, 14)] only_in_engine=[]
+[1636711] ok                           day~None acts=37 | 
+[1636722] ok                           day~None acts=3 | 
+[1636724] ok                           day~None acts=11 | 
+[1636749] state_mismatch_properties    day~8 acts=193 | property at (8,0) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1636802] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 9, 5)] only_in_engine=[]
+[1636831] state_mismatch_units         day~5 acts=88 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1636846] state_mismatch_units         day~6 acts=118 | unit tile set mismatch only_in_php=[(0, 7, 7), (0, 16, 16)] only_in_engine=[]
+[1636861] state_mismatch_units         day~6 acts=172 | unit tile set mismatch only_in_php=[(0, 11, 24)] only_in_engine=[]
+[1636879] state_mismatch_units         day~9 acts=227 | unit tile set mismatch only_in_php=[(1, 7, 9), (1, 13, 13)] only_in_engine=[]
+[1636893] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(1, 12, 12)] only_in_engine=[]
+[1636902] ok                           day~None acts=51 | 
+[1636918] ok                           day~None acts=4 | 
+[1636925] state_mismatch_units         day~8 acts=191 | unit tile set mismatch only_in_php=[(0, 12, 15)] only_in_engine=[]
+[1636986] state_mismatch_units         day~7 acts=199 | unit tile set mismatch only_in_php=[(1, 10, 15)] only_in_engine=[]
+[1636991] state_mismatch_units         day~8 acts=193 | unit tile set mismatch only_in_php=[(0, 6, 7)] only_in_engine=[]
+[1637013] state_mismatch_units         day~5 acts=84 | unit tile set mismatch only_in_php=[(1, 13, 4)] only_in_engine=[]
+[1637017] state_mismatch_multi         day~8 acts=169 | unit tile set mismatch only_in_php=[(1, 5, 11), (1, 9, 4), (1, 11, 0)] only_in_engine=[]; 
+[1637044] state_mismatch_units         day~7 acts=148 | unit tile set mismatch only_in_php=[(0, 9, 4)] only_in_engine=[]
+[1637083] state_mismatch_units         day~5 acts=91 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1637106] ok                           day~None acts=5 | 
+[1637107] state_mismatch_units         day~9 acts=226 | unit tile set mismatch only_in_php=[(0, 10, 0)] only_in_engine=[]
+[1637138] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 7, 12)] only_in_engine=[]
+[1637139] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 3, 4)] only_in_engine=[]
+[1637146] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 3, 14)] only_in_engine=[]
+[1637155] ok                           day~None acts=187 | 
+[1637168] state_mismatch_units         day~3 acts=35 | unit tile set mismatch only_in_php=[(1, 8, 14), (1, 18, 18)] only_in_engine=[]
+[1637170] state_mismatch_units         day~5 acts=176 | unit tile set mismatch only_in_php=[(0, 4, 12)] only_in_engine=[]
+[1637171] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(1, 9, 21)] only_in_engine=[]
+[1637217] state_mismatch_units         day~7 acts=143 | unit tile set mismatch only_in_php=[(1, 11, 16)] only_in_engine=[]
+[1637222] ok                           day~None acts=18 | 
+[1637224] state_mismatch_units         day~5 acts=162 | unit tile set mismatch only_in_php=[(0, 15, 6)] only_in_engine=[]
+[1637225] ok                           day~None acts=18 | 
+[1637238] ok                           day~None acts=18 | 
+[1637240] ok                           day~None acts=7 | 
+[1637241] ok                           day~None acts=129 | 
+[1637247] state_mismatch_units         day~6 acts=121 | unit tile set mismatch only_in_php=[(0, 12, 18)] only_in_engine=[]
+[1637279] state_mismatch_units         day~6 acts=109 | unit tile set mismatch only_in_php=[(1, 11, 11)] only_in_engine=[]
+[1637290] state_mismatch_units         day~5 acts=163 | unit tile set mismatch only_in_php=[(0, 8, 1)] only_in_engine=[]
+[1637385] state_mismatch_units         day~7 acts=133 | unit tile set mismatch only_in_php=[(0, 6, 14)] only_in_engine=[]
+[1637412] state_mismatch_units         day~9 acts=198 | unit tile set mismatch only_in_php=[(1, 11, 12)] only_in_engine=[]
+[1637424] state_mismatch_units         day~6 acts=125 | unit tile set mismatch only_in_php=[(1, 5, 10)] only_in_engine=[]
+[1637434] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 10, 10)] only_in_engine=[]
+[1637537] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 13, 11)] only_in_engine=[]
+[1637564] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 18, 2)] only_in_engine=[]
+[1637566] ok                           day~None acts=6 | 
+[1637567] state_mismatch_units         day~6 acts=88 | unit tile set mismatch only_in_php=[(1, 7, 7)] only_in_engine=[]
+[1637575] ok                           day~None acts=3 | 
+[1637579] state_mismatch_units         day~9 acts=217 | unit tile set mismatch only_in_php=[(1, 5, 9)] only_in_engine=[]
+[1637583] state_mismatch_multi         day~5 acts=150 | unit tile set mismatch only_in_php=[(0, 5, 12)] only_in_engine=[]; property at (15,6) capt
+[1637586] ok                           day~None acts=6 | 
+[1637663] state_mismatch_units         day~5 acts=75 | unit tile set mismatch only_in_php=[(0, 7, 17)] only_in_engine=[]
+[1637681] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 4, 14), (0, 12, 9)] only_in_engine=[]
+[1637728] state_mismatch_multi         day~8 acts=260 | unit tile set mismatch only_in_php=[(1, 15, 3), (1, 17, 5), (1, 18, 5)] only_in_engine=[];
+[1637756] state_mismatch_units         day~8 acts=184 | unit tile set mismatch only_in_php=[(1, 8, 0)] only_in_engine=[]
+[1637757] state_mismatch_units         day~6 acts=103 | unit tile set mismatch only_in_php=[(0, 1, 14)] only_in_engine=[]
+[1637775] state_mismatch_units         day~6 acts=149 | unit tile set mismatch only_in_php=[(0, 4, 14), (0, 14, 13), (0, 17, 12)] only_in_engine=[
+[1637784] ok                           day~None acts=1 | 
+[1637785] ok                           day~None acts=7 | 
+[1637802] state_mismatch_multi         day~5 acts=89 | unit tile set mismatch only_in_php=[(0, 7, 8)] only_in_engine=[]; property at (7,7) captur
+[1637808] state_mismatch_units         day~7 acts=150 | unit tile set mismatch only_in_php=[(0, 15, 18)] only_in_engine=[]
+[1637843] state_mismatch_units         day~5 acts=74 | unit tile set mismatch only_in_php=[(0, 9, 15)] only_in_engine=[]
+[1637872] state_mismatch_units         day~8 acts=170 | unit tile set mismatch only_in_php=[(0, 7, 9)] only_in_engine=[]
+[1637882] state_mismatch_units         day~6 acts=128 | unit tile set mismatch only_in_php=[(0, 8, 5)] only_in_engine=[]
+[1637943] state_mismatch_units         day~5 acts=92 | unit tile set mismatch only_in_php=[(1, 15, 5)] only_in_engine=[]
+[1637996] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 14, 16)] only_in_engine=[]
+[1637998] state_mismatch_properties    day~6 acts=87 | property at (7,7) capture_points engine=10 php_scaled=20 (php_raw=20)
+[1638024] state_mismatch_units         day~6 acts=127 | unit tile set mismatch only_in_php=[(1, 6, 11), (1, 9, 9), (1, 14, 13)] only_in_engine=[]
+[1638037] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 8, 12)] only_in_engine=[]
+[1638048] state_mismatch_units         day~5 acts=102 | unit tile set mismatch only_in_php=[(1, 10, 15)] only_in_engine=[]
+[1638055] state_mismatch_units         day~6 acts=126 | unit tile set mismatch only_in_php=[(0, 3, 3)] only_in_engine=[]
+[1638075] ok                           day~None acts=1 | 
+[1638082] state_mismatch_units         day~7 acts=127 | unit tile set mismatch only_in_php=[(1, 10, 14)] only_in_engine=[]
+[1638083] state_mismatch_units         day~8 acts=178 | unit tile set mismatch only_in_php=[(1, 6, 5)] only_in_engine=[]
+[1638092] ok                           day~None acts=1 | 
+[1638096] ok                           day~None acts=6 | 
+[1638103] ok                           day~None acts=15 | 
+[1638104] ok                           day~None acts=1 | 
+[1638105] ok                           day~None acts=1 | 
+[1638106] ok                           day~None acts=21 | 
+[1638107] ok                           day~None acts=24 | 
+[1638112] ok                           day~None acts=13 | 
+[1638121] state_mismatch_units         day~7 acts=159 | unit tile set mismatch only_in_php=[(0, 2, 1), (0, 6, 5), (0, 6, 6)] only_in_engine=[]
+[1638149] state_mismatch_units         day~7 acts=129 | unit tile set mismatch only_in_php=[(1, 9, 6), (1, 11, 11)] only_in_engine=[]
+[1638163] ok                           day~None acts=18 | 
+[1638170] state_mismatch_units         day~6 acts=117 | unit tile set mismatch only_in_php=[(0, 13, 15)] only_in_engine=[]
+[1638173] state_mismatch_units         day~7 acts=146 | unit tile set mismatch only_in_php=[(0, 4, 6)] only_in_engine=[]
+[1638194] state_mismatch_units         day~8 acts=171 | unit tile set mismatch only_in_php=[(1, 9, 3), (1, 9, 4)] only_in_engine=[]
+[1638197] state_mismatch_units         day~6 acts=150 | unit tile set mismatch only_in_php=[(0, 11, 14)] only_in_engine=[]
+[1638200] state_mismatch_multi         day~9 acts=194 | unit tile set mismatch only_in_php=[(1, 11, 2)] only_in_engine=[]; property at (7,17) capt
+[1638235] state_mismatch_units         day~6 acts=102 | unit tile set mismatch only_in_php=[(0, 3, 15)] only_in_engine=[]
+[1638241] ok                           day~None acts=101 | 
+[1638247] state_mismatch_units         day~6 acts=122 | unit tile set mismatch only_in_php=[(0, 6, 5)] only_in_engine=[]
+[1638259] state_mismatch_multi         day~9 acts=240 | unit tile set mismatch only_in_php=[(0, 11, 13), (0, 15, 15)] only_in_engine=[]; P0 charge
+[1638260] state_mismatch_multi         day~8 acts=154 | unit tile set mismatch only_in_php=[(1, 10, 3)] only_in_engine=[]; P0 charge_mismatch: php
+[1638286] state_mismatch_units         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 6, 13), (0, 9, 12)] only_in_engine=[]
+[1638337] state_mismatch_units         day~6 acts=110 | unit tile set mismatch only_in_php=[(0, 3, 2)] only_in_engine=[]
+[1638352] state_mismatch_units         day~7 acts=117 | unit tile set mismatch only_in_php=[(1, 2, 18)] only_in_engine=[]
+[1638368] state_mismatch_units         day~5 acts=153 | unit tile set mismatch only_in_php=[(1, 3, 14), (1, 10, 19)] only_in_engine=[]
+[1638394] state_mismatch_multi         day~5 acts=110 | unit tile set mismatch only_in_php=[(0, 2, 14)] only_in_engine=[]; property at (7,14) capt
+[1638396] ok                           day~None acts=14 | 
+[1638408] ok                           day~None acts=1 | 
+
+[desync_audit] ========== SILENT DRIFT (state-mismatch vs PHP) ==========
+[desync_audit] gold_drift (state_mismatch_funds): 0  |  units_only: 875  |  multi_axis: 98  |  investigate: 0
+[desync_audit] properties: 37  |  co_state: 2  |  weather: 0  |  turn: 4
+[desync_audit]   (no state_mismatch_funds rows)
+[desync_audit] sidecar files:
+[desync_audit]   logs\desync_register_state_mismatch_units.jsonl
+[desync_audit]   logs\desync_register_state_mismatch_multi.jsonl
+[desync_audit]   logs\desync_register_state_mismatch_properties.jsonl
+[desync_audit]   logs\desync_register_state_mismatch_co_state.jsonl
+[desync_audit]   logs\desync_register_state_mismatch_turn.jsonl
+[desync_audit] =============================================
+
+[desync_audit] register -> logs\desync_register.jsonl
+[desync_audit] 1191 games audited
+  ok                          175
+  state_mismatch_co_state       2
+  state_mismatch_multi         98
+  state_mismatch_properties    37
+  state_mismatch_turn           4
+  state_mismatch_units        875

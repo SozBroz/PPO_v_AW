@@ -1,0 +1,623 @@
+diff --git a/rl/candidate_actions.py b/rl/candidate_actions.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/rl/candidate_actions.py
+@@ -0,0 +1,329 @@
++"""Dynamic merged-action candidates for AWBW PPO.
++
++This module is the YOLO action-interface rewrite scaffold:
++
++    SELECT actor remains unchanged.
++    MOVE-stage choices become tactical candidates:
++        MOVE_WAIT(dest)
++        MOVE_CAPTURE(dest)
++        MOVE_ATTACK(dest, target)
++        MOVE_LOAD(dest)
++        MOVE_JOIN(dest)
++        MOVE_DIVE_HIDE(dest)
++        MOVE_SETUP_UNLOAD(dest) / MOVE_SETUP_REPAIR(dest) / etc.
++
++The engine remains staged internally.  A candidate carries the engine Action sequence
++needed to apply it.  Terminal merged candidates execute move + action.  Setup
++candidates execute only the move and leave GameState in ACTION stage for the legacy
++follow-up choice.
++
++The NN sees a padded candidate table.  Attack/capture previews live on candidate
++rows, not in thousands of global spatial planes.
++"""
++
++from __future__ import annotations
++
++import copy
++from dataclasses import dataclass, field
++from enum import IntEnum
++from typing import Iterable, Optional
++
++import numpy as np
++
++from engine.action import Action, ActionStage, ActionType, get_legal_actions
++from engine.combat import damage_range, calculate_damage, get_base_damage
++from engine.game import GameState
++from engine.terrain import get_terrain
++from engine.unit import UNIT_STATS, Unit
++
++
++# Pick this high enough that Grit SCOP / carrier nightmare cases fit without
++# pruning.  Instrument p95/p99 before lowering.  If exceeded in dev, fail loud;
++# silent pruning is a hidden policy prior.
++MAX_CANDIDATES = 2048
++
++# Fixed-width action-row feature vector.  Keep this intentionally small.
++CANDIDATE_FEATURE_DIM = 48
++
++
++class CandidateKind(IntEnum):
++    LEGACY = 0
++    MOVE_WAIT = 1
++    MOVE_CAPTURE = 2
++    MOVE_ATTACK = 3
++    MOVE_LOAD = 4
++    MOVE_JOIN = 5
++    MOVE_DIVE_HIDE = 6
++    MOVE_SETUP_UNLOAD = 7
++    MOVE_SETUP_REPAIR = 8
++    MOVE_SETUP_OTHER = 9
++
++
++@dataclass(slots=True)
++class AttackPreview:
++    damage_min: float = 0.0
++    damage_max: float = 0.0
++    counter_min: float = 0.0
++    counter_max: float = 0.0
++    enemy_value_removed_min: float = 0.0
++    enemy_value_removed_max: float = 0.0
++    my_value_lost_min: float = 0.0
++    my_value_lost_max: float = 0.0
++    target_killed_min: float = 0.0
++    target_killed_max: float = 0.0
++    attacker_killed_min: float = 0.0
++    attacker_killed_max: float = 0.0
++    indirect: float = 0.0
++    sonja_counter_break: float = 0.0
++
++
++@dataclass(slots=True)
++class CapturePreview:
++    progress: float = 0.0
++    remaining_after: float = 0.0
++    completes_now: float = 0.0
++    property_value: float = 0.0
++
++
++@dataclass(slots=True)
++class CandidateAction:
++    kind: CandidateKind
++    actions: tuple[Action, ...]
++    dest: Optional[tuple[int, int]] = None
++    target: Optional[tuple[int, int]] = None
++    attack: AttackPreview = field(default_factory=AttackPreview)
++    capture: CapturePreview = field(default_factory=CapturePreview)
++
++    def terminal(self) -> bool:
++        return self.kind not in (
++            CandidateKind.MOVE_SETUP_UNLOAD,
++            CandidateKind.MOVE_SETUP_REPAIR,
++            CandidateKind.MOVE_SETUP_OTHER,
++        )
++
++
++def _coord(v: Optional[tuple[int, int]], size: int) -> tuple[float, float]:
++    if v is None:
++        return 0.0, 0.0
++    r, c = v
++    den = max(size - 1, 1)
++    return float(r) / den, float(c) / den
++
++
++def _occupancy(state: GameState) -> dict[tuple[int, int], Unit]:
++    return {u.pos: u for u in state.units if u.is_alive}
++
++
++def _co(state: GameState, player: int):
++    # Existing code uses COState objects on GameState.  Keep this tolerant across
++    # branch naming variants.
++    if hasattr(state, "co_states"):
++        return state.co_states[player]
++    if hasattr(state, "cos"):
++        return state.cos[player]
++    if hasattr(state, "co"):
++        return state.co[player]
++    raise AttributeError("GameState has no co_states/cos/co field")
++
++
++def _map_size(state: GameState) -> int:
++    md = getattr(state, "map_data", None) or getattr(state, "map", None)
++    return int(max(getattr(md, "height", 30), getattr(md, "width", 30), 30))
++
++
++def _terrain_at(state: GameState, pos: tuple[int, int]):
++    md = getattr(state, "map_data", None) or getattr(state, "map", None)
++    return get_terrain(md, pos[0], pos[1])
++
++
++def _property_value(state: GameState, pos: tuple[int, int]) -> float:
++    """Cheap property-value scalar; intentionally conservative.
++
++    This avoids importing every terrain/property enum variant.  Production/HQ
++    weighting can be layered later from your terrain metadata.
++    """
++    terrain = _terrain_at(state, pos)
++    name = getattr(terrain, "name", "") or terrain.__class__.__name__
++    s = str(name).lower()
++    if "hq" in s:
++        return 4.0
++    if "base" in s or "airport" in s or "port" in s:
++        return 3.0
++    if "city" in s or "property" in s or "tower" in s:
++        return 1.0
++    return 0.0
++
++
++def _capture_preview(state_after_move: GameState, unit: Unit, dest: tuple[int, int]) -> CapturePreview:
++    progress = max(0, min(20, int(np.ceil(unit.hp / 10.0))))
++    # Best-effort: if the engine stores capture_points/capture_progress on tile,
++    # use it. Otherwise assume fresh 20-point capture.
++    remaining_before = 20
++    md = getattr(state_after_move, "map_data", None) or getattr(state_after_move, "map", None)
++    for prop in getattr(md, "properties", []) or []:
++        if (getattr(prop, "row", None), getattr(prop, "col", None)) == dest:
++            remaining_before = int(getattr(prop, "capture_points", getattr(prop, "capture", 20)) or 20)
++            break
++    remaining_after = max(0, remaining_before - progress)
++    return CapturePreview(
++        progress=progress / 20.0,
++        remaining_after=remaining_after / 20.0,
++        completes_now=1.0 if remaining_after <= 0 else 0.0,
++        property_value=_property_value(state_after_move, dest) / 4.0,
++    )
++
++
++def _counter_range(
++    attacker: Unit,
++    defender: Unit,
++    attacker_terrain,
++    defender_terrain,
++    attacker_co,
++    defender_co,
++    forward_damage_min: int,
++    forward_damage_max: int,
++) -> tuple[int, int]:
++    """Min/max counter damage.
++
++    AWBW rule captured here: indirect defenders never counter, even against
++    indirect attackers.  Sonja SCOP corner case: defender strikes first with
++    pre-attack HP, so counter exists even if forward attack would kill.
++    """
++    def_stats = UNIT_STATS[defender.unit_type]
++    if def_stats.is_indirect:
++        return 0, 0
++    if get_base_damage(defender.unit_type, attacker.unit_type) is None:
++        return 0, 0
++    if def_stats.max_ammo > 0 and defender.ammo == 0:
++        return 0, 0
++
++    sonja_cb = getattr(defender_co, "co_id", None) == 18 and bool(getattr(defender_co, "scop_active", False))
++    if not sonja_cb and defender.hp - forward_damage_min <= 0:
++        # Guaranteed kill before counter.
++        return 0, 0
++
++    vals: list[int] = []
++    # Counter worst/best depends on post-hit HP. Sweep the two forward bounds;
++    # damage_range then sweeps luck for the counter itself.
++    for fdmg in (forward_damage_min, forward_damage_max):
++        d2 = copy.copy(defender)
++        d2.hp = max(0, d2.hp - int(fdmg))
++        if sonja_cb:
++            d2.hp = min(100, d2.hp + int(fdmg))
++        if d2.hp <= 0 and not sonja_cb:
++            vals.append(0)
++            continue
++        # Sonja D2D counter amplification is not included by damage_range.  Use
++        # calculate_damage sweep through the normal damage_range path only for
++        # non-Sonja; for Sonja this slightly underestimates until you add a
++        # counter_amp-aware damage_range.  Safer than leaking impossible counters.
++        rng = damage_range(d2, attacker, defender_terrain, attacker_terrain, defender_co, attacker_co)
++        if rng is None:
++            vals.append(0)
++        else:
++            vals.extend([int(rng[0]), int(rng[1])])
++    return min(vals) if vals else 0, max(vals) if vals else 0
++
++
++def _attack_preview(state_after_move: GameState, attack_action: Action) -> AttackPreview:
++    attacker = state_after_move.selected_unit
++    if attacker is None or attack_action.target_pos is None:
++        return AttackPreview()
++    occ = _occupancy(state_after_move)
++    defender = occ.get(attack_action.target_pos)
++    if defender is None:
++        return AttackPreview()
++
++    # Attack position is selected_move_pos if staged move has been chosen.
++    attack_pos = state_after_move.selected_move_pos or attacker.pos
++    attacker_terrain = _terrain_at(state_after_move, attack_pos)
++    defender_terrain = _terrain_at(state_after_move, defender.pos)
++    atk_co = _co(state_after_move, attacker.player)
++    def_co = _co(state_after_move, defender.player)
++    fr = damage_range(attacker, defender, attacker_terrain, defender_terrain, atk_co, def_co)
++    if fr is None:
++        return AttackPreview()
++    dmg_min, dmg_max = int(fr[0]), int(fr[1])
++    attacker_cost = float(UNIT_STATS[attacker.unit_type].cost)
++    defender_cost = float(UNIT_STATS[defender.unit_type].cost)
++    killed_min = 1.0 if dmg_min >= defender.hp else 0.0
++    killed_max = 1.0 if dmg_max >= defender.hp else 0.0
++
++    indirect = 1.0 if UNIT_STATS[attacker.unit_type].is_indirect else 0.0
++    sonja_cb = 1.0 if (getattr(def_co, "co_id", None) == 18 and bool(getattr(def_co, "scop_active", False))) else 0.0
++    if indirect:
++        ctr_min = ctr_max = 0
++    else:
++        ctr_min, ctr_max = _counter_range(
++            attacker, defender, attacker_terrain, defender_terrain, atk_co, def_co, dmg_min, dmg_max
++        )
++    return AttackPreview(
++        damage_min=dmg_min / 100.0,
++        damage_max=dmg_max / 100.0,
++        counter_min=ctr_min / 100.0,
++        counter_max=ctr_max / 100.0,
++        enemy_value_removed_min=(defender_cost * min(dmg_min, defender.hp) / 100.0) / 30000.0,
++        enemy_value_removed_max=(defender_cost * min(dmg_max, defender.hp) / 100.0) / 30000.0,
++        my_value_lost_min=(attacker_cost * min(ctr_min, attacker.hp) / 100.0) / 30000.0,
++        my_value_lost_max=(attacker_cost * min(ctr_max, attacker.hp) / 100.0) / 30000.0,
++        target_killed_min=killed_min,
++        target_killed_max=killed_max,
++        attacker_killed_min=1.0 if ctr_min >= attacker.hp else 0.0,
++        attacker_killed_max=1.0 if ctr_max >= attacker.hp else 0.0,
++        indirect=indirect,
++        sonja_counter_break=sonja_cb,
++    )
++
++
++def _kind_from_action(action: Action, *, after_move: bool) -> CandidateKind:
++    at = action.action_type
++    if at == ActionType.WAIT:
++        return CandidateKind.MOVE_WAIT if after_move else CandidateKind.LEGACY
++    if at == ActionType.CAPTURE:
++        return CandidateKind.MOVE_CAPTURE
++    if at == ActionType.ATTACK:
++        return CandidateKind.MOVE_ATTACK
++    if at == ActionType.LOAD:
++        return CandidateKind.MOVE_LOAD
++    if at == ActionType.JOIN:
++        return CandidateKind.MOVE_JOIN
++    if getattr(ActionType, "DIVE_HIDE", None) is not None and at == ActionType.DIVE_HIDE:
++        return CandidateKind.MOVE_DIVE_HIDE
++    if at == ActionType.UNLOAD:
++        return CandidateKind.MOVE_SETUP_UNLOAD
++    if getattr(ActionType, "REPAIR", None) is not None and at == ActionType.REPAIR:
++        return CandidateKind.MOVE_SETUP_REPAIR
++    return CandidateKind.MOVE_SETUP_OTHER if after_move else CandidateKind.LEGACY
++
++
++def enumerate_candidate_actions(state: GameState) -> list[CandidateAction]:
++    """Return merged legal candidates for the current state.
++
++    SELECT/build/power stages remain legacy single Actions.  MOVE stage expands
++    each legal destination into terminal move+action candidates where possible.
++    """
++    if state.action_stage != ActionStage.MOVE or state.selected_unit is None:
++        return [CandidateAction(CandidateKind.LEGACY, (a,), dest=a.move_pos, target=a.target_pos) for a in get_legal_actions(state)]
++
++    out: list[CandidateAction] = []
++    move_actions = get_legal_actions(state)
++    for move_action in move_actions:
++        if move_action.action_type != ActionType.SELECT_UNIT or move_action.move_pos is None:
++            continue
++        # Advance a private state copy through the MOVE selection so engine legal
++        # generation remains canonical for capture/attack/load/unload/weird cases.
++        s2 = copy.deepcopy(state)
++        s2.step(move_action)
++        action_actions = get_legal_actions(s2)
++
++        # Capture strictly dominates wait on same dest for infantry/mech.
++        has_capture = any(a.action_type == ActionType.CAPTURE for a in action_actions)
++        for aa in action_actions:
++            if has_capture and aa.action_type == ActionType.WAIT:
++                continue
++            kind = _kind_from_action(aa, after_move=True)
++            cap_prev = CapturePreview()
++            atk_prev = AttackPreview()
++            if kind == CandidateKind.MOVE_CAPTURE:
++                cap_prev = _capture_preview(s2, s2.selected_unit, move_action.move_pos)
++            elif kind == CandidateKind.MOVE_ATTACK:
++                atk_prev = _attack_preview(s2, aa)
++            # Terminal merged actions include both engine steps; setup actions only
++            # move, preserving legacy follow-up stage for unload/refuel/repair/etc.
++            if kind in (CandidateKind.MOVE_SETUP_UNLOAD, CandidateKind.MOVE_SETUP_REPAIR, CandidateKind.MOVE_SETUP_OTHER):
++                seq = (move_action,)
++            else:
++                seq = (move_action, aa)
++            out.append(CandidateAction(kind, seq, dest=move_action.move_pos, target=aa.target_pos, attack=atk_prev, capture=cap_prev))
++    return out
++
++
++def candidate_feature_matrix(candidates: list[CandidateAction], state: GameState) -> tuple[np.ndarray, np.ndarray]:
++    feats = np.zeros((MAX_CANDIDATES, CANDIDATE_FEATURE_DIM), dtype=np.float32)
++    mask = np.zeros((MAX_CANDIDATES,), dtype=bool)
++    size = _map_size(state)
++    n = min(len(candidates), MAX_CANDIDATES)
++    for i, c in enumerate(candidates[:n]):
++        mask[i] = True
++        # 0..9 kind one-hot
++        k = int(c.kind)
++        if 0 <= k < 10:
++            feats[i, k] = 1.0
++        dr, dc = _coord(c.dest, size)
++        tr, tc = _coord(c.target, size)
++        feats[i, 10:14] = (dr, dc, tr, tc)
++        a = c.attack
++        feats[i, 14:28] = (
++            a.damage_min, a.damage_max, a.counter_min, a.counter_max,
++            a.enemy_value_removed_min, a.enemy_value_removed_max,
++            a.my_value_lost_min, a.my_value_lost_max,
++            a.target_killed_min, a.target_killed_max,
++            a.attacker_killed_min, a.attacker_killed_max,
++            a.indirect, a.sonja_counter_break,
++        )
++        cp = c.capture
++        feats[i, 28:32] = (cp.progress, cp.remaining_after, cp.completes_now, cp.property_value)
++        # Simple geometry/action metadata, normalized.
++        if c.dest is not None and c.target is not None:
++            feats[i, 32] = abs(c.dest[0] - c.target[0]) / 30.0
++            feats[i, 33] = abs(c.dest[1] - c.target[1]) / 30.0
++            feats[i, 34] = (abs(c.dest[0] - c.target[0]) + abs(c.dest[1] - c.target[1])) / 30.0
++        feats[i, 35] = 1.0 if c.terminal() else 0.0
++    return feats, mask
++
++
++def execute_candidate(state: GameState, candidate: CandidateAction) -> None:
++    """Apply candidate to engine by replaying its staged Action sequence."""
++    for a in candidate.actions:
++        state.step(a)
++
++
++def candidates_to_info(candidates: list[CandidateAction]) -> dict:
++    return {
++        "candidate_count": len(candidates),
++        "candidate_count_capped": min(len(candidates), MAX_CANDIDATES),
++        "candidate_overflow": len(candidates) > MAX_CANDIDATES,
++    }
++
+diff --git a/rl/network.py b/rl/network.py
+index 2222222..3333333 100644
+--- a/rl/network.py
++++ b/rl/network.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ import gymnasium as gym
+ import torch
+ import torch.nn as nn
+ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+ from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS
++from rl.candidate_actions import MAX_CANDIDATES, CANDIDATE_FEATURE_DIM
+@@
+ class AWBWNet(nn.Module):
+@@
+-        self.linear_scalar_policy = nn.Linear(FUSED_CHANNELS, 16)
++        self.linear_scalar_policy = nn.Linear(FUSED_CHANNELS, 16)
++        # Dynamic candidate-action scorer.  Used by the merged move/action path.
++        # Static legacy logits are still emitted when candidate_features is None.
++        self.candidate_mlp = nn.Sequential(
++            nn.Linear(FUSED_CHANNELS + CANDIDATE_FEATURE_DIM, hidden_size),
++            nn.ReLU(inplace=True),
++            nn.Linear(hidden_size, hidden_size),
++            nn.ReLU(inplace=True),
++            nn.Linear(hidden_size, 1),
++        )
+@@
+-        action_mask: torch.Tensor | None = None,
++        action_mask: torch.Tensor | None = None,
++        candidate_features: torch.Tensor | None = None,
++        candidate_mask: torch.Tensor | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor]:
+@@
+-        l_sel = self.conv_select(xf).squeeze(1)
++        # Dynamic candidate mode: score exactly the padded candidate table.
++        # This is the intended merged MOVE_WAIT/MOVE_CAPTURE/MOVE_ATTACK path.
++        if candidate_features is not None:
++            cf = candidate_features.float()
++            if cf.dim() != 3 or cf.shape[1] != MAX_CANDIDATES or cf.shape[2] != CANDIDATE_FEATURE_DIM:
++                raise ValueError(
++                    f"candidate_features must be [B,{MAX_CANDIDATES},{CANDIDATE_FEATURE_DIM}], got {tuple(cf.shape)}"
++                )
++            gg = g.float().unsqueeze(1).expand(-1, MAX_CANDIDATES, -1)
++            logits = self.candidate_mlp(torch.cat([gg, cf], dim=-1)).squeeze(-1)
++            if candidate_mask is not None:
++                logits = logits.masked_fill(~candidate_mask.bool(), float("-inf"))
++            value = self.value_head(g.float()).squeeze(-1)
++            return logits, value
++
++        l_sel = self.conv_select(xf).squeeze(1)
+@@
+         return logits, value
++
++
++class CandidateAWBWNet(AWBWNet):
++    """Alias for configs that want to opt into the dynamic candidate interface."""
++    pass
++
+diff --git a/rl/env.py b/rl/env.py
+index 4444444..5555555 100644
+--- a/rl/env.py
++++ b/rl/env.py
+@@ -1,7 +1,7 @@
+ from __future__ import annotations
+@@
+-from rl.network import ACTION_SPACE_SIZE
++from rl.network import ACTION_SPACE_SIZE
++from rl.candidate_actions import (
++    MAX_CANDIDATES,
++    CANDIDATE_FEATURE_DIM,
++    enumerate_candidate_actions,
++    candidate_feature_matrix,
++    execute_candidate,
++    candidates_to_info,
++)
+@@
+ class AWBWEnv(gym.Env):
+@@
+-        self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
++        self._use_candidate_actions = (os.environ.get("AWBW_CANDIDATE_ACTIONS") or "0").strip().lower() in (
++            "1", "true", "yes", "on"
++        )
++        self.action_space = spaces.Discrete(MAX_CANDIDATES if self._use_candidate_actions else ACTION_SPACE_SIZE)
+@@
+-        self.observation_space = spaces.Dict({
+-            "spatial": spaces.Box(...),
+-            "scalars": spaces.Box(...),
+-        })
++        # Existing spatial/scalar Box definitions stay unchanged.  When dynamic
++        # candidate actions are on, the policy also receives a padded candidate
++        # table.  If your SB3 wrapper assumes exactly spatial/scalars, gate this
++        # behind AWBW_CANDIDATE_ACTIONS until the custom policy is wired.
++        if self._use_candidate_actions:
++            self.observation_space["candidate_features"] = spaces.Box(
++                low=-10.0, high=10.0, shape=(MAX_CANDIDATES, CANDIDATE_FEATURE_DIM), dtype=np.float32
++            )
++            self.observation_space["candidate_mask"] = spaces.MultiBinary(MAX_CANDIDATES)
+@@
+     def _get_obs(self):
+         obs = {
+             "spatial": encode_state(...),
+             "scalars": ...,
+         }
++        if self._use_candidate_actions:
++            self._candidate_table = enumerate_candidate_actions(self.state)
++            cf, cm = candidate_feature_matrix(self._candidate_table, self.state)
++            obs["candidate_features"] = cf
++            obs["candidate_mask"] = cm
+         return obs
+@@
+     def action_masks(self) -> np.ndarray:
++        if self._use_candidate_actions:
++            # Keep table fresh because MaskablePPO may ask for masks multiple times
++            # between observations.  Deterministic enumeration is mandatory.
++            self._candidate_table = enumerate_candidate_actions(self.state)
++            mask = np.zeros((MAX_CANDIDATES,), dtype=bool)
++            mask[: min(len(self._candidate_table), MAX_CANDIDATES)] = True
++            return mask
+         return _get_action_mask(self.state, out=self._action_mask_buf if self._preallocated_buffers else None)
+@@
+     def step(self, action: int):
++        if self._use_candidate_actions:
++            if not hasattr(self, "_candidate_table"):
++                self._candidate_table = enumerate_candidate_actions(self.state)
++            idx = int(action)
++            if idx < 0 or idx >= min(len(self._candidate_table), MAX_CANDIDATES):
++                # Invalid candidate means a hard illegal action.  Preserve old env
++                # illegal-action behavior if you have one; this default fails loud.
++                raise ValueError(f"illegal candidate action index {idx}; n={len(self._candidate_table)}")
++            cand = self._candidate_table[idx]
++            execute_candidate(self.state, cand)
++            info = candidates_to_info(self._candidate_table)
++            info["candidate_kind"] = int(cand.kind)
++            # Continue with the existing post-step reward/opponent/terminal logic.
++            # Replace only the old flat-index -> Action decoding block with the
++            # execute_candidate call above.
++            ...
++
+         legal = get_legal_actions(self.state)
+         action_obj = _flat_to_action(int(action), self.state, legal=legal)
+         ...
++
+diff --git a/rl/candidate_policy_notes.md b/rl/candidate_policy_notes.md
+new file mode 100644
+index 0000000..9999999
+--- /dev/null
++++ b/rl/candidate_policy_notes.md
+@@ -0,0 +1,87 @@
++# Candidate-action PPO wiring notes
++
++This patch intentionally separates the *engine/env candidate table* from the
++*SB3 policy integration*.  The repo currently uses a fixed Discrete action space
++and fixed flat logits.  Dynamic merged MOVE_ATTACK rows require one of these:
++
++1. Custom policy class that calls:
++
++```python
++logits, value = model(
++    obs["spatial"],
++    obs["scalars"],
++    candidate_features=obs["candidate_features"],
++    candidate_mask=obs["candidate_mask"],
++)
++```
++
++2. A wrapper that pads candidate logits to `MAX_CANDIDATES` and trains with
++   `spaces.Discrete(MAX_CANDIDATES)` while `AWBW_CANDIDATE_ACTIONS=1`.
++
++Do not try to represent MOVE_ATTACK as `900*900` fixed slots.
++
++## Candidate semantics
++
++Current:
++
++```text
++SELECT unit -> MOVE dest -> ACTION wait/capture/attack/etc.
++```
++
++Candidate mode:
++
++```text
++SELECT unit unchanged
++MOVE stage emits:
++  MOVE_WAIT(dest)
++  MOVE_CAPTURE(dest)
++  MOVE_ATTACK(dest, target)
++  MOVE_LOAD(dest)
++  MOVE_JOIN(dest)
++  MOVE_SETUP_UNLOAD(dest)
++  MOVE_SETUP_REPAIR(dest)
++```
++
++`MOVE_CAPTURE(dest)` masks out `MOVE_WAIT(dest)`.
++
++Indirect attackers have zero counter preview, even versus indirect defenders.
++Sonja SCOP defender gets `sonja_counter_break=1` and must retain counter fields.
++
++## First required tests
++
++```python
++def test_candidate_capture_masks_wait_same_tile(env_with_infantry_city):
++    cands = enumerate_candidate_actions(env.state)
++    by_dest = {}
++    for c in cands:
++        by_dest.setdefault(c.dest, set()).add(c.kind)
++    for kinds in by_dest.values():
++        assert not (CandidateKind.MOVE_CAPTURE in kinds and CandidateKind.MOVE_WAIT in kinds)
++
++def test_indirect_counter_preview_zero(env_grit_carrier_target):
++    cands = enumerate_candidate_actions(env.state)
++    for c in cands:
++        if c.kind == CandidateKind.MOVE_ATTACK and c.attack.indirect:
++            assert c.attack.counter_min == 0
++            assert c.attack.counter_max == 0
++
++def test_candidate_count_under_cap(random_state_pool):
++    mx = 0
++    for state in random_state_pool:
++        mx = max(mx, len(enumerate_candidate_actions(state)))
++    assert mx < MAX_CANDIDATES
++```
++
++## Known deliberate rough edge
++
++`_counter_range` currently uses `damage_range` for counters, so Sonja D2D ×1.5
++counter amplification is not fully range-swept in preview.  It marks the
++`sonja_counter_break` flag and avoids incorrectly dropping the counter when the
++target is killed.  If you need exact counter range, add a public
++`counter_damage_range(...)` helper in `engine.combat` that mirrors
++`calculate_counterattack` and sweeps luck with `counter_amp`.

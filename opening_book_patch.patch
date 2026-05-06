@@ -1,0 +1,55 @@
+--- a/scripts/train_rhea_value_parallel.py
++++ b/scripts/train_rhea_value_parallel.py
+@@ -1093,6 +1093,14 @@
+     # COP disable (forces SCOP learning)
+     ap.add_argument("--cop-disable-per-seat-p", type=float, default=0.10,
+                       help="Probability (0-1) to disable COP for each seat at game start (default 0.10 = 10%%)")
+ 
++    # Opening book (Designed Desires)
++    ap.add_argument("--opening-book-path", type=Path, default=None,
++                      help="Path to opening book JSONL (e.g., data/designed_desires_opening_book.jsonl)")
++    ap.add_argument("--opening-book-prob", type=float, default=1.0,
++                      help="Probability (0-1) to use opening book vs RHEA from day 1 (default 1.0 = always)")
++    ap.add_argument("--opening-book-strike-release", action="store_true",
++                      help="Release opening book if a unit moves into enemy strike range")
++
+     # RHEA search.
+     ap.add_argument("--rhea-autotune", action="store_true",
+         help="Enable dynamic RHEA budget auto-tuning based on game state complexity")
+@@ -208,6 +216,10 @@
+     # max_days parameter is passed as max_turns to AWBWEnv
+     # (they are aliases for the same calendar day cap)
+     max_turns = args.max_days if args.max_days else None
++    
++    # Opening book integration
++    opening_book_path = str(args.opening_book_path) if args.opening_book_path else None
++    opening_book_prob = max(0.0, min(1.0, float(args.opening_book_prob)))
++    opening_book_strike_release = bool(args.opening_book_strike_release)
+ 
+     try:
+         return AWBWEnv(
+@@ -215,6 +227,10 @@
+             co_p0=co_p0,
+             co_p1=co_p1,
+             max_turns=max_turns,
++            opening_book_path=opening_book_path,
++            opening_book_seats="both",
++            opening_book_prob=opening_book_prob, 
++            opening_book_strict_co=False, 
++            opening_book_strike_release=opening_book_strike_release, 
+         )
+     except TypeError:
+         return AWBWEnv(
+@@ -224,6 +240,10 @@
+             co_p1=co_p1[0],
+             co_p1=co_p1[0], 
+             max_turns=max_turns,
++            opening_book_path=opening_book_path, 
++            opening_book_seats="both", 
++            opening_book_prob=opening_book_prob, 
++            opening_book_strict_co=False, 
++            opening_book_strike_release=opening_book_strike_release, 
+         )
+ 
+ 
+ def _save_checkpoint(path: Path, model: AWBWValueNet, learner_cfg: RheaValueLearnerConfig, step: int) -> None:

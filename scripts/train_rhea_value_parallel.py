@@ -444,15 +444,29 @@ def _apply_gradients_to_model(
     Returns gradient norm.
     """
     # First, set gradients on model
+    # Important: ensure ALL parameters that require grad have valid gradients
     for name, p in model.named_parameters():
-        if p.requires_grad and name in grads_dict:
-            p.grad = grads_dict[name].to(p.device)
+        if p.requires_grad:
+            if name in grads_dict:
+                p.grad = grads_dict[name].to(p.device)
+            else:
+                # Parameter not in grads_dict - this shouldn't happen, but if it does,
+                # set gradient to zero to avoid NaN
+                p.grad = torch.zeros_like(p)
     
     # Clip and step
     grad_norm = torch.nn.utils.clip_grad_norm_(
         [p for p in model.parameters() if p.requires_grad],
         clip_norm,
     )
+    
+    # Check for NaN gradients before applying
+    nan_grads = [name for name, p in model.named_parameters() if p.grad is not None and torch.isnan(p.grad).any()]
+    if nan_grads:
+        print(json.dumps({"event": "skip_nan_apply", "nan_grads_count": len(nan_grads)}), flush=True)
+        opt.zero_grad(set_to_none=True)
+        return None  # Signal that update was skipped
+    
     opt.step()
     opt.zero_grad(set_to_none=True)
     
@@ -712,9 +726,31 @@ def _actor_loop(
         latest_path = Path("checkpoints") / "value_rhea_latest.pt"
         
         # Try to load checkpoint, but don't fail if it doesn't exist yet
-        # The actor will refresh from latest.pt once the learner creates it
+        # Load checkpoint - use clean checkpoint, never the potentially corrupted latest.pt
+        # This prevents NaN gradient propagation from corrupted models.
+        actor_checkpoint = args.checkpoint
+        # If using latest.pt, try to use a clean historical checkpoint instead
+        checkpoint_path = Path(actor_checkpoint)
+        if checkpoint_path.name.lower() == "value_rhea_latest.pt":
+            # Look for clean historical checkpoints (not latest)
+            import glob
+            clean_candidates = sorted(
+                [p for p in checkpoint_path.parent.glob("value_rhea_*.pt") 
+                 if "latest" not in p.name.lower()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True  # Newest first
+            )
+            if clean_candidates:
+                actor_checkpoint = str(clean_candidates[0])
+                print(json.dumps({
+                    "event": "actor_using_clean_checkpoint",
+                    "actor_id": actor_id,
+                    "original": str(checkpoint_path),
+                    "using": actor_checkpoint,
+                }), flush=True)
+        
         try:
-            value_model = load_value_checkpoint(args.checkpoint, device=actor_device)
+            value_model = load_value_checkpoint(actor_checkpoint, device=actor_device)
             print(json.dumps({
                 "event": "actor_checkpoint_loaded",
                 "actor_id": actor_id,
@@ -1350,8 +1386,11 @@ def main() -> None:
         if args.verbose:
             print(json.dumps({"event": "warning", "message": "--gpu-actors > 0 but --actor-gpu-device is not cuda*"}), flush=True)
 
-    # Hardcoded output directory
-    output_dir = Path("checkpoints")
+    # Output directory - use shared root if provided, otherwise local checkpoints/
+    if args.push_gradients and args.gradient_shared_root:
+        output_dir = Path(args.gradient_shared_root) / "checkpoints"
+    else:
+        output_dir = Path("checkpoints")
     output_dir.mkdir(parents=True, exist_ok=True)
     # Convert args to JSON-serializable dict (handle Path objects)
     hparams = vars(args).copy()
@@ -1392,8 +1431,15 @@ def main() -> None:
     # Save an initial refresh checkpoint so actors can load learner-format .pt.
     # This must be done BEFORE starting actors so they have something to load.
     latest_path = output_dir / "value_rhea_latest.pt"
-    _save_checkpoint(latest_path, online, learner_cfg if learner else None, 0)
-    print(json.dumps({"event": "initial_checkpoint_saved", "path": str(latest_path)}), flush=True)
+    # Use a clean checkpoint for actors - copy it safely
+    import shutil
+    clean_checkpoint = Path(args.checkpoint) if Path(args.checkpoint).exists() else None
+    if clean_checkpoint and clean_checkpoint.exists():
+        shutil.copy(clean_checkpoint, latest_path)
+        print(json.dumps({"event": "initial_checkpoint_copied", "from": str(clean_checkpoint), "to": str(latest_path)}), flush=True)
+    else:
+        _save_checkpoint(latest_path, online, learner_cfg if learner else None, 0)
+    print(json.dumps({"event": "initial_checkpoint_ready", "path": str(latest_path)}), flush=True)
 
     # Gradient aggregation state (for push-gradients mode)
     gradient_poll_interval = float(getattr(args, "gradient_poll_interval", 30.0))
@@ -1442,7 +1488,7 @@ def main() -> None:
     remote_transitions_ingested = 0
 
     try:
-        while transitions < int(args.total_transitions):
+        while (gradient_step if args.push_gradients else transitions) < int(args.total_transitions):
             try:
                 msg = out_q.get(timeout=30.0)
             except queue.Empty:
@@ -1451,7 +1497,7 @@ def main() -> None:
                 elapsed = time.time() - last_transition_time
                 timeout_log_entry = {
                     "event": "queue_timeout",
-                    "transitions": transitions,
+                    "transitions": (gradient_step if args.push_gradients else transitions),
                     "replay": len(replay),
                     "actors_alive": alive_count,
                     "seconds_since_last_transition": round(elapsed, 1),
@@ -1519,6 +1565,16 @@ def main() -> None:
                                 if total_actors > 0:
                                     for name in aggregated_grads:
                                         aggregated_grads[name] /= total_actors
+                                
+                                    # Check for NaN gradients before applying
+                                    nan_grads = [name for name, g in aggregated_grads.items() if torch.isnan(g).any()]
+                                    if nan_grads:
+                                        print(json.dumps({
+                                            "event": "skip_nan_grads",
+                                            "count": len(nan_grads),
+                                            "first_few": nan_grads[:5],
+                                        }), flush=True)
+                                        continue
                                     
                                     # Apply aggregated gradients
                                     grad_norm = _apply_gradients_to_model(
@@ -1540,12 +1596,12 @@ def main() -> None:
                                         "step": gradient_step,
                                         "actors_contributed": total_actors,
                                         "grad_norm": grad_norm,
-                                        "transitions": transitions,
+                                        "transitions": (gradient_step if args.push_gradients else transitions),
                                         "replay_size": len(replay),
                                     }), flush=True)
                                     
-                                    # Save checkpoint periodically
-                                    if gradient_step % 10 == 0:
+                                    # Save checkpoint periodically (only if grad_norm is valid)
+                                    if gradient_step % 10 == 0 and grad_norm is not None and not (isinstance(grad_norm, float) and torch.isnan(torch.tensor(grad_norm))):
                                         _save_checkpoint(latest_path, online, learner_cfg, gradient_step)
                         
                         except Exception as e:
@@ -1561,7 +1617,7 @@ def main() -> None:
                 if now - last_heartbeat >= heartbeat_interval:
                     hb = {
                         "event": "heartbeat",
-                        "transitions": transitions,
+                        "transitions": (gradient_step if args.push_gradients else transitions),
                         "games_done": games_done,
                         "replay": len(replay),
                         "actors_alive": alive_count,
@@ -1594,7 +1650,7 @@ def main() -> None:
                     log = dict(msg.get("log", {}))
                     log_entry = {
                         "event": "transition",
-                        "transitions": transitions,
+                        "transitions": (gradient_step if args.push_gradients else transitions),
                         "actor_id": msg.get("actor_id"),
                         "replay": len(replay),
                         "games_done": games_done,

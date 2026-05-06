@@ -1,0 +1,453 @@
+diff --git a/engine/commander_wars_capture.py b/engine/commander_wars_capture.py
+new file mode 100644
+index 0000000..5f9e2c1
+--- /dev/null
++++ b/engine/commander_wars_capture.py
+@@ -0,0 +1,282 @@
++"""Commander Wars NormalAI-style capture advisor.
++
++This is not a C++ bridge.  It is the useful part of the NormalAI capture logic
++translated into engine-native Python: produce a deterministic expert preference
++over legal foot-unit capture moves.
++
++Why this lives in ``engine`` instead of ``rl``:
++    * ``engine.action.get_legal_actions`` already owns legality / masks.
++    * The advisor is allowed to be used as curriculum pruning, opponent policy,
++      or behavior-cloning label generator without importing torch / gym.
++
++The source behavior being cloned is the *shape* of Commander Wars NormalAI:
++    * capture is a high-priority turn phase;
++    * already-started captures should usually be continued;
++    * production / HQ / enemy properties beat ordinary neutral cities;
++    * nearer properties are better;
++    * properties exposed to enemy force are worse unless tactically valuable.
++
++Keep this deterministic.  Legal action masks must be stable across repeated
++``get_legal_actions`` calls during the same MOVE stage.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Iterable
++
++from engine.terrain import get_terrain
++from engine.unit import UNIT_STATS, Unit
++
++
++Coord = tuple[int, int]
++
++
++@dataclass(frozen=True, slots=True)
++class CaptureScore:
++    """Debuggable score for a candidate capture destination."""
++
++    pos: Coord
++    score: float
++    owner_bonus: float
++    terrain_bonus: float
++    continue_bonus: float
++    distance_penalty: float
++    risk_penalty: float
++    nearby_enemy_pressure: int
++
++
++def _manhattan(a: Coord, b: Coord) -> int:
++    return abs(int(a[0]) - int(b[0])) + abs(int(a[1]) - int(b[1]))
++
++
++def _iter_live_enemy_units(state, player: int) -> Iterable[Unit]:
++    for p, units in getattr(state, "units", {}).items():
++        if int(p) == int(player):
++            continue
++        for u in units:
++            if getattr(u, "is_alive", True):
++                yield u
++
++
++def _property_at(state, pos: Coord):
++    try:
++        return state.get_property_at(int(pos[0]), int(pos[1]))
++    except Exception:
++        return None
++
++
++def _terrain_at(state, pos: Coord):
++    tid = state.map_data.terrain[int(pos[0])][int(pos[1])]
++    return get_terrain(tid)
++
++
++def _is_capturable_property(state, player: int, pos: Coord) -> bool:
++    """Matches AWBW capture legality intent, excluding comm towers / labs."""
++
++    terrain = _terrain_at(state, pos)
++    if not terrain.is_property:
++        return False
++    prop = _property_at(state, pos)
++    if prop is None:
++        return False
++    if getattr(prop, "is_comm_tower", False) or getattr(prop, "is_lab", False):
++        return False
++    owner = getattr(prop, "owner", None)
++    return owner is None or int(owner) != int(player)
++
++
++def _terrain_priority(state, pos: Coord) -> float:
++    """Building class priority, corresponding to NormalAI's high-priority buildings."""
++
++    terrain = _terrain_at(state, pos)
++    bonus = 0.0
++    if getattr(terrain, "is_hq", False):
++        bonus += 2400.0
++    if getattr(terrain, "is_base", False):
++        bonus += 900.0
++    if getattr(terrain, "is_airport", False):
++        bonus += 850.0
++    if getattr(terrain, "is_port", False):
++        bonus += 750.0
++    if bonus <= 0.0:
++        bonus += 250.0  # ordinary city / property
++    return bonus
++
++
++def _owner_priority(state, player: int, pos: Coord) -> float:
++    prop = _property_at(state, pos)
++    if prop is None:
++        return 0.0
++    owner = getattr(prop, "owner", None)
++    if owner is None:
++        return 500.0
++    if int(owner) != int(player):
++        return 1100.0
++    return -999999.0
++
++
++def _same_tile_continue_bonus(unit: Unit, pos: Coord) -> float:
++    """Huge bias toward finishing a capture chain instead of wandering off."""
++
++    if getattr(unit, "pos", None) != pos:
++        return 0.0
++    # Unit is already on the target.  The engine tracks capture state on the
++    # property, not necessarily on the unit, so do not depend on a field name.
++    return 1800.0
++
++
++def _nearby_enemy_pressure(state, player: int, pos: Coord, radius: int = 3) -> int:
++    pressure = 0
++    for enemy in _iter_live_enemy_units(state, player):
++        epos = getattr(enemy, "pos", None)
++        if epos is None:
++            continue
++        d = _manhattan(pos, epos)
++        if d <= radius:
++            # Direct capture contests matter most; farther units are weaker pressure.
++            pressure += max(1, radius + 1 - d)
++    return pressure
++
++
++def _risk_penalty(state, player: int, unit: Unit, pos: Coord) -> float:
++    """Cheap threat proxy.  Do not call combat RNG / expensive target generation here."""
++
++    pressure = _nearby_enemy_pressure(state, player, pos, radius=3)
++    hp = float(getattr(unit, "hp", 10) or 10)
++    # Low-hp infantry are bad capturers under pressure.  High-value captures can
++    # still win because owner/terrain bonuses are larger than this penalty.
++    low_hp_multiplier = 1.0 + max(0.0, 7.0 - hp) * 0.20
++    return 115.0 * pressure * low_hp_multiplier
++
++
++def score_capture_destination(state, player: int, unit: Unit, pos: Coord) -> CaptureScore | None:
++    """Return NormalAI-style capture score for one legal MOVE destination.
++
++    ``None`` means the destination is not a capturable property for this player.
++    """
++
++    if not UNIT_STATS[unit.unit_type].can_capture:
++        return None
++    if not _is_capturable_property(state, player, pos):
++        return None
++
++    owner_bonus = _owner_priority(state, player, pos)
++    terrain_bonus = _terrain_priority(state, pos)
++    continue_bonus = _same_tile_continue_bonus(unit, pos)
++    dist = _manhattan(getattr(unit, "pos", pos), pos)
++    distance_penalty = 65.0 * float(dist)
++    risk = _risk_penalty(state, player, unit, pos)
++    pressure = _nearby_enemy_pressure(state, player, pos, radius=3)
++
++    # Base 1000 makes "capture something" beat random relocation.  The finer
++    # terms decide which property, not whether capturing matters.
++    score = 1000.0 + owner_bonus + terrain_bonus + continue_bonus - distance_penalty - risk
++
++    return CaptureScore(
++        pos=pos,
++        score=score,
++        owner_bonus=owner_bonus,
++        terrain_bonus=terrain_bonus,
++        continue_bonus=continue_bonus,
++        distance_penalty=distance_penalty,
++        risk_penalty=risk,
++        nearby_enemy_pressure=pressure,
++    )
++
++
++def ranked_capture_destinations(state, player: int, unit: Unit, positions: Iterable[Coord]) -> list[CaptureScore]:
++    """Score and sort candidate capture destinations, best first."""
++
++    scored: list[CaptureScore] = []
++    for pos in positions:
++        s = score_capture_destination(state, player, unit, pos)
++        if s is not None:
++            scored.append(s)
++    scored.sort(key=lambda x: (-x.score, x.pos[0], x.pos[1]))
++    return scored
++
++
++def advisor_capture_destinations(
++    state,
++    player: int,
++    unit: Unit,
++    reachable: Iterable[Coord],
++    *,
++    top_k: int = 1,
++    score_margin: float = 0.0,
++) -> set[Coord]:
++    """Return capture destinations the advisor would allow / label.
++
++    ``top_k=1`` is a hard behavior-cloning target.  A small ``score_margin``
++    can keep near-ties legal, which is safer during PPO curriculum.
++    """
++
++    ranked = ranked_capture_destinations(state, player, unit, reachable)
++    if not ranked:
++        return set()
++
++    best = ranked[0].score
++    keep: set[Coord] = set()
++    for i, item in enumerate(ranked):
++        if i < int(max(1, top_k)) or item.score >= best - float(score_margin):
++            keep.add(item.pos)
++        else:
++            break
++    return keep
++
++
++def commander_capture_debug_row(state, player: int, unit: Unit, reachable: Iterable[Coord]) -> list[dict]:
++    """Small helper for tests / notebooks."""
++
++    return [
++        {
++            "pos": s.pos,
++            "score": s.score,
++            "owner_bonus": s.owner_bonus,
++            "terrain_bonus": s.terrain_bonus,
++            "continue_bonus": s.continue_bonus,
++            "distance_penalty": s.distance_penalty,
++            "risk_penalty": s.risk_penalty,
++            "nearby_enemy_pressure": s.nearby_enemy_pressure,
++        }
++        for s in ranked_capture_destinations(state, player, unit, reachable)
++    ]
+diff --git a/engine/action.py b/engine/action.py
+index 1111111..2222222 100644
+--- a/engine/action.py
++++ b/engine/action.py
+@@ -2264,6 +2264,7 @@ from engine.weather import effective_move_cost
+ import os as _os
++from engine.commander_wars_capture import advisor_capture_destinations
+ # Opt-in RL training: when set (see _get_move_actions), infantry/mech MOVE
+ # masks are restricted to capturable enemy/neutral property tiles when any
+ # exist in range. Default OFF — replays call step() directly and never hit
+@@ -2273,6 +2274,9 @@ import os as _os
+ _CAPTURE_MOVE_GATE_ENV = "AWBW_CAPTURE_MOVE_GATE"
++_CAPTURE_MOVE_GATE_STYLE_ENV = "AWBW_CAPTURE_MOVE_GATE_STYLE"
++_CAPTURE_MOVE_GATE_TOP_K_ENV = "AWBW_CAPTURE_MOVE_GATE_TOP_K"
++_CAPTURE_MOVE_GATE_MARGIN_ENV = "AWBW_CAPTURE_MOVE_GATE_MARGIN"
+@@ -3434,31 +3438,57 @@ def _get_move_actions(
+  gate_prob = parse_capture_move_gate_env_value(_os.environ.get(_CAPTURE_MOVE_GATE_ENV))
+  if gate_prob > 0.0 and UNIT_STATS[unit.unit_type].can_capture:
+-
+-  capturable: set[tuple[int, int]] = set()
+-
+-  for pos in reachable:
+-
+-  tid = state.map_data.terrain[pos[0]][pos[1]]
+-
+-  if not get_terrain(tid).is_property:
+-
+-  continue
+-
+-  prop = state.get_property_at(*pos)
+-
+-  if prop is None or prop.is_comm_tower or prop.is_lab:
+-
+-  continue
+-
+-  if prop.owner is not None and prop.owner == player:
+-
+-  continue
+-
+-  capturable.add(pos)
++  style = (_os.environ.get(_CAPTURE_MOVE_GATE_STYLE_ENV) or "any").strip().lower()
++  if style in ("commander", "commander_wars", "cw", "normalai", "normal_ai"):
++   try:
++    top_k = int(_os.environ.get(_CAPTURE_MOVE_GATE_TOP_K_ENV) or "1")
++   except ValueError:
++    top_k = 1
++   try:
++    margin = float(_os.environ.get(_CAPTURE_MOVE_GATE_MARGIN_ENV) or "0.0")
++   except ValueError:
++    margin = 0.0
++   capturable = advisor_capture_destinations(
++    state,
++    player,
++    unit,
++    reachable,
++    top_k=max(1, top_k),
++    score_margin=max(0.0, margin),
++   )
++  else:
++   capturable: set[tuple[int, int]] = set()
++
++   for pos in reachable:
++
++   tid = state.map_data.terrain[pos[0]][pos[1]]
++
++   if not get_terrain(tid).is_property:
++
++   continue
++
++   prop = state.get_property_at(*pos)
++
++   if prop is None or prop.is_comm_tower or prop.is_lab:
++
++   continue
++
++   if prop.owner is not None and prop.owner == player:
++
++   continue
++
++   capturable.add(pos)
+
+   if capturable:
+
+   if gate_prob >= 1.0:
+diff --git a/train.py b/train.py
+index 3333333..4444444 100644
+--- a/train.py
++++ b/train.py
+@@ -2565,11 +2565,28 @@ def _sync_worker_inherited_env_flags(args: argparse.Namespace) -> None:
+  cmg = float(getattr(args, "capture_move_gate", 0.0) or 0.0)
+  if cmg > 0.0:
+
+   os.environ["AWBW_CAPTURE_MOVE_GATE"] = str(cmg)
++  os.environ["AWBW_CAPTURE_MOVE_GATE_STYLE"] = str(getattr(args, "capture_move_gate_style", "any"))
++  os.environ["AWBW_CAPTURE_MOVE_GATE_TOP_K"] = str(int(getattr(args, "capture_move_gate_top_k", 1)))
++  os.environ["AWBW_CAPTURE_MOVE_GATE_MARGIN"] = str(float(getattr(args, "capture_move_gate_margin", 0.0)))
+
+  else:
+
+   os.environ.pop("AWBW_CAPTURE_MOVE_GATE", None)
++  os.environ.pop("AWBW_CAPTURE_MOVE_GATE_STYLE", None)
++  os.environ.pop("AWBW_CAPTURE_MOVE_GATE_TOP_K", None)
++  os.environ.pop("AWBW_CAPTURE_MOVE_GATE_MARGIN", None)
+@@ -3486,6 +3503,33 @@ def build_train_argument_parser() -> argparse.ArgumentParser:
+   ),
+
+  )
++ parser.add_argument(
++  "--capture-move-gate-style",
++  type=str,
++  default="any",
++  choices=("any", "commander", "commander_wars", "cw", "normalai", "normal_ai"),
++  help=(
++   "'any' preserves the existing gate: all reachable capturable properties remain legal. "
++   "'commander' uses engine.commander_wars_capture to keep only the NormalAI-style "
++   "best capture destination(s), creating behavior-cloning pressure through the mask."
++  ),
++ )
++ parser.add_argument(
++  "--capture-move-gate-top-k",
++  type=int,
++  default=1,
++  help=(
++   "With --capture-move-gate-style commander, keep the top K capture destinations. "
++   "Use 1 for hard BC labels; use 2-3 if pruning feels too brittle."
++  ),
++ )
++ parser.add_argument(
++  "--capture-move-gate-margin",
++  type=float,
++  default=0.0,
++  help=(
++   "With commander capture gate, also keep destinations within this score margin "
++   "of the best. 0 = one hard target unless top-k keeps more."
++  ),
++ )
+diff --git a/tests/test_commander_wars_capture_advisor.py b/tests/test_commander_wars_capture_advisor.py
+new file mode 100644
+index 0000000..6ab88cc
+--- /dev/null
++++ b/tests/test_commander_wars_capture_advisor.py
+@@ -0,0 +1,98 @@
++"""Smoke tests for the Commander Wars-style capture advisor.
++
++These tests intentionally avoid asserting exact map fixtures.  They pin the
++contract: deterministic, returns a subset of reachable capturable destinations,
++and never suggests owned / non-property tiles.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++from engine.action import compute_reachable_costs
++from engine.commander_wars_capture import advisor_capture_destinations, ranked_capture_destinations
++from engine.unit import UNIT_STATS
++from rl.env import AWBWEnv
++
++
++def _find_foot_unit_with_capture_choices(env: AWBWEnv, max_steps: int = 200):
++    state = env.state
++    for _ in range(max_steps):
++        player = state.active_player
++        for unit in state.units[player]:
++            if not getattr(unit, "is_alive", True):
++                continue
++            if not UNIT_STATS[unit.unit_type].can_capture:
++                continue
++            reachable = set(compute_reachable_costs(state, unit).keys())
++            ranked = ranked_capture_destinations(state, player, unit, reachable)
++            if ranked:
++                return state, player, unit, reachable, ranked
++        legal = env.legal_actions()
++        if not legal:
++            break
++        env.step(env.action_to_index(legal[0]))
++        state = env.state
++    pytest.skip("No early capturable foot-unit state found in sampled env.")
++
++
++def test_commander_capture_advisor_is_subset_and_deterministic():
++    env = AWBWEnv()
++    env.reset(seed=0)
++    state, player, unit, reachable, ranked = _find_foot_unit_with_capture_choices(env)
++
++    a = advisor_capture_destinations(state, player, unit, reachable, top_k=1)
++    b = advisor_capture_destinations(state, player, unit, reachable, top_k=1)
++
++    assert a == b
++    assert a
++    assert a.issubset({x.pos for x in ranked})
++
++
++def test_commander_capture_top_k_keeps_more_or_equal():
++    env = AWBWEnv()
++    env.reset(seed=1)
++    state, player, unit, reachable, _ranked = _find_foot_unit_with_capture_choices(env)
++
++    one = advisor_capture_destinations(state, player, unit, reachable, top_k=1)
++    three = advisor_capture_destinations(state, player, unit, reachable, top_k=3)
++
++    assert one.issubset(three)
++

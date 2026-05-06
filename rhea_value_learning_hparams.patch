@@ -1,0 +1,846 @@
+diff --git a/rl/rhea.py b/rl/rhea.py
+index 0000000..1111111 100644
+--- a/rl/rhea.py
++++ b/rl/rhea.py
+@@ -1,3 +1,4 @@
++
+ # rl/rhea.py
+ from __future__ import annotations
+ 
+@@ -21,15 +22,25 @@ from rl.rhea_fitness import RheaFitness, RheaFitnessBreakdown
+ @dataclass(slots=True)
+ class RheaConfig:
+     population: int = 32
+     generations: int = 6
+     elite: int = 4
+     mutation_rate: float = 0.20
+     max_actions_per_turn: int = 128
+     top_k_per_state: int = 24
+     reward_weight: float = 0.90
+     value_weight: float = 0.10
++    # Logging/eval knobs. These do not change search semantics, but make it
++    # easier to detect when evolution is merely expensive sorting.
++    log_initial_best: bool = True
+     seed: Optional[int] = None
+@@ -38,6 +49,8 @@ class RheaResult:
+     score: float
+     breakdown: RheaFitnessBreakdown
+     illegal_genes: int
+     generations: int
++    initial_best_score: float | None = None
++    evolved_gain: float | None = None
+@@ -60,10 +73,16 @@ class RheaPlanner:
+ 
+         for _gen in range(self.cfg.generations):
+             scored = []
+             for genome in population:
+                 after, actions, illegal = self._simulate_genome(before, genome)
+                 breakdown = self.fitness.score(
+@@ -77,10 +96,16 @@ class RheaPlanner:
+ 
+             scored.sort(key=lambda x: x[0], reverse=True)
++
++            if _gen == 0:
++                initial_best_score = float(scored[0][0])
+ 
+             if best is None or scored[0][0] > best[0]:
+                 best = scored[0]
+@@ -101,16 +126,23 @@ class RheaPlanner:
+         assert best is not None
+         score, genome, actions, breakdown, illegal = best
++        initial = locals().get("initial_best_score", None)
++        gain = None if initial is None else float(score) - float(initial)
+         return RheaResult(
+             actions=actions,
+             score=float(score),
+             breakdown=breakdown,
+             illegal_genes=int(illegal),
+             generations=self.cfg.generations,
++            initial_best_score=initial,
++            evolved_gain=gain,
+         )
+diff --git a/rl/rhea_replay.py b/rl/rhea_replay.py
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/rl/rhea_replay.py
+@@ -0,0 +1,152 @@
++"""Turn-level replay buffer for value-guided RHEA training.
++
++This intentionally stores only value-learning inputs. It does not store
++candidate_features, candidate_mask, action logprobs, PPO advantages, or other
++policy-gradient baggage. One sample is one full acting-player turn transition:
++
++    state_before_turn -> execute RHEA-selected full turn -> state_after_turn
++
++The value learner trains on turn-level TD targets.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Optional
++
++import numpy as np
++
++
++@dataclass(slots=True)
++class RheaTransition:
++    spatial_before: np.ndarray
++    scalars_before: np.ndarray
++    reward_turn: float
++    spatial_after: np.ndarray
++    scalars_after: np.ndarray
++    done: bool
++    winner: Optional[int]
++    acting_seat: int
++    day: int
++    phi_delta: float
++    value_after_at_search_time: float
++    search_score: float
++
++
++class RheaReplayBuffer:
++    def __init__(self, capacity: int, *, seed: int | None = None) -> None:
++        if capacity <= 0:
++            raise ValueError("capacity must be positive")
++        self.capacity = int(capacity)
++        self._data: list[RheaTransition] = []
++        self._pos = 0
++        self._rng = np.random.default_rng(seed)
++
++    def __len__(self) -> int:
++        return len(self._data)
++
++    def add(self, t: RheaTransition) -> None:
++        if len(self._data) < self.capacity:
++            self._data.append(t)
++        else:
++            self._data[self._pos] = t
++            self._pos = (self._pos + 1) % self.capacity
++
++    def sample(self, batch_size: int) -> dict[str, np.ndarray]:
++        if not self._data:
++            raise RuntimeError("cannot sample an empty replay buffer")
++        bs = min(int(batch_size), len(self._data))
++        idx = self._rng.choice(len(self._data), size=bs, replace=False)
++        batch = [self._data[int(i)] for i in idx]
++
++        return {
++            "spatial_before": np.stack([b.spatial_before for b in batch]).astype(np.float32),
++            "scalars_before": np.stack([b.scalars_before for b in batch]).astype(np.float32),
++            "reward_turn": np.asarray([b.reward_turn for b in batch], dtype=np.float32),
++            "spatial_after": np.stack([b.spatial_after for b in batch]).astype(np.float32),
++            "scalars_after": np.stack([b.scalars_after for b in batch]).astype(np.float32),
++            "done": np.asarray([b.done for b in batch], dtype=np.float32),
++            "winner": np.asarray([(-1 if b.winner is None else b.winner) for b in batch], dtype=np.int64),
++            "acting_seat": np.asarray([b.acting_seat for b in batch], dtype=np.int64),
++            "day": np.asarray([b.day for b in batch], dtype=np.int64),
++            "phi_delta": np.asarray([b.phi_delta for b in batch], dtype=np.float32),
++            "value_after_at_search_time": np.asarray([b.value_after_at_search_time for b in batch], dtype=np.float32),
++            "search_score": np.asarray([b.search_score for b in batch], dtype=np.float32),
++        }
+diff --git a/rl/rhea_value_learner.py b/rl/rhea_value_learner.py
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/rl/rhea_value_learner.py
+@@ -0,0 +1,216 @@
++"""Turn-level TD learner for value-guided RHEA.
++
++This is not PPO. There are no action logprobs, advantages, entropy bonuses, or
++clipped policy losses. RHEA chooses full turns. The neural net learns to evaluate
++turn-boundary board states.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Iterable
++
++import torch
++import torch.nn.functional as F
++
++from rl.rhea_replay import RheaReplayBuffer
++from rl.value_net import AWBWValueNet
++
++
++@dataclass(slots=True)
++class RheaValueLearnerConfig:
++    value_lr: float = 1.0e-4
++    value_batch_size: int = 128
++    replay_buffer_size: int = 50_000
++    min_replay_before_train: int = 1_000
++    updates_per_real_turn: int = 1
++    gamma_turn: float = 0.99
++    gradient_clip_norm: float = 1.0
++    weight_decay: float = 0.0
++    target_update_interval: int = 1_000
++    target_tau: float | None = None
++    target_clip: float | None = 5.0
++    freeze_encoder: bool = True
++    unfreeze_last_resblocks: int = 0
++
++
++def configure_trainable_params(model: AWBWValueNet, cfg: RheaValueLearnerConfig) -> None:
++    """Apply the staged encoder-freezing schedule.
++
++    Stage 1 should usually train only the value head. Later, unfreeze a few final
++    residual blocks, then eventually the full trunk. This avoids blasting a PPO
++    donor trunk with noisy early RHEA TD targets.
++    """
++
++    for p in model.parameters():
++        p.requires_grad_(True)
++
++    if not cfg.freeze_encoder:
++        return
++
++    # Freeze everything except the value head by default.
++    for name, p in model.named_parameters():
++        if not name.startswith("value_head"):
++            p.requires_grad_(False)
++
++    # Optionally unfreeze the last N trunk blocks as a middle stage.
++    n = int(cfg.unfreeze_last_resblocks)
++    if n > 0 and hasattr(model, "trunk_blocks"):
++        blocks = list(model.trunk_blocks)
++        for blk in blocks[-n:]:
++            for p in blk.parameters():
++                p.requires_grad_(True)
++
++
++class RheaValueLearner:
++    def __init__(
++        self,
++        online: AWBWValueNet,
++        target: AWBWValueNet,
++        replay: RheaReplayBuffer,
++        cfg: RheaValueLearnerConfig,
++        *,
++        device: str = "cuda",
++    ) -> None:
++        self.online = online.to(device)
++        self.target = target.to(device)
++        self.target.load_state_dict(self.online.state_dict())
++        self.target.eval()
++
++        self.replay = replay
++        self.cfg = cfg
++        self.device = torch.device(device)
++        self.num_updates = 0
++
++        configure_trainable_params(self.online, cfg)
++        params = [p for p in self.online.parameters() if p.requires_grad]
++        if not params:
++            raise RuntimeError("no trainable value parameters after freezing config")
++        self.opt = torch.optim.AdamW(
++            params,
++            lr=cfg.value_lr,
++            weight_decay=cfg.weight_decay,
++        )
++
++    def maybe_train_after_turn(self) -> list[dict[str, float]]:
++        if len(self.replay) < self.cfg.min_replay_before_train:
++            return []
++
++        logs: list[dict[str, float]] = []
++        for _ in range(max(0, int(self.cfg.updates_per_real_turn))):
++            logs.append(self.train_one_batch())
++        return logs
++
++    def train_one_batch(self) -> dict[str, float]:
++        batch = self.replay.sample(self.cfg.value_batch_size)
++
++        spatial_before = torch.as_tensor(batch["spatial_before"], dtype=torch.float32, device=self.device)
++        scalars_before = torch.as_tensor(batch["scalars_before"], dtype=torch.float32, device=self.device)
++        reward = torch.as_tensor(batch["reward_turn"], dtype=torch.float32, device=self.device)
++        spatial_after = torch.as_tensor(batch["spatial_after"], dtype=torch.float32, device=self.device)
++        scalars_after = torch.as_tensor(batch["scalars_after"], dtype=torch.float32, device=self.device)
++        done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device)
++
++        pred = self.online(spatial_before, scalars_before)
++        with torch.no_grad():
++            next_v = self.target(spatial_after, scalars_after)
++            td_target = reward + self.cfg.gamma_turn * next_v * (1.0 - done)
++            if self.cfg.target_clip is not None:
++                c = float(self.cfg.target_clip)
++                td_target = torch.clamp(td_target, -c, c)
++
++        loss = F.mse_loss(pred, td_target)
++
++        self.opt.zero_grad(set_to_none=True)
++        loss.backward()
++        grad_norm = torch.nn.utils.clip_grad_norm_(
++            [p for p in self.online.parameters() if p.requires_grad],
++            self.cfg.gradient_clip_norm,
++        )
++        self.opt.step()
++
++        self.num_updates += 1
++        self._maybe_update_target()
++
++        return {
++            "value_loss": float(loss.detach().cpu().item()),
++            "v_pred_mean": float(pred.detach().mean().cpu().item()),
++            "target_mean": float(td_target.detach().mean().cpu().item()),
++            "reward_mean": float(reward.detach().mean().cpu().item()),
++            "grad_norm": float(grad_norm.detach().cpu().item() if torch.is_tensor(grad_norm) else grad_norm),
++            "num_updates": float(self.num_updates),
++        }
++
++    def _maybe_update_target(self) -> None:
++        if self.cfg.target_tau is not None:
++            tau = float(self.cfg.target_tau)
++            with torch.no_grad():
++                for tp, op in zip(self.target.parameters(), self.online.parameters()):
++                    tp.data.mul_(1.0 - tau).add_(op.data, alpha=tau)
++            return
++
++        if self.cfg.target_update_interval > 0 and self.num_updates % self.cfg.target_update_interval == 0:
++            self.target.load_state_dict(self.online.state_dict())
+diff --git a/scripts/train_rhea_value.py b/scripts/train_rhea_value.py
+new file mode 100644
+index 0000000..4444444
+--- /dev/null
++++ b/scripts/train_rhea_value.py
+@@ -0,0 +1,336 @@
++from __future__ import annotations
++
++"""Train a value-only network from RHEA-generated turn transitions.
++
++This is the RHEA-machine entrypoint. It deliberately does not use PPO rollout
++buffers or policy-gradient updates.
++
++Example:
++
++python scripts/train_rhea_value.py ^
++  --map-id 171596 ^
++  --co-p0 14,8,28,7 ^
++  --co-p1 14,8,28,7 ^
++  --checkpoint checkpoints/latest.zip ^
++  --max-days 30 ^
++  --rhea-population 16 ^
++  --rhea-generations 3 ^
++  --rhea-elite 4 ^
++  --rhea-mutation-rate 0.20 ^
++  --rhea-top-k-per-state 16 ^
++  --rhea-max-actions-per-turn 96 ^
++  --reward-weight 0.90 ^
++  --value-weight 0.10 ^
++  --value-lr 1e-4 ^
++  --value-batch-size 128 ^
++  --replay-size 50000 ^
++  --min-replay-before-train 1000 ^
++  --updates-per-turn 1 ^
++  --gamma-turn 0.99 ^
++  --target-update-interval 1000 ^
++  --grad-clip 1.0 ^
++  --freeze-encoder
++"""
++
++import argparse
++import copy
++import json
++import random
++from pathlib import Path
++from typing import Iterable
++
++import numpy as np
++import torch
++
++from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
++from rl.env import AWBWEnv
++from rl.rhea import RheaConfig, RheaPlanner
++from rl.rhea_fitness import RheaFitness
++from rl.rhea_replay import RheaReplayBuffer, RheaTransition
++from rl.rhea_value_learner import RheaValueLearner, RheaValueLearnerConfig
++from rl.value_net import AWBWValueNet, load_value_from_maskable_ppo_zip
++
++
++def _parse_co_list(s: str) -> list[int]:
++    return [int(x) for x in str(s).split(",") if str(x).strip()]
++
++
++def _encode(state, observer_seat: int) -> tuple[np.ndarray, np.ndarray]:
++    spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
++    scalars = np.zeros((N_SCALARS,), dtype=np.float32)
++    encode_state(
++        state,
++        observer=int(observer_seat),
++        belief=None,
++        out_spatial=spatial,
++        out_scalars=scalars,
++    )
++    return spatial, scalars
++
++
++def _make_env(args: argparse.Namespace) -> AWBWEnv:
++    """Construct an AWBWEnv.
++
++    This is intentionally simple and may need a tiny local adjustment if your
++    branch's AWBWEnv constructor is wrapped by start_solo_training.py factories.
++    The RHEA/value learner itself is independent from PPO.
++    """
++
++    co_p0 = _parse_co_list(args.co_p0)
++    co_p1 = _parse_co_list(args.co_p1)
++
++    # Most local branches accept int CO ids or list/sequence pools. Keep the
++    # exact user-provided pool when possible; fallback to first element if the
++    # constructor is stricter.
++    try:
++        return AWBWEnv(
++            map_id=args.map_id,
++            co_p0=co_p0,
++            co_p1=co_p1,
++            max_days=args.max_days,
++        )
++    except TypeError:
++        return AWBWEnv(
++            map_id=args.map_id,
++            co_p0=co_p0[0],
++            co_p1=co_p1[0],
++            max_days=args.max_days,
++        )
++
++
++def _save_checkpoint(path: Path, model: AWBWValueNet, learner_cfg: RheaValueLearnerConfig, step: int) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    torch.save(
++        {
++            "model_state_dict": model.state_dict(),
++            "learner_cfg": learner_cfg.__dict__,
++            "step": step,
++        },
++        path,
++    )
++
++
++def build_arg_parser() -> argparse.ArgumentParser:
++    ap = argparse.ArgumentParser()
++
++    # Env / checkpoint.
++    ap.add_argument("--checkpoint", type=str, required=True)
++    ap.add_argument("--map-id", type=int, default=171596)
++    ap.add_argument("--co-p0", type=str, default="14,8,28,7")
++    ap.add_argument("--co-p1", type=str, default="14,8,28,7")
++    ap.add_argument("--max-days", type=int, default=30)
++    ap.add_argument("--device", type=str, default="cuda")
++    ap.add_argument("--seed", type=int, default=0)
++
++    # RHEA search.
++    ap.add_argument("--rhea-population", type=int, default=16)
++    ap.add_argument("--rhea-generations", type=int, default=3)
++    ap.add_argument("--rhea-elite", type=int, default=4)
++    ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
++    ap.add_argument("--rhea-top-k-per-state", type=int, default=16)
++    ap.add_argument("--rhea-max-actions-per-turn", type=int, default=96)
++    ap.add_argument("--reward-weight", type=float, default=0.90)
++    ap.add_argument("--value-weight", type=float, default=0.10)
++
++    # Value learner.
++    ap.add_argument("--value-lr", type=float, default=1.0e-4)
++    ap.add_argument("--value-batch-size", type=int, default=128)
++    ap.add_argument("--replay-size", type=int, default=50_000)
++    ap.add_argument("--min-replay-before-train", type=int, default=1_000)
++    ap.add_argument("--updates-per-turn", type=int, default=1)
++    ap.add_argument("--gamma-turn", type=float, default=0.99)
++    ap.add_argument("--grad-clip", type=float, default=1.0)
++    ap.add_argument("--weight-decay", type=float, default=0.0)
++    ap.add_argument("--target-update-interval", type=int, default=1_000)
++    ap.add_argument("--target-tau", type=float, default=None)
++    ap.add_argument("--target-clip", type=float, default=5.0)
++
++    # Freeze schedule.
++    ap.add_argument("--freeze-encoder", action="store_true")
++    ap.add_argument("--unfreeze-last-resblocks", type=int, default=0)
++
++    # Run control.
++    ap.add_argument("--games", type=int, default=1000)
++    ap.add_argument("--save-every-games", type=int, default=25)
++    ap.add_argument("--log-every-turns", type=int, default=25)
++    ap.add_argument("--output-dir", type=str, default="runs/rhea_value")
++
++    return ap
++
++
++def main() -> None:
++    args = build_arg_parser().parse_args()
++    random.seed(args.seed)
++    np.random.seed(args.seed)
++    torch.manual_seed(args.seed)
++
++    output_dir = Path(args.output_dir)
++    output_dir.mkdir(parents=True, exist_ok=True)
++
++    env = _make_env(args)
++
++    online = load_value_from_maskable_ppo_zip(args.checkpoint, device=args.device)
++    target = copy.deepcopy(online)
++
++    replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
++
++    learner_cfg = RheaValueLearnerConfig(
++        value_lr=args.value_lr,
++        value_batch_size=args.value_batch_size,
++        replay_buffer_size=args.replay_size,
++        min_replay_before_train=args.min_replay_before_train,
++        updates_per_real_turn=args.updates_per_turn,
++        gamma_turn=args.gamma_turn,
++        gradient_clip_norm=args.grad_clip,
++        weight_decay=args.weight_decay,
++        target_update_interval=args.target_update_interval,
++        target_tau=args.target_tau,
++        target_clip=args.target_clip,
++        freeze_encoder=args.freeze_encoder,
++        unfreeze_last_resblocks=args.unfreeze_last_resblocks,
++    )
++    learner = RheaValueLearner(online, target, replay, learner_cfg, device=args.device)
++
++    fitness = RheaFitness(
++        env_template=env,
++        value_model=online,
++        device=args.device,
++        reward_weight=args.reward_weight,
++        value_weight=args.value_weight,
++    )
++    planner = RheaPlanner(
++        fitness,
++        RheaConfig(
++            population=args.rhea_population,
++            generations=args.rhea_generations,
++            elite=args.rhea_elite,
++            mutation_rate=args.rhea_mutation_rate,
++            top_k_per_state=args.rhea_top_k_per_state,
++            max_actions_per_turn=args.rhea_max_actions_per_turn,
++            reward_weight=args.reward_weight,
++            value_weight=args.value_weight,
++            seed=args.seed,
++        ),
++    )
++
++    hparam_path = output_dir / "hparams.json"
++    hparam_path.write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
++
++    global_turn = 0
++    for game_idx in range(1, args.games + 1):
++        obs, info = env.reset()
++        game_turns = 0
++
++        while env.state is not None and env.state.winner is None:
++            state = env.state
++            acting = int(state.active_player)
++            day = int(getattr(state, "turn", getattr(state, "day", 0)))
++
++            before_spatial, before_scalars = _encode(state, acting)
++            phi_before = fitness.phi(state, acting)
++
++            result = planner.choose_full_turn(state)
++
++            # Execute selected full-turn actions on the real game state.
++            for action in result.actions:
++                if env.state is None or env.state.winner is not None:
++                    break
++                if int(env.state.active_player) != acting:
++                    break
++                env.state.step(action)
++
++            after = env.state
++            if after is None:
++                break
++
++            after_spatial, after_scalars = _encode(after, acting)
++            phi_after = fitness.phi(after, acting)
++            reward_turn = float(phi_after - phi_before)
++            done = bool(after.winner is not None)
++
++            replay.add(
++                RheaTransition(
++                    spatial_before=before_spatial,
++                    scalars_before=before_scalars,
++                    reward_turn=reward_turn,
++                    spatial_after=after_spatial,
++                    scalars_after=after_scalars,
++                    done=done,
++                    winner=after.winner,
++                    acting_seat=acting,
++                    day=day,
++                    phi_delta=float(result.breakdown.phi_delta),
++                    value_after_at_search_time=float(result.breakdown.value),
++                    search_score=float(result.score),
++                )
++            )
++
++            train_logs = learner.maybe_train_after_turn()
++            global_turn += 1
++            game_turns += 1
++
++            if args.log_every_turns > 0 and global_turn % args.log_every_turns == 0:
++                last_train = train_logs[-1] if train_logs else {}
++                print(
++                    json.dumps(
++                        {
++                            "game": game_idx,
++                            "global_turn": global_turn,
++                            "game_turn": game_turns,
++                            "day": day,
++                            "acting": acting,
++                            "winner": after.winner,
++                            "replay": len(replay),
++                            "search_score": result.score,
++                            "phi_delta_search": result.breakdown.phi_delta,
++                            "reward_turn_real": reward_turn,
++                            "value_after": result.breakdown.value,
++                            "initial_best_score": result.initial_best_score,
++                            "evolved_gain": result.evolved_gain,
++                            "illegal_genes": result.illegal_genes,
++                            "actions": len(result.actions),
++                            **last_train,
++                        },
++                        sort_keys=True,
++                    )
++                )
++
++            # Hard day cap safety if env does not terminal out cleanly.
++            if day > args.max_days + 1:
++                break
++
++        print(json.dumps({"event": "game_done", "game": game_idx, "winner": None if env.state is None else env.state.winner, "turns": game_turns}))
++
++        if args.save_every_games > 0 and game_idx % args.save_every_games == 0:
++            _save_checkpoint(output_dir / f"value_rhea_game_{game_idx:06d}.pt", online, learner_cfg, global_turn)
++
++    _save_checkpoint(output_dir / "value_rhea_latest.pt", online, learner_cfg, global_turn)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/docs/rhea_value_hparams.md b/docs/rhea_value_hparams.md
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/docs/rhea_value_hparams.md
+@@ -0,0 +1,184 @@
++# RHEA Value-Learning Hyperparameters
++
++The RHEA fork is not PPO. PPO hyperparameters such as `n_steps`, PPO
++`batch_size`, clipping, entropy coefficient, and action logprob storage do not
++drive the RHEA machine.
++
++The RHEA machine uses:
++
++- turn-level RHEA search budget
++- turn-level replay buffer
++- value batch size
++- value learning rate
++- turn-level gamma
++- reward/value fitness schedule
++- target network update cadence
++- encoder freezing schedule
++
++Machine A can keep running PPO. Machine B should use this value-guided RHEA loop.
++
++## Initial search budget
++
++Start conservative:
++
++```yaml
++rhea_population: 16
++rhea_generations: 3
++rhea_elite: 4
++rhea_mutation_rate: 0.20
++rhea_top_k_per_state: 16
++rhea_max_actions_per_turn: 96
++```
++
++After legality and stability are proven:
++
++```yaml
++rhea_population: 32
++rhea_generations: 5
++rhea_elite: 4
++rhea_mutation_rate: 0.20
++rhea_top_k_per_state: 24
++rhea_max_actions_per_turn: 128
++```
++
++Do not start huge. First prove that evolution improves over the initial
++population. Log:
++
++- `initial_best_score`
++- `final_best_score`
++- `evolved_gain`
++- `illegal_gene_count`
++- `actions_executed`
++- `ms_per_turn`
++
++If `evolved_gain` is usually near zero, evolution is not doing useful work yet.
++
++## Reward/value fitness schedule
++
++Early:
++
++```yaml
++reward_weight: 0.90
++value_weight: 0.10
++```
++
++This means:
++
++```python
++fitness = 0.90 * shaped_turn_reward + 0.10 * value_head(afterstate)
++```
++
++Only increase value weight after ablations prove that value improves play:
++
++```yaml
++reward_weight: 0.80
++value_weight: 0.20
++```
++
++Later:
++
++```yaml
++reward_weight: 0.70
++value_weight: 0.30
++```
++
++Required ablations:
++
++- RHEA reward-only
++- RHEA value-only
++- RHEA 90/10
++- RHEA 80/20
++- RHEA 70/30
++
++Expected early winner: reward-only or 90/10.
++
++## Value learner
++
++Initial config:
++
++```yaml
++value_lr: 1.0e-4
++value_batch_size: 128
++replay_buffer_size: 50_000
++min_replay_before_train: 1_000
++updates_per_real_turn: 1
++gamma_turn: 0.99
++gradient_clip_norm: 1.0
++weight_decay: 0.0
++target_network: true
++target_update_interval: 1000
++target_clip: 5.0
++```
++
++If GPU utilization is low and replay is large:
++
++```yaml
++value_batch_size: 256
++updates_per_real_turn: 2
++```
++
++If value loss oscillates or predictions explode:
++
++```yaml
++value_lr: 5.0e-5
++value_batch_size: 128
++gradient_clip_norm: 0.5
++```
++
++If learning is stable but slow:
++
++```yaml
++value_lr: 2.0e-4
++value_batch_size: 256
++updates_per_real_turn: 2
++```
++
++Do not start with the PPO LR unless only the final value head is unfrozen.
++
++## Turn-level gamma
++
++RHEA transitions are full acting-player turns, not single unit actions.
++
++Recommended first value:
++
++```yaml
++gamma_turn: 0.99
++```
++
++Reasonable range:
++
++```yaml
++gamma_turn: 0.97 to 0.995
++```
++
++Use lower values if TD targets are unstable. Use higher values once terminal
++outcomes and longer-horizon consequences are more reliable.
++
++## TD target
++
++Start with TD(0):
++
++```python
++target = turn_reward + gamma_turn * V_target(after_turn) * (1 - done)
++loss = mse(V_online(before_turn), target)
++```
++
++Use a target network. Either hard update every 1000 learner updates or soft update
++with `target_tau=0.005` later.
++
++Later improvements:
++
++- 3-5 turn n-step returns
++- terminal win/loss mixing
++- prioritized replay
++
++## Encoder freezing schedule
++
++Do not immediately fine-tune the whole PPO donor trunk on noisy early RHEA TD
++targets.
++
++Stage 1:
++
++```yaml
++freeze_encoder: true
++unfreeze_last_resblocks: 0
++value_lr: 1.0e-4
++min_turn_transitions: 5_000
++```
++
++Stage 2:
++
++```yaml
++freeze_encoder: true
++unfreeze_last_resblocks: 2
++value_lr: 5.0e-5
++min_turn_transitions: 20_000
++```
++
++Stage 3:
++
++```yaml
++freeze_encoder: false
++value_lr: 3.0e-5 to 1.0e-4
++min_turn_transitions: 50_000
++```
++
++If value drift makes play worse, go back one stage.
++
++## RAM policy
++
++The RHEA value learner should not store or train on:
++
++- candidate features
++- candidate masks
++- action logprobs
++- PPO advantages
++- PPO rollout tensors
++
++Store only turn-level spatial/scalar observations and scalar transition metadata.
++
++The first value-only network should keep the PPO trunk and remove the actor side.
++Do not shrink the trunk until the RHEA system works. Later, distill into a
++smaller student such as 64 trunk channels / 6 residual blocks / 128 hidden size.

@@ -1,0 +1,925 @@
+--- a/rl/mcts.py
++++ b/rl/mcts.py
+@@ -1,22 +1,99 @@
+ """
+-Phase 11b: single-process PUCT MCTS at turn boundaries (AlphaZero-style).
+-
+-Uses ``GameState.apply_full_turn`` as the turn rollout primitive. Default OFF
+-everywhere until Phase 11c wires this into training/eval.
++Phase 11b/11f: single-process PUCT MCTS at turn boundaries.
++
++Uses ``GameState.apply_full_turn`` as the turn rollout primitive.  The search is
++still intentionally turn-level (not sub-action tree search), but it now carries
++root-edge stochastic risk statistics for AWBW combat luck: fixed-plan luck
++resampling, edge variance/tail stats, and production-oriented root selection.
+ """
+ 
+ from __future__ import annotations
+ 
+ import hashlib
++import json
+ import math
+ import time
+ from dataclasses import dataclass, field
++from pathlib import Path
+ from typing import Any, Callable
+ 
+ import numpy as np
+ 
+ from engine.action import Action, ActionStage
+ from engine.game import GameState
++
++
++@dataclass(slots=True)
++class EdgeStats:
++    count: int = 0
++    mean: float = 0.0
++    m2: float = 0.0
++    min_value: float = 1.0
++    max_value: float = -1.0
++    root_value_samples: list[float] = field(default_factory=list)
++    trace_count: int = 0
++    critical_threshold_count: int = 0
++    defender_kill_count: int = 0
++    capture_interrupted_count: int = 0
++    attacker_death_count: int = 0
++
++    def update(self, value: float) -> None:
++        v = float(np.clip(value, -1.0, 1.0))
++        self.count += 1
++        delta = v - self.mean
++        self.mean += delta / self.count
++        self.m2 += delta * (v - self.mean)
++        self.min_value = min(self.min_value, v)
++        self.max_value = max(self.max_value, v)
++
++    @property
++    def variance(self) -> float:
++        return 0.0 if self.count < 2 else float(self.m2 / (self.count - 1))
++
++    def add_root_sample(self, value: float, trace: list[dict[str, Any]]) -> None:
++        v = float(np.clip(value, -1.0, 1.0))
++        self.root_value_samples.append(v)
++        self.trace_count += 1
++        if any(bool(t.get("critical_threshold_event")) for t in trace):
++            self.critical_threshold_count += 1
++        if any(bool(t.get("defender_killed")) for t in trace):
++            self.defender_kill_count += 1
++        if any(bool(t.get("capture_interrupted")) for t in trace):
++            self.capture_interrupted_count += 1
++        if any(bool(t.get("attacker_killed")) for t in trace):
++            self.attacker_death_count += 1
++
++    def risk_summary(self, *, catastrophe_value: float = -0.35) -> dict[str, Any]:
++        samples = list(self.root_value_samples)
++        if samples:
++            arr = np.asarray(samples, dtype=np.float64)
++            mean = float(arr.mean())
++            variance = float(arr.var(ddof=1)) if len(arr) > 1 else 0.0
++            p10 = float(np.percentile(arr, 10))
++            worst = float(arr.min())
++            catastrophe_probability = float(np.mean(arr <= float(catastrophe_value)))
++        else:
++            mean = float(self.mean)
++            variance = float(self.variance)
++            p10 = mean
++            worst = mean
++            catastrophe_probability = 0.0
++        denom = max(1, self.trace_count)
++        return {
++            "backup_count": int(self.count),
++            "backup_mean": float(self.mean),
++            "backup_variance": float(self.variance),
++            "resample_count": int(len(samples)),
++            "resample_mean": mean,
++            "resample_variance": variance,
++            "p10_value": p10,
++            "worst_value": worst,
++            "catastrophe_probability": catastrophe_probability,
++            "critical_threshold_probability": float(self.critical_threshold_count / denom),
++            "kill_probability": float(self.defender_kill_count / denom),
++            "capture_interrupted_probability": float(self.capture_interrupted_count / denom),
++            "attacker_death_probability": float(self.attacker_death_count / denom),
++        }
+ 
+ 
+ @dataclass(slots=True)
+@@ -26,10 +103,11 @@
+     visit_count: int = 0
+     total_value: float = 0.0
+     prior: float = 0.0
+-    children: dict[bytes, TurnNode] = field(default_factory=dict)
++    children: dict[bytes, "TurnNode"] = field(default_factory=dict)
+     plan_actions: list[Action] | None = None
+     is_terminal: bool = False
+     terminal_value: float = 0.0
++    edge_stats: EdgeStats = field(default_factory=EdgeStats)
+ 
+ 
+ @dataclass(slots=True)
+@@ -43,32 +121,23 @@
+     root_plans: int = 8
+     max_plan_actions: int = 256
+     rng_seed: int | None = None
++    luck_resamples: int = 0
++    luck_resample_critical_only: bool = True
++    risk_mode: str = "visit"  # visit | mean | mean_minus_p10 | constrained
++    risk_lambda: float = 0.35
++    catastrophe_value: float = -0.35
++    max_catastrophe_prob: float = 1.0
++    root_decision_log_path: str | None = None
+ 
+ 
+ def plan_key(final_state: GameState, actions: list[Action]) -> bytes:
+-    """Stable dedup key: action tuple + property ownership snapshot."""
+     parts: list[tuple[Any, ...]] = []
+     for a in actions:
+         ut: int | None = None
+         if a.unit_type is not None:
+             ut = int(a.unit_type)
+-        parts.append(
+-            (
+-                int(a.action_type),
+-                a.unit_pos,
+-                a.move_pos,
+-                a.target_pos,
+-                ut,
+-                a.unload_pos,
+-                a.select_unit_id,
+-            )
+-        )
+-    prop_bits = tuple(
+-        sorted(
+-            ((p.row, p.col), p.owner, p.capture_points)
+-            for p in final_state.properties
+-        )
+-    )
++        parts.append((int(a.action_type), a.unit_pos, a.move_pos, a.target_pos, ut, a.unload_pos, a.select_unit_id))
++    prop_bits = tuple(sorted(((p.row, p.col), p.owner, p.capture_points) for p in final_state.properties))
+     h = hashlib.sha256()
+     h.update(repr(parts).encode("utf-8"))
+     h.update(repr(prop_bits).encode("utf-8"))
+@@ -93,10 +162,7 @@
+     return 1.0 if state.winner == for_actor else -1.0
+ 
+ 
+-def _leaf_value(
+-    node: TurnNode,
+-    value_callable: Callable[[GameState], float],
+-) -> float:
++def _leaf_value(node: TurnNode, value_callable: Callable[[GameState], float]) -> float:
+     if node.is_terminal:
+         return float(node.terminal_value)
+     st = node.state
+@@ -105,13 +171,20 @@
+     return float(np.clip(value_callable(st), -1.0, 1.0))
+ 
+ 
++def _state_value_for_actor(st: GameState, *, actor: int, value_callable: Callable[[GameState], float]) -> float:
++    if st.done and st.winner is not None:
++        return float(np.clip(_terminal_utility(st, actor), -1.0, 1.0))
++    v = float(np.clip(value_callable(st), -1.0, 1.0))
++    if int(st.active_player) != int(actor):
++        v = -v
++    return float(np.clip(v, -1.0, 1.0))
++
++
+ def _child_q_for_parent(parent: TurnNode, child: TurnNode) -> float:
+     if child.visit_count <= 0:
+         return 0.0
+     q = child.total_value / child.visit_count
+-    if child.actor != parent.actor:
+-        q = -q
+-    return q
++    return -q if child.actor != parent.actor else q
+ 
+ 
+ def _puct_select_key(node: TurnNode, c_puct: float) -> bytes:
+@@ -133,53 +206,40 @@
+     return max(node.children.keys(), key=lambda kk: node.children[kk].prior)
+ 
+ 
+-def _sample_plans(
+-    node: TurnNode,
+-    policy_callable: Callable[[GameState], Action],
+-    *,
+-    k: int,
+-    max_plan_actions: int,
+-    rng: np.random.Generator,
+-) -> list[tuple[bytes, list[Action], GameState, bool]]:
+-    out: list[tuple[bytes, list[Action], GameState, bool]] = []
++def _unpack_full_turn_result(result: Any) -> tuple[GameState, list[Action], float, bool, list[dict[str, Any]]]:
++    if not isinstance(result, tuple):
++        raise TypeError(f"apply_full_turn returned non-tuple: {type(result)}")
++    if len(result) == 4:
++        st, actions, reward, done = result
++        return st, actions, float(reward), bool(done), []
++    if len(result) == 5:
++        st, actions, reward, done, trace = result
++        return st, actions, float(reward), bool(done), list(trace or [])
++    raise ValueError(f"apply_full_turn returned {len(result)} fields; expected 4 or 5")
++
++
++def _sample_plans(node: TurnNode, policy_callable: Callable[[GameState], Action], *, k: int, max_plan_actions: int, rng: np.random.Generator) -> list[tuple[bytes, list[Action], GameState, bool, list[dict[str, Any]]]]:
++    out: list[tuple[bytes, list[Action], GameState, bool, list[dict[str, Any]]]] = []
+     seen: set[bytes] = set()
+     attempts = 0
+     max_attempts = max(k * 8, k + 16)
+     while len(out) < k and attempts < max_attempts:
+         attempts += 1
+         seed = int(rng.integers(0, 2**31 - 1))
+-        final_st, actions, _r, done = node.state.apply_full_turn(
+-            policy_callable,
+-            copy=True,
+-            max_actions=max_plan_actions,
+-            rng_seed=seed,
+-        )
++        result = node.state.apply_full_turn(policy_callable, copy=True, max_actions=max_plan_actions, rng_seed=seed, return_trace=True)
++        final_st, actions, _r, done, trace = _unpack_full_turn_result(result)
+         key = plan_key(final_st, actions)
+         if key in seen:
+             continue
+         seen.add(key)
+-        out.append((key, actions, final_st, done))
++        out.append((key, actions, final_st, done, trace))
+     return out
+ 
+ 
+-def _expand_node(
+-    node: TurnNode,
+-    *,
+-    policy_callable: Callable[[GameState], Action],
+-    prior_callable: Callable[[GameState, list[list[Action]]], list[float]],
+-    config: MCTSConfig,
+-    rng: np.random.Generator,
+-    apply_dirichlet: bool,
+-) -> bool:
++def _expand_node(node: TurnNode, *, policy_callable: Callable[[GameState], Action], prior_callable: Callable[[GameState, list[list[Action]]], list[float]], config: MCTSConfig, rng: np.random.Generator, apply_dirichlet: bool) -> bool:
+     if node.is_terminal or node.children:
+         return False
+-    sampled = _sample_plans(
+-        node,
+-        policy_callable,
+-        k=config.root_plans,
+-        max_plan_actions=config.max_plan_actions,
+-        rng=rng,
+-    )
++    sampled = _sample_plans(node, policy_callable, k=config.root_plans, max_plan_actions=config.max_plan_actions, rng=rng)
+     if not sampled:
+         return False
+     plans = [t[1] for t in sampled]
+@@ -189,49 +249,30 @@
+         eps = config.dirichlet_epsilon
+         priors = (1.0 - eps) * np.asarray(priors, dtype=np.float64) + eps * noise
+         priors = (priors / priors.sum()).tolist()
+-    for (key, plan, st, done), prior in zip(sampled, priors, strict=True):
++    for (key, plan, st, done, trace), prior in zip(sampled, priors, strict=True):
+         terminal = bool(done or st.done)
+-        child = TurnNode(
+-            state=st,
+-            actor=int(st.active_player),
+-            prior=float(prior),
+-            plan_actions=plan,
+-        )
++        child = TurnNode(state=st, actor=int(st.active_player), prior=float(prior), plan_actions=plan)
++        if trace:
++            child.edge_stats.add_root_sample(0.0, trace)
++            child.edge_stats.root_value_samples.clear()
+         if terminal:
+             child.is_terminal = True
+             w = st.winner
+-            if w is None or w == -1:
+-                child.terminal_value = 0.0
+-            else:
+-                child.terminal_value = 1.0 if w == child.actor else -1.0
++            child.terminal_value = 0.0 if w is None or w == -1 else (1.0 if w == child.actor else -1.0)
+         node.children[key] = child
+     return True
+ 
+ 
+-def _select_path(
+-    root: TurnNode,
+-    min_depth: int,
+-    c_puct: float,
+-) -> list[TurnNode]:
++def _select_path(root: TurnNode, min_depth: int, c_puct: float) -> list[TurnNode]:
+     path: list[TurnNode] = [root]
+     node = root
+     while True:
+-        if node.is_terminal:
+-            break
+-        if not node.children:
++        if node.is_terminal or not node.children:
+             break
+         depth = len(path) - 1
+-        if depth < min_depth:
+-            key = _prior_greedy_key(node)
+-        else:
+-            key = _puct_select_key(node, c_puct)
+-        nxt = node.children[key]
+-        path.append(nxt)
+-        node = nxt
+-        if node.is_terminal:
+-            break
+-        if not node.children:
+-            break
++        key = _prior_greedy_key(node) if depth < min_depth else _puct_select_key(node, c_puct)
++        node = node.children[key]
++        path.append(node)
+     return path
+ 
+ 
+@@ -241,6 +282,7 @@
+         node = path[i]
+         node.visit_count += 1
+         node.total_value += v
++        node.edge_stats.update(v)
+         if i == 0:
+             break
+         parent = path[i - 1]
+@@ -252,37 +294,116 @@
+     depth = 0
+     node = root
+     while node.children:
+-        best_k = max(
+-            node.children.keys(),
+-            key=lambda kk: node.children[kk].visit_count,
+-        )
++        best_k = max(node.children.keys(), key=lambda kk: node.children[kk].visit_count)
+         node = node.children[best_k]
+         depth += 1
+     return depth
+ 
+ 
+-def run_mcts(
+-    root_state: GameState,
+-    *,
+-    policy_callable: Callable[[GameState], Action],
+-    value_callable: Callable[[GameState], float],
+-    prior_callable: Callable[[GameState, list[list[Action]]], list[float]],
+-    config: MCTSConfig,
+-) -> tuple[list[Action], dict[str, Any]]:
++def _trace_has_critical_event(trace: list[dict[str, Any]]) -> bool:
++    return any(bool(t.get("critical_threshold_event")) for t in trace)
++
++
++def _root_child_value(root: TurnNode, child: TurnNode) -> float:
++    if child.visit_count > 0:
++        return _child_q_for_parent(root, child)
++    if child.edge_stats.root_value_samples:
++        return float(np.mean(child.edge_stats.root_value_samples))
++    return 0.0
++
++
++def _resample_root_children(root: TurnNode, *, value_callable: Callable[[GameState], float], config: MCTSConfig, rng: np.random.Generator) -> None:
++    n = max(0, int(config.luck_resamples))
++    if n <= 0:
++        return
++    for child in root.children.values():
++        plan = list(child.plan_actions or [])
++        if not plan:
++            continue
++        if config.luck_resample_critical_only:
++            probe_seed = int(rng.integers(0, 2**31 - 1))
++            result = root.state.apply_full_turn(plan, copy=True, max_actions=config.max_plan_actions, rng_seed=probe_seed, return_trace=True)
++            st, _acts, _reward, _done, trace = _unpack_full_turn_result(result)
++            root_v = _state_value_for_actor(st, actor=root.actor, value_callable=value_callable)
++            child.edge_stats.add_root_sample(root_v, trace)
++            if not _trace_has_critical_event(trace):
++                continue
++            extra = max(0, n - 1)
++        else:
++            extra = n
++        for _ in range(extra):
++            seed = int(rng.integers(0, 2**31 - 1))
++            result = root.state.apply_full_turn(plan, copy=True, max_actions=config.max_plan_actions, rng_seed=seed, return_trace=True)
++            st, _acts, _reward, _done, trace = _unpack_full_turn_result(result)
++            root_v = _state_value_for_actor(st, actor=root.actor, value_callable=value_callable)
++            child.edge_stats.add_root_sample(root_v, trace)
++
++
++def _root_child_selection_score(root: TurnNode, child: TurnNode, config: MCTSConfig) -> float:
++    mode = str(config.risk_mode or "visit").strip().lower()
++    summary = child.edge_stats.risk_summary(catastrophe_value=config.catastrophe_value)
++    mean = float(summary["resample_mean"])
++    p10 = float(summary["p10_value"])
++    catastrophe_prob = float(summary["catastrophe_probability"])
++    if mode == "visit":
++        return float(child.visit_count) + 1e-6 * _root_child_value(root, child)
++    if mode == "mean":
++        return mean if child.edge_stats.root_value_samples else _root_child_value(root, child)
++    if mode == "mean_minus_p10":
++        downside = max(0.0, mean - p10)
++        return mean - float(config.risk_lambda) * downside
++    if mode == "constrained":
++        if catastrophe_prob > float(config.max_catastrophe_prob):
++            return -1e9 + mean
++        downside = max(0.0, mean - p10)
++        return mean - float(config.risk_lambda) * downside
++    raise ValueError(f"unknown MCTS risk_mode={config.risk_mode!r}")
++
++
++def _root_visit_entropy(root: TurnNode) -> float:
++    counts = np.asarray([c.visit_count for c in root.children.values()], dtype=np.float64)
++    s = counts.sum()
++    if s <= 0:
++        return 0.0
++    p = counts / s
++    p = p[p > 0]
++    return float(-(p * np.log(p)).sum())
++
++
++def _serialise_root_children(root: TurnNode, config: MCTSConfig) -> list[dict[str, Any]]:
++    out: list[dict[str, Any]] = []
++    for k, ch in root.children.items():
++        q = _child_q_for_parent(root, ch) if ch.visit_count > 0 else 0.0
++        out.append({
++            "key": k.hex()[:16],
++            "visits": int(ch.visit_count),
++            "prior": float(ch.prior),
++            "q_root_frame": float(q),
++            "risk_score": float(_root_child_selection_score(root, ch, config)),
++            "plan_len": len(ch.plan_actions or []),
++            "risk": ch.edge_stats.risk_summary(catastrophe_value=config.catastrophe_value),
++        })
++    out.sort(key=lambda x: (int(x["visits"]), float(x["risk_score"])), reverse=True)
++    return out
++
++
++def _append_decision_log(path: str | None, payload: dict[str, Any]) -> None:
++    if not path:
++        return
++    p = Path(path)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open("a", encoding="utf-8") as f:
++        f.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
++
++
++def run_mcts(root_state: GameState, *, policy_callable: Callable[[GameState], Action], value_callable: Callable[[GameState], float], prior_callable: Callable[[GameState, list[list[Action]]], list[float]], config: MCTSConfig) -> tuple[list[Action], dict[str, Any]]:
+     if root_state.action_stage != ActionStage.SELECT:
+         raise ValueError("run_mcts requires root action_stage == SELECT")
+     t0 = time.perf_counter()
+     rng = np.random.default_rng(config.rng_seed)
+     root = TurnNode(state=root_state, actor=int(root_state.active_player))
+     dirichlet_applied = config.dirichlet_epsilon > 0
+-    ok = _expand_node(
+-        root,
+-        policy_callable=policy_callable,
+-        prior_callable=prior_callable,
+-        config=config,
+-        rng=rng,
+-        apply_dirichlet=dirichlet_applied,
+-    )
++    ok = _expand_node(root, policy_callable=policy_callable, prior_callable=prior_callable, config=config, rng=rng, apply_dirichlet=dirichlet_applied)
+     if not ok or not root.children:
+         raise RuntimeError("MCTS root expansion produced no children")
+     total_sims_run = 0
+@@ -295,50 +416,62 @@
+             total_sims_run += 1
+             continue
+         if not leaf.children:
+-            _expand_node(
+-                leaf,
+-                policy_callable=policy_callable,
+-                prior_callable=prior_callable,
+-                config=config,
+-                rng=rng,
+-                apply_dirichlet=False,
+-            )
++            _expand_node(leaf, policy_callable=policy_callable, prior_callable=prior_callable, config=config, rng=rng, apply_dirichlet=False)
+         v = _leaf_value(leaf, value_callable)
+         _backup(path, v)
+         total_sims_run += 1
++
++    _resample_root_children(root, value_callable=value_callable, config=config, rng=rng)
++
+     visit_counts = {k: root.children[k].visit_count for k in root.children}
+     sorted_keys = sorted(root.children.keys())
+-    if config.temperature == 0.0:
+-        chosen_key = max(
+-            sorted_keys, key=lambda kk: root.children[kk].visit_count
+-        )
++    risk_mode = str(config.risk_mode or "visit").strip().lower()
++    if risk_mode != "visit":
++        chosen_key = max(sorted_keys, key=lambda kk: _root_child_selection_score(root, root.children[kk], config))
++    elif config.temperature == 0.0:
++        chosen_key = max(sorted_keys, key=lambda kk: root.children[kk].visit_count)
+     else:
+-        counts = np.array(
+-            [root.children[kk].visit_count for kk in sorted_keys],
+-            dtype=np.float64,
+-        )
++        counts = np.array([root.children[kk].visit_count for kk in sorted_keys], dtype=np.float64)
+         temp = max(1e-6, float(config.temperature))
+         w = np.power(counts, 1.0 / temp)
+         s = w.sum()
+-        if s <= 0:
+-            p = np.ones(len(sorted_keys), dtype=np.float64) / len(sorted_keys)
+-        else:
+-            p = w / s
++        p = np.ones(len(sorted_keys), dtype=np.float64) / len(sorted_keys) if s <= 0 else w / s
+         idx = int(rng.choice(len(sorted_keys), p=p))
+         chosen_key = sorted_keys[idx]
+     chosen = root.children[chosen_key]
+     plan = list(chosen.plan_actions or [])
+     pv_depth = principal_variation_depth(root)
+     wall = time.perf_counter() - t0
++    root_child_stats = _serialise_root_children(root, config)
++    chosen_risk = chosen.edge_stats.risk_summary(catastrophe_value=config.catastrophe_value)
+     stats: dict[str, Any] = {
+         "visit_counts": visit_counts,
+         "principal_variation_depth": pv_depth,
+         "total_sims_run": total_sims_run,
+         "wall_time_s": wall,
+         "dirichlet_applied": dirichlet_applied,
++        "root_visit_entropy": _root_visit_entropy(root),
++        "risk_mode": risk_mode,
++        "luck_resamples": int(config.luck_resamples),
++        "chosen_key": chosen_key.hex()[:16],
++        "chosen_visits": int(chosen.visit_count),
++        "chosen_prior": float(chosen.prior),
++        "chosen_q_root_frame": float(_child_q_for_parent(root, chosen)) if chosen.visit_count > 0 else 0.0,
++        "chosen_risk_score": float(_root_child_selection_score(root, chosen, config)),
++        "chosen_risk": chosen_risk,
++        "root_child_stats": root_child_stats,
+     }
++    _append_decision_log(config.root_decision_log_path, {
++        "wall_time_s": wall,
++        "total_sims_run": total_sims_run,
++        "root_children": len(root.children),
++        "pv_depth": pv_depth,
++        "root_visit_entropy": stats["root_visit_entropy"],
++        "risk_mode": risk_mode,
++        "chosen": {"key": stats["chosen_key"], "visits": stats["chosen_visits"], "prior": stats["chosen_prior"], "q_root_frame": stats["chosen_q_root_frame"], "risk_score": stats["chosen_risk_score"], "risk": chosen_risk},
++        "root_child_stats": root_child_stats,
++    })
+     return plan, stats
+-
+ 
+ def make_callables_from_sb3_policy(model: Any, env: Any) -> tuple[
+     Callable[[GameState], Action],
+--- a/engine/game.py
++++ b/engine/game.py
+@@ -2661,6 +2661,138 @@
+         )
+         return "\n".join(lines)
+ 
++    def _mcts_trace_pre_action(self, action: Optional[Action]) -> dict:
++        """Capture cheap pre-step metadata for MCTS stochastic-risk tracing.
++
++        This is intentionally advisory telemetry: it must not affect game rules.
++        ``apply_full_turn(return_trace=True)`` uses it to classify combat/capture
++        threshold events without forcing every normal engine step to deep-copy.
++        """
++        pre: dict = {
++            "action_type": action.action_type.name if action is not None else None,
++            "active_player": int(self.active_player),
++            "turn": int(self.turn),
++            "stage": self.action_stage.name,
++        }
++        if action is None:
++            return pre
++        if action.action_type == ActionType.ATTACK:
++            attacker = None
++            if self.selected_unit is not None and self.selected_unit.is_alive:
++                attacker = self.selected_unit
++            elif action.unit_pos is not None:
++                attacker = self.get_unit_at(*action.unit_pos)
++            defender = self.get_unit_at(*action.target_pos) if action.target_pos is not None else None
++            pre.update({
++                "attacker_id": int(attacker.unit_id) if attacker is not None else None,
++                "attacker_player": int(attacker.player) if attacker is not None else None,
++                "attacker_type": attacker.unit_type.name if attacker is not None else None,
++                "attacker_pre_hp": int(attacker.hp) if attacker is not None else None,
++                "attacker_pre_display_hp": int(attacker.display_hp) if attacker is not None else None,
++                "defender_id": int(defender.unit_id) if defender is not None else None,
++                "defender_player": int(defender.player) if defender is not None else None,
++                "defender_type": defender.unit_type.name if defender is not None else None,
++                "defender_pre_hp": int(defender.hp) if defender is not None else None,
++                "defender_pre_display_hp": int(defender.display_hp) if defender is not None else None,
++                "target_pos": list(action.target_pos) if action.target_pos is not None else None,
++                "move_pos": list(action.move_pos) if action.move_pos is not None else None,
++            })
++            if defender is not None:
++                prop = self.get_property_at(*defender.pos)
++                pre["defender_property_capture_points"] = int(prop.capture_points) if prop is not None else None
++            if attacker is not None:
++                prop = self.get_property_at(*attacker.pos)
++                pre["attacker_property_capture_points"] = int(prop.capture_points) if prop is not None else None
++        elif action.action_type == ActionType.CAPTURE:
++            unit = self.selected_unit
++            if unit is None and action.move_pos is not None:
++                unit = self.get_unit_at(*action.move_pos)
++            prop = self.get_property_at(*(action.move_pos or unit.pos)) if unit is not None else None
++            pre.update({
++                "capturer_id": int(unit.unit_id) if unit is not None else None,
++                "capturer_pre_hp": int(unit.hp) if unit is not None else None,
++                "capturer_pre_display_hp": int(unit.display_hp) if unit is not None else None,
++                "capture_points_pre": int(prop.capture_points) if prop is not None else None,
++                "property_owner_pre": int(prop.owner) if prop is not None and prop.owner is not None else None,
++            })
++        return pre
++
++    def _mcts_trace_post_action(
++        self,
++        action: Action,
++        pre: dict,
++        reward: float,
++        done: bool,
++    ) -> dict:
++        item = dict(pre)
++        item.update({"reward": float(reward), "done": bool(done)})
++        critical = False
++        if action.action_type == ActionType.ATTACK:
++            attacker_id = pre.get("attacker_id")
++            defender_id = pre.get("defender_id")
++            attacker = None
++            defender = None
++            for player_units in self.units.values():
++                for u in player_units:
++                    if attacker_id is not None and int(u.unit_id) == int(attacker_id):
++                        attacker = u
++                    if defender_id is not None and int(u.unit_id) == int(defender_id):
++                        defender = u
++            attacker_post_hp = int(attacker.hp) if attacker is not None else 0 if attacker_id is not None else None
++            defender_post_hp = int(defender.hp) if defender is not None else 0 if defender_id is not None else None
++            defender_killed = bool(defender_id is not None and defender_post_hp == 0)
++            attacker_killed = bool(attacker_id is not None and attacker_post_hp == 0)
++            dmg = None
++            counter = None
++            if pre.get("defender_pre_hp") is not None and defender_post_hp is not None:
++                dmg = max(0, int(pre["defender_pre_hp"]) - int(defender_post_hp))
++            if pre.get("attacker_pre_hp") is not None and attacker_post_hp is not None:
++                counter = max(0, int(pre["attacker_pre_hp"]) - int(attacker_post_hp))
++            capture_interrupted = False
++            if defender_killed and action.target_pos is not None:
++                prop = self.get_property_at(*action.target_pos)
++                capture_interrupted = bool(prop is not None and pre.get("defender_property_capture_points") is not None and int(pre["defender_property_capture_points"]) < 20 and prop.capture_points == 20)
++            if attacker_killed and pre.get("move_pos") is not None:
++                prop = self.get_property_at(*tuple(pre["move_pos"]))
++                capture_interrupted = capture_interrupted or bool(prop is not None and pre.get("attacker_property_capture_points") is not None and int(pre["attacker_property_capture_points"]) < 20 and prop.capture_points == 20)
++            survived_low = (
++                (defender_id is not None and defender_post_hp is not None and 0 < defender_post_hp <= 10)
++                or (attacker_id is not None and attacker_post_hp is not None and 0 < attacker_post_hp <= 10)
++            )
++            killed_from_low_margin = defender_killed or attacker_killed
++            critical = bool(survived_low or killed_from_low_margin or capture_interrupted)
++            item.update({
++                "attack_damage_roll": dmg,
++                "counter_damage_roll": counter,
++                "defender_post_hp": defender_post_hp,
++                "attacker_post_hp": attacker_post_hp,
++                "defender_killed": defender_killed,
++                "attacker_killed": attacker_killed,
++                "capture_interrupted": capture_interrupted,
++                "critical_threshold_event": critical,
++            })
++        elif action.action_type == ActionType.CAPTURE:
++            unit_id = pre.get("capturer_id")
++            unit = None
++            for player_units in self.units.values():
++                for u in player_units:
++                    if unit_id is not None and int(u.unit_id) == int(unit_id):
++                        unit = u
++                        break
++            prop = self.get_property_at(*(action.move_pos or unit.pos)) if unit is not None else None
++            item.update({
++                "capture_points_post": int(prop.capture_points) if prop is not None else None,
++                "property_owner_post": int(prop.owner) if prop is not None and prop.owner is not None else None,
++                "capture_interrupted": False,
++                "critical_threshold_event": False,
++            })
++        else:
++            item.update({
++                "capture_interrupted": False,
++                "critical_threshold_event": False,
++            })
++        return item
++
+     def apply_full_turn(
+         self,
+         plan_or_policy: Union[list[Action], Callable[["GameState"], Action]],
+@@ -2669,7 +2801,8 @@
+         max_actions: int = 10_000,
+         rng_seed: Optional[int] = None,
+         on_step: Optional[Callable[[GameState, Action, float, bool], None]] = None,
+-    ) -> tuple[GameState, list[Action], float, bool]:
++        return_trace: bool = False,
++    ) -> tuple[GameState, list[Action], float, bool] | tuple[GameState, list[Action], float, bool, list[dict]]:
+         """
+         Apply one full turn for ``self.active_player`` and return the resulting
+         state at the start of the next turn (or terminal).
+@@ -2743,6 +2876,7 @@
+         actions_taken: list[Action] = []
+         total_reward = 0.0
+         done = False
++        turn_trace: list[dict] = []
+ 
+         if isinstance(plan_or_policy, list):
+             plan_iter = iter(plan_or_policy)
+@@ -2762,6 +2896,9 @@
+                 if state.active_player != starting_player:
+                     break
+                 action = get_action(state)
++                trace_pre: dict | None = None
++                if return_trace:
++                    trace_pre = state._mcts_trace_pre_action(action)
+                 if action is None:
+                     raise RuntimeError(
+                         "plan exhausted before turn ended; "
+@@ -2772,6 +2909,8 @@
+                 _, reward, done = state.step(action)
+                 actions_taken.append(action)
+                 total_reward += float(reward)
++                if return_trace and trace_pre is not None:
++                    turn_trace.append(state._mcts_trace_post_action(action, trace_pre, float(reward), done))
+                 if on_step is not None:
+                     on_step(state, action, float(reward), done)
+                 if done or state.active_player != starting_player:
+@@ -2785,6 +2924,8 @@
+             if saved_rng_state is not None:
+                 _random_mod.setstate(saved_rng_state)
+ 
++        if return_trace:
++            return state, actions_taken, total_reward, done, turn_trace
+         return state, actions_taken, total_reward, done
+ 
+ 
+--- a/scripts/symmetric_checkpoint_eval.py
++++ b/scripts/symmetric_checkpoint_eval.py
+@@ -123,6 +123,13 @@
+         default=256,
+         help="Max actions per simulated turn in MCTS expansion.",
+     )
++    ap.add_argument("--mcts-luck-resamples", type=int, default=0, help="Replay each root child with independent combat seeds for risk stats.")
++    ap.add_argument("--mcts-luck-resample-critical-only", action=argparse.BooleanOptionalAction, default=True, help="Only do extra luck resamples for plans with critical combat/capture trace events.")
++    ap.add_argument("--mcts-risk-mode", type=str, default="visit", choices=("visit", "mean", "mean_minus_p10", "constrained"), help="Root selection policy after optional luck resampling.")
++    ap.add_argument("--mcts-risk-lambda", type=float, default=0.35, help="Penalty weight for mean_minus_p10/constrained root risk scoring.")
++    ap.add_argument("--mcts-catastrophe-value", type=float, default=-0.35, help="Root-frame value threshold counted as catastrophic in edge stats.")
++    ap.add_argument("--mcts-max-catastrophe-prob", type=float, default=1.0, help="Constrained risk mode rejects root plans above this catastrophe probability.")
++    ap.add_argument("--mcts-root-decision-log", type=str, default=None, help="Optional JSONL path for per-root MCTS child stats.")
+     return ap
+ 
+ 
+@@ -138,6 +145,13 @@
+         "mcts_min_depth": int(ns.mcts_min_depth),
+         "mcts_root_plans": int(ns.mcts_root_plans),
+         "mcts_max_plan_actions": int(ns.mcts_max_plan_actions),
++        "mcts_luck_resamples": int(ns.mcts_luck_resamples),
++        "mcts_luck_resample_critical_only": bool(ns.mcts_luck_resample_critical_only),
++        "mcts_risk_mode": str(ns.mcts_risk_mode),
++        "mcts_risk_lambda": float(ns.mcts_risk_lambda),
++        "mcts_catastrophe_value": float(ns.mcts_catastrophe_value),
++        "mcts_max_catastrophe_prob": float(ns.mcts_max_catastrophe_prob),
++        "mcts_root_decision_log": ns.mcts_root_decision_log,
+     }
+ 
+ 
+@@ -172,6 +186,8 @@
+         "mcts_total_wall_s": 0.0,
+         "mcts_failures": 0,
+         "mcts_total_decisions": 0,
++        "mcts_root_entropy": [],
++        "mcts_chosen_risk": [],
+     }
+     mcts_cfg = MCTSConfig(
+         num_sims=int(payload.get("mcts_sims", 16)),
+@@ -182,6 +198,13 @@
+         min_depth=int(payload.get("mcts_min_depth", 4)),
+         root_plans=int(payload.get("mcts_root_plans", 8)),
+         max_plan_actions=int(payload.get("mcts_max_plan_actions", 256)),
++        luck_resamples=int(payload.get("mcts_luck_resamples", 0)),
++        luck_resample_critical_only=bool(payload.get("mcts_luck_resample_critical_only", False)),
++        risk_mode=str(payload.get("mcts_risk_mode", "visit")),
++        risk_lambda=float(payload.get("mcts_risk_lambda", 0.35)),
++        catastrophe_value=float(payload.get("mcts_catastrophe_value", -0.35)),
++        max_catastrophe_prob=float(payload.get("mcts_max_catastrophe_prob", 1.0)),
++        root_decision_log_path=payload.get("mcts_root_decision_log"),
+     )
+     use_mcts = mcts_mode == "eval_only" and mcts_cfg.num_sims > 0
+     zero_warned = False
+@@ -267,6 +290,13 @@
+                     min_depth=mcts_cfg.min_depth,
+                     root_plans=mcts_cfg.root_plans,
+                     max_plan_actions=mcts_cfg.max_plan_actions,
++                    luck_resamples=mcts_cfg.luck_resamples,
++                    luck_resample_critical_only=mcts_cfg.luck_resample_critical_only,
++                    risk_mode=mcts_cfg.risk_mode,
++                    risk_lambda=mcts_cfg.risk_lambda,
++                    catastrophe_value=mcts_cfg.catastrophe_value,
++                    max_catastrophe_prob=mcts_cfg.max_catastrophe_prob,
++                    root_decision_log_path=mcts_cfg.root_decision_log_path,
+                     rng_seed=int(seed) ^ (mcts_decision_ix * 0x9E3779B9),
+                 )
+                 mcts_decision_ix += 1
+@@ -281,6 +311,8 @@
+                 mcts_telemetry["mcts_pv_depths"].append(int(stats["principal_variation_depth"]))
+                 mcts_telemetry["mcts_total_wall_s"] += float(stats["wall_time_s"])
+                 mcts_telemetry["mcts_total_decisions"] += 1
++                mcts_telemetry["mcts_root_entropy"].append(float(stats.get("root_visit_entropy", 0.0)))
++                mcts_telemetry["mcts_chosen_risk"].append(stats.get("chosen_risk", {}))
+                 if plan:
+                     cached_plan.extend(plan)
+             except Exception:
+--- a/tests/test_mcts.py
++++ b/tests/test_mcts.py
+@@ -256,3 +256,59 @@
+     )
+     assert len(plan) >= 1
+     assert stats["total_sims_run"] == 2
++
++
++def test_mcts_luck_resample_stats_schema() -> None:
++    s = _fresh_state()
++
++    def policy_callable(st: GameState) -> Action:
++        leg = get_legal_actions(st)
++        assert leg
++        return leg[0]
++
++    cfg = MCTSConfig(
++        num_sims=2,
++        root_plans=1,
++        min_depth=0,
++        dirichlet_epsilon=0.0,
++        temperature=0.0,
++        rng_seed=1234,
++        luck_resamples=2,
++        luck_resample_critical_only=False,
++        risk_mode="mean_minus_p10",
++    )
++    plan, stats = run_mcts(
++        s,
++        policy_callable=policy_callable,
++        value_callable=lambda _st: 0.0,
++        prior_callable=lambda _st, plans: [1.0 / len(plans)] * len(plans),
++        config=cfg,
++    )
++    assert plan
++    assert stats["risk_mode"] == "mean_minus_p10"
++    assert stats["luck_resamples"] == 2
++    assert isinstance(stats["chosen_risk"], dict)
++    assert stats["chosen_risk"]["resample_count"] == 2
++    assert isinstance(stats["root_child_stats"], list)
++    assert stats["root_child_stats"]
++
++
++def test_apply_full_turn_return_trace_schema() -> None:
++    s = _fresh_state()
++    legal = get_legal_actions(s)
++    assert legal
++    result = s.apply_full_turn(
++        [Action(ActionType.END_TURN)],
++        copy=True,
++        max_actions=8,
++        rng_seed=5,
++        return_trace=True,
++    )
++    assert len(result) == 5
++    _st, actions, _reward, done, trace = result
++    assert actions
++    assert done is False
++    assert isinstance(trace, list)
++    assert trace
++    assert "action_type" in trace[0]
++    assert "critical_threshold_event" in trace[0]
+--- a/docs/mcts_review_composer_o.md
++++ b/docs/mcts_review_composer_o.md
+@@ -99,3 +99,27 @@
+ ---
+ 
+ *Revision: Part B added 2026-04-25 — integrates stochastic trace metadata, local luck resamples, edge statistics, and production risk control without abandoning turn-level MCTS.*
++
++## Part B implementation note — stochastic root risk layer
++
++Implemented in this patch:
++
++- `GameState.apply_full_turn(..., return_trace=True)` can now return per-substep trace metadata without changing the default 4-tuple return shape.  The trace records combat damage deltas, killed/survived HP, capture interruption resets, and a conservative `critical_threshold_event` flag.
++- `rl.mcts.MCTSConfig` now exposes `luck_resamples`, `luck_resample_critical_only`, `risk_mode`, `risk_lambda`, `catastrophe_value`, `max_catastrophe_prob`, and `root_decision_log_path`.
++- Root children now carry `EdgeStats`: backup mean/variance plus fixed-plan luck-resample distributions (`p10_value`, worst value, catastrophe probability, kill probability, capture-interruption probability, attacker-death probability).
++- Production root selection can remain legacy visit-count based (`risk_mode=visit`) or switch to `mean`, `mean_minus_p10`, or `constrained` after luck resampling.
++- `scripts/symmetric_checkpoint_eval.py` wires the new controls through CLI/payload and can emit per-root JSONL child stats via `--mcts-root-decision-log`.
++
++Recommended ranked-advisor evaluation defaults after smoke tests:
++
++```bash
++--mcts-dirichlet-epsilon 0 \
++--mcts-temperature 0 \
++--mcts-luck-resamples 8 \
++--mcts-luck-resample-critical-only \
++--mcts-risk-mode mean_minus_p10 \
++--mcts-risk-lambda 0.35 \
++--mcts-root-decision-log logs/mcts_root_decisions.jsonl
++```
++
++Keep training/search-mix evaluations on `risk_mode=visit` until the risk layer has its own symmetric ablation.  The risk layer is intended for production/advisor selection, not for silently changing training targets.
+--- a/MASTERPLAN.md
++++ b/MASTERPLAN.md
+@@ -954,3 +954,7 @@
+ - Do not use full MCTS in PPO loop
+ - Use MCTS as teacher, not replacement
+ - Require EV > 0.6 before relying on it
++
++### MCTS stochastic risk layer note
++
++The forward MCTS lane now has a root-only stochastic risk layer: turn plans can be replayed with independent combat-luck seeds, traced for critical threshold events, and selected by visit count, mean value, mean-minus-tail-risk, or a catastrophe-constrained score.  This is deliberately root-only for production/advisor use; checkpoint training/eval should keep the legacy EV/visit selection unless the risk policy is being ablated explicitly.

@@ -1,0 +1,78 @@
+diff --git a/scripts/train_rhea_value_parallel.py b/scripts/train_rhea_value_parallel.py
+index 7777777..8888888 100644
+--- a/scripts/train_rhea_value_parallel.py
++++ b/scripts/train_rhea_value_parallel.py
+@@ -146,17 +146,30 @@ def _actor_loop(
+     env = _make_env(args)
+ 
+-    # Actor device defaults to CPU. Multiple CUDA actor processes can work, but
+-    # they often destroy GPU memory and scheduling. Use --actor-device cuda only
+-    # if you know your card can handle it.
+-    value_model = load_value_from_maskable_ppo_zip(args.checkpoint, device=args.actor_device)
++    # Device assignment:
++    #   --n-envs N          total actor processes
++    #   --gpu-actors K     first K actor ranks evaluate their value net on CUDA
++    #   remaining actors use --actor-device, which defaults to CPU
++    #
++    # RHEA itself is still CPU-heavy. GPU actors only accelerate value-head calls
++    # during fitness evaluation. Start with K=1 or K=2 and watch VRAM.
++    if int(actor_id) < int(args.gpu_actors):
++        actor_device = str(args.actor_gpu_device)
++    else:
++        actor_device = str(args.actor_device)
++
++    print(
++        json.dumps(
++            {
++                "event": "actor_start",
++                "actor_id": int(actor_id),
++                "actor_device": actor_device,
++                "gpu_actors": int(args.gpu_actors),
++            }
++        ),
++        flush=True,
++    )
++
++    value_model = load_value_from_maskable_ppo_zip(args.checkpoint, device=actor_device)
+     latest_path = Path(args.output_dir) / "value_rhea_latest.pt"
+     last_refresh = 0.0
+ 
+@@ -164,7 +177,7 @@ def _actor_loop(
+         env_template=env,
+         value_model=value_model,
+-        device=args.actor_device,
++        device=actor_device,
+         reward_weight=args.reward_weight,
+         value_weight=args.value_weight,
+     )
+@@ -199,7 +212,7 @@ def _actor_loop(
+         now = time.time()
+         if args.actor_refresh_seconds > 0 and now - last_refresh >= args.actor_refresh_seconds:
+-            if _load_value_pt_into_model(latest_path, value_model, args.actor_device):
++            if _load_value_pt_into_model(latest_path, value_model, actor_device):
+                 last_refresh = now
+ 
+         env.reset()
+@@ -287,7 +300,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
+     ap.add_argument("--max-days", type=int, default=30)
+     ap.add_argument("--device", type=str, default="cuda", help="learner device")
+     ap.add_argument("--actor-device", type=str, default="cpu", help="actor value-net device; cpu is safest for n-envs")
++    ap.add_argument("--actor-gpu-device", type=str, default="cuda", help="device used by the first --gpu-actors actor processes")
++    ap.add_argument("--gpu-actors", type=int, default=0, help="number of actor processes that should run value evaluation on --actor-gpu-device")
+     ap.add_argument("--actor-torch-threads", type=int, default=1)
+     ap.add_argument("--seed", type=int, default=0)
+     ap.add_argument("--n-envs", type=int, default=4)
+@@ -343,6 +360,14 @@ def main() -> None:
+     random.seed(args.seed)
+     np.random.seed(args.seed)
+     torch.manual_seed(args.seed)
++
++    if int(args.gpu_actors) < 0:
++        raise ValueError("--gpu-actors must be >= 0")
++    if int(args.gpu_actors) > int(args.n_envs):
++        raise ValueError("--gpu-actors cannot exceed --n-envs")
++    if int(args.gpu_actors) > 0 and not str(args.actor_gpu_device).startswith("cuda"):
++        print(json.dumps({"event": "warning", "message": "--gpu-actors > 0 but --actor-gpu-device is not cuda*"}), flush=True)
+ 
+     output_dir = Path(args.output_dir)
+     output_dir.mkdir(parents=True, exist_ok=True)

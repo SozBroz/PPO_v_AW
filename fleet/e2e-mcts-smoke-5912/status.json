@@ -1,0 +1,12 @@
+{
+  "role": "main",
+  "machine_id": "e2e-mcts-smoke-5912",
+  "task": "train",
+  "last_poll": 1776959357.100184,
+  "current_target": "D:\\Users\\phili\\AppData\\Local\\Temp\\pytest-of-phili\\pytest-180\\test_train_py_with_mcts_off_ru0\\ckpt\\latest.zip",
+  "steps_done": 200,
+  "n_envs": 2,
+  "save_every": 10000,
+  "checkpoint_dir": "D:\\Users\\phili\\AppData\\Local\\Temp\\pytest-of-phili\\pytest-180\\test_train_py_with_mcts_off_ru0\\ckpt",
+  "rate_steps_per_s": 0.0
+}

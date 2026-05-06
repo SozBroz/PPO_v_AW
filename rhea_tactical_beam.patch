@@ -1,0 +1,496 @@
+*** Begin Patch
+*** Add File: rl/tactical_beam.py
++from __future__ import annotations
++
++"""
++Tactical-core beam search for RHEA.
++
++Purpose
++-------
++Vanilla RHEA can miss important tactical/capture sequences because the correct
++line may require several high-value moves in a specific order. This module
++enumerates and sequences the tactical core first, then lets normal RHEA/random
++tail completion handle the low-value remainder of the turn.
++
++Design
++------
++The beam does NOT hard-force moves into the final real turn. It only creates
++searched candidate prefixes/full plans that are scored by the same fitness used
++by RHEA. Bad tactical lines die naturally.
++
++The resource budget is derived from the position:
++    - number of owned units
++    - number and quality of legal capture/strike/build/interruption candidates
++    - how many tactical buckets are active
++
++This avoids paying huge search on simple openings while allocating more work to
++positions with many valuable combinations.
++"""
++
++from dataclasses import dataclass, field
++import copy
++import math
++from typing import Iterable, Sequence
++
++from engine.game import GameState
++from rl.candidate_actions import CandidateAction, CandidateKind, candidate_arrays, MAX_CANDIDATES
++from rl.rhea_fitness import RheaFitness, RheaFitnessBreakdown
++
++
++@dataclass(slots=True)
++class TacticalBeamConfig:
++    enabled: bool = True
++
++    # Dynamic budget caps. These are caps, not fixed budgets.
++    min_width: int = 8
++    max_width: int = 48
++    min_depth: int = 3
++    max_depth: int = 14
++    max_candidates_per_expand: int = 24
++
++    # If the tactical pool is tiny, exhaustive-ish beam is cheap. If it is huge,
++    # cap per bucket before expansion.
++    max_capture_candidates: int = 16
++    max_strike_candidates: int = 20
++    max_build_candidates: int = 8
++    max_position_candidates: int = 8
++
++    # Partial-score guardrails. Final scoring still uses RheaFitness.
++    partial_phi_weight: float = 1.0
++    partial_value_weight: float = 0.0
++
++    # Dedupe protects the beam from many equivalent action orderings.
++    dedupe_states: bool = True
++    dedupe_plans: bool = True
++
++
++@dataclass(slots=True)
++class BeamLine:
++    state: GameState
++    actions: list
++    score: float
++    breakdown: RheaFitnessBreakdown | None = None
++    tactical_count: int = 0
++    buckets_seen: set[str] = field(default_factory=set)
++
++
++@dataclass(slots=True)
++class TacticalBeamResult:
++    lines: list[BeamLine]
++    width: int
++    depth: int
++    initial_juicy_count: int
++    bucket_counts: dict[str, int]
++
++
++class TacticalBeamPlanner:
++    def __init__(self, fitness: RheaFitness, config: TacticalBeamConfig | None = None) -> None:
++        self.fitness = fitness
++        self.cfg = config or TacticalBeamConfig()
++
++    def search(self, root: GameState) -> TacticalBeamResult:
++        acting = int(root.active_player)
++        initial = self._juicy_candidates(root)
++        budget = self._dynamic_budget(root, initial)
++
++        if not self.cfg.enabled or budget["width"] <= 0 or budget["depth"] <= 0 or not initial:
++            return TacticalBeamResult([], 0, 0, len(initial), self._bucket_counts(initial))
++
++        beam = [BeamLine(state=copy.deepcopy(root), actions=[], score=0.0)]
++        best_lines: list[BeamLine] = []
++
++        for _depth_idx in range(budget["depth"]):
++            expanded: list[BeamLine] = []
++
++            for line in beam:
++                if line.state.winner is not None or int(line.state.active_player) != acting:
++                    best_lines.append(line)
++                    continue
++
++                cands = self._juicy_candidates(line.state)
++                if not cands:
++                    best_lines.append(line)
++                    continue
++
++                for cand in cands[: budget["expand"]]:
++                    child_state = copy.deepcopy(line.state)
++                    ok = self._apply_candidate(child_state, cand)
++                    if not ok:
++                        continue
++
++                    child_actions = list(line.actions)
++                    child_actions.append(cand.first)
++                    if cand.second is not None:
++                        child_actions.append(cand.second)
++
++                    bucket = self._bucket_for_candidate(cand)
++                    buckets_seen = set(line.buckets_seen)
++                    buckets_seen.add(bucket)
++
++                    # Partial score is intentionally cheap and mostly reward-based.
++                    # Value is usually left at zero here so the immature value head
++                    # does not kill promising tactical prefixes too early.
++                    br = self.fitness.score(root, child_state, observer_seat=acting, illegal_genes=0)
++                    score = self.cfg.partial_phi_weight * br.phi_delta + self.cfg.partial_value_weight * br.value
++
++                    expanded.append(
++                        BeamLine(
++                            state=child_state,
++                            actions=child_actions,
++                            score=score,
++                            breakdown=br,
++                            tactical_count=line.tactical_count + 1,
++                            buckets_seen=buckets_seen,
++                        )
++                    )
++
++            if not expanded:
++                break
++
++            expanded = self._dedupe(expanded)
++            expanded.sort(key=lambda x: self._beam_sort_key(x), reverse=True)
++            beam = expanded[: budget["width"]]
++            best_lines.extend(beam[: max(1, budget["width"] // 4)])
++
++        all_lines = self._dedupe(best_lines + beam)
++        all_lines.sort(key=lambda x: self._beam_sort_key(x), reverse=True)
++        return TacticalBeamResult(
++            lines=all_lines[: budget["width"]],
++            width=budget["width"],
++            depth=budget["depth"],
++            initial_juicy_count=len(initial),
++            bucket_counts=self._bucket_counts(initial),
++        )
++
++    def _dynamic_budget(self, state: GameState, initial: Sequence[CandidateAction]) -> dict[str, int]:
++        owned_units = self._owned_unit_count(state, int(state.active_player))
++        counts = self._bucket_counts(initial)
++        juicy = len(initial)
++        active_buckets = sum(1 for v in counts.values() if v > 0)
++
++        # Complexity is continuous so tiny tactical positions stay cheap, while
++        # multi-front combat/capture turns get more width/depth.
++        complexity = (
++            0.40 * owned_units
++            + 1.20 * counts.get("finish_capture", 0)
++            + 1.00 * counts.get("start_capture", 0)
++            + 1.40 * counts.get("interrupt_capture", 0)
++            + 1.25 * counts.get("killshot", 0)
++            + 0.90 * counts.get("strike", 0)
++            + 0.60 * counts.get("build", 0)
++            + 0.50 * active_buckets
++        )
++
++        width = int(round(self.cfg.min_width + 1.25 * complexity))
++        depth = int(round(self.cfg.min_depth + math.sqrt(max(0.0, complexity)) / 1.35))
++        expand = int(round(8 + 0.60 * juicy + 0.25 * owned_units))
++
++        return {
++            "width": max(self.cfg.min_width, min(width, self.cfg.max_width)),
++            "depth": max(self.cfg.min_depth, min(depth, self.cfg.max_depth)),
++            "expand": max(4, min(expand, self.cfg.max_candidates_per_expand)),
++        }
++
++    def _juicy_candidates(self, state: GameState) -> list[CandidateAction]:
++        _feats, mask, cands = candidate_arrays(state, max_candidates=MAX_CANDIDATES)
++        legal = [c for i, c in enumerate(cands) if i < len(mask) and bool(mask[i])]
++
++        buckets: dict[str, list[tuple[float, CandidateAction]]] = {
++            "finish_capture": [],
++            "start_capture": [],
++            "interrupt_capture": [],
++            "killshot": [],
++            "strike": [],
++            "build": [],
++            "position": [],
++        }
++
++        for cand in legal:
++            bucket = self._bucket_for_candidate(cand)
++            if bucket not in buckets:
++                continue
++            score = self._juicy_score(cand, bucket)
++            if score <= 0.0:
++                continue
++            buckets[bucket].append((score, cand))
++
++        caps = {
++            "finish_capture": self.cfg.max_capture_candidates,
++            "start_capture": self.cfg.max_capture_candidates,
++            "interrupt_capture": self.cfg.max_capture_candidates,
++            "killshot": self.cfg.max_strike_candidates,
++            "strike": self.cfg.max_strike_candidates,
++            "build": self.cfg.max_build_candidates,
++            "position": self.cfg.max_position_candidates,
++        }
++
++        selected: list[tuple[float, CandidateAction]] = []
++        for bucket, scored in buckets.items():
++            scored.sort(key=lambda x: x[0], reverse=True)
++            selected.extend(scored[: caps[bucket]])
++
++        # Global order still matters for expansion. Bucket caps preserve variety;
++        # global sorting prioritizes the strongest tactical moves first.
++        selected.sort(key=lambda x: x[0], reverse=True)
++        return [c for _score, c in selected]
++
++    def _bucket_for_candidate(self, cand: CandidateAction) -> str:
++        f = cand.preview
++        kind = cand.kind
++        terminal_name = cand.terminal_action.action_type.name
++
++        if terminal_name == "BUILD" or kind == CandidateKind.BUILD:
++            return "build"
++
++        if f is not None:
++            # Candidate feature layout used by the current RHEA patch:
++            # capture progress/completion at 8..11, attack value at 12..23.
++            capture_progress = float(f[8]) if len(f) > 8 else 0.0
++            capture_completes = float(f[10]) if len(f) > 10 else 0.0
++            enemy_removed_max = float(f[17]) if len(f) > 17 else 0.0
++            target_killed_max = float(f[21]) if len(f) > 21 else 0.0
++
++            if capture_completes > 0.0:
++                return "finish_capture"
++            if capture_progress > 0.0:
++                return "start_capture"
++            if target_killed_max > 0.0:
++                return "killshot"
++            if enemy_removed_max > 0.0:
++                return "strike"
++
++        if terminal_name in {"CAPTURE", "ATTACK"}:
++            return "strike" if terminal_name == "ATTACK" else "start_capture"
++
++        if kind == CandidateKind.MOVE_WAIT:
++            return "position"
++
++        return "other"
++
++    def _juicy_score(self, cand: CandidateAction, bucket: str) -> float:
++        f = cand.preview
++        if f is None:
++            return 1.0 if bucket in {"build", "position"} else 0.0
++
++        # Defensive reads in case feature layout changes later.
++        def at(i: int) -> float:
++            return float(f[i]) if len(f) > i else 0.0
++
++        capture_progress = at(8)
++        capture_completes = at(10)
++        property_value = at(11)
++        enemy_removed_min = at(16)
++        enemy_removed_max = at(17)
++        own_lost_max = at(19)
++        target_killed_max = at(21)
++        attacker_killed = at(22)
++
++        if bucket == "finish_capture":
++            return 10.0 * capture_completes + 2.0 * property_value + capture_progress
++        if bucket == "start_capture":
++            return 4.0 * capture_progress + 1.5 * property_value
++        if bucket == "interrupt_capture":
++            return 8.0 + enemy_removed_max
++        if bucket == "killshot":
++            return 6.0 * target_killed_max + enemy_removed_max - 0.75 * own_lost_max - 2.0 * attacker_killed
++        if bucket == "strike":
++            return enemy_removed_max + 0.5 * enemy_removed_min - 0.75 * own_lost_max - attacker_killed
++        if bucket == "build":
++            return 2.0
++        if bucket == "position":
++            return 0.25
++        return 0.0
++
++    def _bucket_counts(self, cands: Sequence[CandidateAction]) -> dict[str, int]:
++        out: dict[str, int] = {}
++        for c in cands:
++            b = self._bucket_for_candidate(c)
++            out[b] = out.get(b, 0) + 1
++        return out
++
++    def _beam_sort_key(self, line: BeamLine) -> tuple[float, int, int]:
++        # Prefer high score, then lines that touched more tactical candidates, then
++        # lines with broader tactical bucket coverage.
++        return (line.score, line.tactical_count, len(line.buckets_seen))
++
++    def _dedupe(self, lines: Iterable[BeamLine]) -> list[BeamLine]:
++        out: list[BeamLine] = []
++        seen: set[tuple] = set()
++        for line in lines:
++            key_parts: list = []
++            if self.cfg.dedupe_plans:
++                key_parts.append(tuple(self._action_signature(a) for a in line.actions))
++            if self.cfg.dedupe_states:
++                key_parts.append(self._state_signature(line.state))
++            key = tuple(key_parts)
++            if key in seen:
++                continue
++            seen.add(key)
++            out.append(line)
++        return out
++
++    def _state_signature(self, state: GameState) -> tuple:
++        units = []
++        for u in getattr(state, "units", []):
++            units.append((getattr(u, "id", None), getattr(u, "owner", None), getattr(u, "x", None), getattr(u, "y", None), getattr(u, "hp", None)))
++        units.sort()
++        return (int(getattr(state, "active_player", -1)), tuple(units), getattr(state, "turn", None))
++
++    def _action_signature(self, action) -> tuple:
++        return (
++            getattr(action, "action_type", None).name if getattr(action, "action_type", None) is not None else None,
++            getattr(action, "unit_id", None),
++            getattr(action, "x", None),
++            getattr(action, "y", None),
++            getattr(action, "target_x", None),
++            getattr(action, "target_y", None),
++            getattr(action, "build_unit_type", None),
++        )
++
++    def _apply_candidate(self, state: GameState, cand: CandidateAction) -> bool:
++        try:
++            state.step(cand.first)
++            if cand.second is not None and state.winner is None:
++                state.step(cand.second)
++            return True
++        except Exception:
++            return False
++
++    def _owned_unit_count(self, state: GameState, seat: int) -> int:
++        return sum(1 for u in getattr(state, "units", []) if int(getattr(u, "owner", -999)) == seat)
++
+*** Update File: rl/rhea.py
+@@
+ from rl.rhea_fitness import RheaFitness, RheaFitnessBreakdown
++from rl.tactical_beam import TacticalBeamConfig, TacticalBeamPlanner
+@@
+ class RheaConfig:
+@@
+     value_weight: float = 0.10
+     seed: Optional[int] = None
++    use_tactical_beam: bool = False
++    tactical_beam_max_width: int = 48
++    tactical_beam_max_depth: int = 14
++    tactical_beam_max_expand: int = 24
+@@
+ class RheaPlanner:
+     def __init__(self, fitness: RheaFitness, config: RheaConfig) -> None:
+         self.fitness = fitness
+         self.cfg = config
+         self.rng = random.Random(config.seed)
++        self.tactical_beam = TacticalBeamPlanner(
++            fitness,
++            TacticalBeamConfig(
++                enabled=bool(config.use_tactical_beam),
++                max_width=int(config.tactical_beam_max_width),
++                max_depth=int(config.tactical_beam_max_depth),
++                max_candidates_per_expand=int(config.tactical_beam_max_expand),
++            ),
++        )
+@@
+     def choose_full_turn(self, state: GameState) -> RheaResult:
+         acting_seat = int(state.active_player)
+         before = state
++
++        # First, exhaustively-ish search the tactical core: captures, strikes,
++        # killshots, builds, and other high-value primitives. These lines are
++        # scored by the same RHEA fitness and then injected as elite candidates
++        # before ordinary evolutionary mutation/refinement begins.
++        beam_elites = []
++        if self.cfg.use_tactical_beam:
++            beam_result = self.tactical_beam.search(before)
++            for line in beam_result.lines:
++                if line.breakdown is None:
++                    br = self.fitness.score(before, line.state, observer_seat=acting_seat, illegal_genes=0)
++                else:
++                    br = line.breakdown
++                beam_elites.append((br.total, [], list(line.actions), br, 0))
+ 
+         population = [
+             self._random_genome(before)
+             for _ in range(self.cfg.population)
+         ]
+ 
+-        best: tuple[float, list[int], list, RheaFitnessBreakdown, int] | None = None
++        best: tuple[float, list[int], list, RheaFitnessBreakdown, int] | None = None
++        if beam_elites:
++            beam_elites.sort(key=lambda x: x[0], reverse=True)
++            best = beam_elites[0]
+ 
+         for _gen in range(self.cfg.generations):
+-            scored = []
++            scored = list(beam_elites[: max(1, self.cfg.elite)])
+             for genome in population:
+                 after, actions, illegal = self._simulate_genome(before, genome)
+                 breakdown = self.fitness.score(
+*** Update File: scripts/train_rhea_value.py
+@@
+     ap.add_argument("--rhea-max-actions-per-turn", type=int, default=96)
++    ap.add_argument("--rhea-use-tactical-beam", action="store_true")
++    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=48)
++    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
++    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
+@@
+         RheaConfig(
+             population=args.rhea_population,
+             generations=args.rhea_generations,
+             top_k_per_state=args.rhea_top_k_per_state,
+             max_actions_per_turn=args.rhea_max_actions_per_turn,
++            use_tactical_beam=args.rhea_use_tactical_beam,
++            tactical_beam_max_width=args.rhea_tactical_beam_max_width,
++            tactical_beam_max_depth=args.rhea_tactical_beam_max_depth,
++            tactical_beam_max_expand=args.rhea_tactical_beam_max_expand,
+             reward_weight=args.reward_weight,
+             value_weight=args.value_weight,
+         ),
+*** Update File: scripts/train_rhea_value_parallel.py
+@@
+     ap.add_argument("--rhea-max-actions-per-turn", type=int, default=96)
++    ap.add_argument("--rhea-use-tactical-beam", action="store_true")
++    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=48)
++    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
++    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
+@@
+         RheaConfig(
+             population=args.rhea_population,
+             generations=args.rhea_generations,
+             top_k_per_state=args.rhea_top_k_per_state,
+             max_actions_per_turn=args.rhea_max_actions_per_turn,
++            use_tactical_beam=args.rhea_use_tactical_beam,
++            tactical_beam_max_width=args.rhea_tactical_beam_max_width,
++            tactical_beam_max_depth=args.rhea_tactical_beam_max_depth,
++            tactical_beam_max_expand=args.rhea_tactical_beam_max_expand,
+             reward_weight=args.reward_weight,
+             value_weight=args.value_weight,
+         ),
+*** Update File: scripts/eval_rhea_one_game.py
+@@
+     ap.add_argument("--generations", type=int, default=6)
++    ap.add_argument("--rhea-use-tactical-beam", action="store_true")
++    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=48)
++    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
++    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
+@@
+         RheaConfig(
+             population=args.population,
+             generations=args.generations,
++            use_tactical_beam=args.rhea_use_tactical_beam,
++            tactical_beam_max_width=args.rhea_tactical_beam_max_width,
++            tactical_beam_max_depth=args.rhea_tactical_beam_max_depth,
++            tactical_beam_max_expand=args.rhea_tactical_beam_max_expand,
+             reward_weight=args.reward_weight,
+             value_weight=args.value_weight,
+             seed=random.randrange(1 << 30),
+         ),
+*** Add File: tests/test_tactical_beam_smoke.py
++from __future__ import annotations
++
++
++def test_tactical_beam_imports():
++    from rl.tactical_beam import TacticalBeamConfig, TacticalBeamPlanner
++
++    cfg = TacticalBeamConfig()
++    assert cfg.enabled is True
++    assert TacticalBeamPlanner is not None
++
+*** End Patch

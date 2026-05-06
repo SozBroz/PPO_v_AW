@@ -1,0 +1,480 @@
+--- orig/PPO_v_AW/rl/candidate_actions.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/PPO_v_AW/rl/candidate_actions.py	2026-05-03 14:34:33.943838547 +0000
+@@ -0,0 +1,413 @@
++"""Merged move/action candidate generation for RL policy experiments.
++
++This module intentionally does **not** replace the legacy flat action encoder.
++It provides the missing middle layer for a future candidate-scoring policy:
++
++    SELECT actor  ->  CandidateAction rows  ->  execute selected candidate
++
++Rows are generated only for ``ActionStage.MOVE`` after a unit has been selected.
++They merge destination-only terminators (WAIT/CAPTURE/LOAD/JOIN/DIVE_HIDE) and
++attack pairs (MOVE_ATTACK(dest, target)).  Multi-object follow-ups such as
++UNLOAD and Black Boat REPAIR remain setup candidates so the existing ACTION
++stage can choose the cargo/drop or repair target.
++"""
++from __future__ import annotations
++
++from contextlib import contextmanager
++from dataclasses import dataclass, field
++from enum import IntEnum
++from typing import Iterable, Iterator, Optional
++
++import copy
++
++import numpy as np
++
++from engine.action import Action, ActionStage, ActionType, get_legal_actions
++from engine.combat import calculate_counterattack, damage_range, _is_dual_luck_bounds
++from engine.game import GameState
++from engine.terrain import get_terrain
++from engine.unit import UNIT_STATS, Unit, UnitType
++
++# Keep this deliberately modest; these are candidate-row features, not board planes.
++# Consumers can pad candidate feature tables to MAX_CANDIDATES for PPO batching.
++CANDIDATE_FEATURE_DIM = 24
++MAX_CANDIDATES_DEFAULT = 4096
++
++
++class CandidateKind(IntEnum):
++    MOVE_WAIT = 0
++    MOVE_CAPTURE = 1
++    MOVE_ATTACK = 2
++    MOVE_LOAD = 3
++    MOVE_JOIN = 4
++    MOVE_DIVE_HIDE = 5
++    MOVE_SETUP_UNLOAD = 6
++    MOVE_SETUP_REPAIR = 7
++    MOVE_SETUP_ACTION = 8
++
++
++@dataclass(slots=True)
++class CandidatePreview:
++    # Capture preview.  Values are normalized where convenient for NN input.
++    capture_progress: float = 0.0          # 0..1 of a full 20-point capture bar
++    capture_remaining_after: float = 0.0   # 0..1 remaining after this capture tick
++    capture_completes: float = 0.0         # bool as float
++    property_value: float = 0.0            # income-ish value, normalized
++
++    # Attack preview.  Min/max are ranges over luck / HP uncertainty hook points.
++    damage_min: float = 0.0                # internal HP / 100
++    damage_max: float = 0.0
++    counter_min: float = 0.0               # internal HP / 100; zero for indirects
++    counter_max: float = 0.0
++    enemy_value_removed_min: float = 0.0   # funds / VALUE_NORM
++    enemy_value_removed_max: float = 0.0
++    my_value_lost_min: float = 0.0         # funds / VALUE_NORM
++    my_value_lost_max: float = 0.0
++    target_killed_min: float = 0.0         # min roll kills
++    target_killed_max: float = 0.0         # max roll kills
++    attacker_killed_min: float = 0.0       # min counter kills
++    attacker_killed_max: float = 0.0       # max counter kills
++    direct_counter_applicable: float = 0.0 # defender can counter if it survives
++    sonja_counter_break: float = 0.0       # defender is Sonja SCOP, strikes first path matters
++
++
++@dataclass(slots=True)
++class CandidateAction:
++    kind: CandidateKind
++    unit_pos: tuple[int, int]
++    move_pos: tuple[int, int]
++    target_pos: Optional[tuple[int, int]] = None
++    unit_type: Optional[UnitType] = None
++    preview: CandidatePreview = field(default_factory=CandidatePreview)
++
++    def terminal_action(self) -> Action:
++        """Return the ACTION-stage terminator for terminal merged candidates."""
++        if self.kind == CandidateKind.MOVE_WAIT:
++            return Action(ActionType.WAIT, unit_pos=self.unit_pos, move_pos=self.move_pos)
++        if self.kind == CandidateKind.MOVE_CAPTURE:
++            return Action(ActionType.CAPTURE, unit_pos=self.unit_pos, move_pos=self.move_pos)
++        if self.kind == CandidateKind.MOVE_ATTACK:
++            return Action(
++                ActionType.ATTACK,
++                unit_pos=self.unit_pos,
++                move_pos=self.move_pos,
++                target_pos=self.target_pos,
++            )
++        if self.kind == CandidateKind.MOVE_LOAD:
++            return Action(ActionType.LOAD, unit_pos=self.unit_pos, move_pos=self.move_pos)
++        if self.kind == CandidateKind.MOVE_JOIN:
++            return Action(ActionType.JOIN, unit_pos=self.unit_pos, move_pos=self.move_pos)
++        if self.kind == CandidateKind.MOVE_DIVE_HIDE:
++            return Action(ActionType.DIVE_HIDE, unit_pos=self.unit_pos, move_pos=self.move_pos)
++        raise ValueError(f"candidate {self.kind.name} is not terminal")
++
++    def setup_move_action(self) -> Action:
++        """Return the MOVE-stage SELECT_UNIT action that commits this destination."""
++        return Action(ActionType.SELECT_UNIT, unit_pos=self.unit_pos, move_pos=self.move_pos)
++
++    def to_feature_row(self, state: GameState) -> np.ndarray:
++        """Encode candidate metadata + preview into a fixed-width float row."""
++        h = max(1, int(getattr(state.map_data, "height", 30) or 30))
++        w = max(1, int(getattr(state.map_data, "width", 30) or 30))
++        r0, c0 = self.unit_pos
++        rd, cd = self.move_pos
++        if self.target_pos is None:
++            rt, ct = -1, -1
++        else:
++            rt, ct = self.target_pos
++        p = self.preview
++        row = np.zeros((CANDIDATE_FEATURE_DIM,), dtype=np.float32)
++        row[0] = float(self.kind) / 8.0
++        row[1] = float(r0) / float(h)
++        row[2] = float(c0) / float(w)
++        row[3] = float(rd) / float(h)
++        row[4] = float(cd) / float(w)
++        row[5] = 0.0 if rt < 0 else float(rt) / float(h)
++        row[6] = 0.0 if ct < 0 else float(ct) / float(w)
++        row[7] = p.capture_progress
++        row[8] = p.capture_remaining_after
++        row[9] = p.capture_completes
++        row[10] = p.property_value
++        row[11] = p.damage_min
++        row[12] = p.damage_max
++        row[13] = p.counter_min
++        row[14] = p.counter_max
++        row[15] = p.enemy_value_removed_min
++        row[16] = p.enemy_value_removed_max
++        row[17] = p.my_value_lost_min
++        row[18] = p.my_value_lost_max
++        row[19] = p.target_killed_min
++        row[20] = p.target_killed_max
++        row[21] = p.attacker_killed_min
++        row[22] = p.attacker_killed_max
++        row[23] = max(p.direct_counter_applicable, p.sonja_counter_break)
++        return row
++
++
++_VALUE_NORM = 30000.0
++
++
++def _unit_cost(unit: Unit) -> int:
++    return int(UNIT_STATS[unit.unit_type].cost)
++
++
++@contextmanager
++def _temporary_action_stage(
++    state: GameState,
++    *,
++    stage: ActionStage,
++    selected_move_pos: Optional[tuple[int, int]],
++) -> Iterator[None]:
++    old_stage = state.action_stage
++    old_move = state.selected_move_pos
++    state.action_stage = stage
++    state.selected_move_pos = selected_move_pos
++    try:
++        yield
++    finally:
++        state.action_stage = old_stage
++        state.selected_move_pos = old_move
++
++
++def _capture_preview(state: GameState, unit: Unit, move_pos: tuple[int, int]) -> CandidatePreview:
++    prop = state.get_property_at(*move_pos)
++    if prop is None:
++        return CandidatePreview()
++    progress = max(0, int(unit.display_hp))
++    before = int(getattr(prop, "capture_points", 20) or 20)
++    after = max(0, before - progress)
++    return CandidatePreview(
++        capture_progress=float(progress) / 20.0,
++        capture_remaining_after=float(after) / 20.0,
++        capture_completes=1.0 if after <= 0 else 0.0,
++        property_value=1.0 if prop.owner is None else 1.5,
++    )
++
++
++def _counter_range(
++    attacker: Unit,
++    defender: Unit,
++    attacker_terrain,
++    defender_terrain,
++    attacker_co,
++    defender_co,
++    forward_min: int,
++    forward_max: int,
++) -> tuple[int, int, bool, bool]:
++    """Conservative min/max counter damage after the forward strike.
++
++    Indirect defenders never counter.  For direct defenders, Sonja SCOP is
++    intentionally included even when the forward max would kill because her
++    Counter Break path uses pre-attack HP.
++    """
++    def_stats = UNIT_STATS[defender.unit_type]
++    if def_stats.is_indirect:
++        return 0, 0, False, False
++    sonja_break = bool(defender_co.co_id == 18 and defender_co.scop_active)
++    if not sonja_break and defender.hp - forward_max <= 0:
++        return 0, 0, False, False
++
++    vals: list[int] = []
++    applicable = False
++    # Counter is largest after the smallest forward hit and smallest after the largest hit.
++    for fdmg in (forward_min, forward_max):
++        post = max(0, int(defender.hp) - int(fdmg))
++        if post <= 0 and not sonja_break:
++            vals.append(0)
++            continue
++        defender_copy = copy.copy(defender)
++        defender_copy.hp = post
++        attacker_copy = copy.copy(attacker)
++
++        # Sweep luck by using calculate_counterattack at two equivalent damage endpoints.
++        # calculate_counterattack internally handles Sonja D2D and Sonja SCOP pre-hit HP.
++        # Its stochastic luck arguments are optional; use deterministic range by sweeping here.
++        bounds = defender_co.luck_bounds()
++        dual = bounds is not None and _is_dual_luck_bounds(bounds)
++        if dual:
++            for rg in range(10):
++                for rb in range(10):
++                    cd = calculate_counterattack(
++                        attacker_copy,
++                        defender_copy,
++                        attacker_terrain,
++                        defender_terrain,
++                        attacker_co,
++                        defender_co,
++                        int(fdmg),
++                        luck_roll=rg,
++                        luck_roll_bad=rb,
++                    )
++                    if cd is not None:
++                        applicable = True
++                        vals.append(int(cd))
++        else:
++            for roll in range(10):
++                cd = calculate_counterattack(
++                    attacker_copy,
++                    defender_copy,
++                    attacker_terrain,
++                    defender_terrain,
++                    attacker_co,
++                    defender_co,
++                    int(fdmg),
++                    luck_roll=roll,
++                )
++                if cd is not None:
++                    applicable = True
++                    vals.append(int(cd))
++    if not vals:
++        return 0, 0, False, sonja_break
++    return min(vals), max(vals), applicable, sonja_break
++
++
++def _attack_preview(
++    state: GameState,
++    unit: Unit,
++    move_pos: tuple[int, int],
++    target_pos: tuple[int, int],
++) -> CandidatePreview:
++    defender = state.get_unit_at(*target_pos)
++    if defender is None:
++        # Pipe seam / rubble targets: no unit value or counter.  Use zero-cost damage summary.
++        return CandidatePreview()
++
++    attacker_terrain = get_terrain(state.map_data.terrain[move_pos[0]][move_pos[1]])
++    defender_terrain = get_terrain(state.map_data.terrain[target_pos[0]][target_pos[1]])
++    attacker_co = state.co_states[int(unit.player)]
++    defender_co = state.co_states[int(defender.player)]
++
++    dr = damage_range(unit, defender, attacker_terrain, defender_terrain, attacker_co, defender_co)
++    if dr is None:
++        return CandidatePreview()
++    dmin, dmax = int(dr[0]), int(dr[1])
++    target_hp = int(defender.hp)
++    target_cost = _unit_cost(defender)
++    attacker_cost = _unit_cost(unit)
++    enemy_loss_min = target_cost * min(dmin, target_hp) / 100.0
++    enemy_loss_max = target_cost * min(dmax, target_hp) / 100.0
++
++    cmin, cmax, counter_applicable, sonja_break = _counter_range(
++        unit,
++        defender,
++        attacker_terrain,
++        defender_terrain,
++        attacker_co,
++        defender_co,
++        dmin,
++        dmax,
++    )
++    my_loss_min = attacker_cost * min(cmin, int(unit.hp)) / 100.0
++    my_loss_max = attacker_cost * min(cmax, int(unit.hp)) / 100.0
++
++    return CandidatePreview(
++        damage_min=float(dmin) / 100.0,
++        damage_max=float(dmax) / 100.0,
++        counter_min=float(cmin) / 100.0,
++        counter_max=float(cmax) / 100.0,
++        enemy_value_removed_min=float(enemy_loss_min) / _VALUE_NORM,
++        enemy_value_removed_max=float(enemy_loss_max) / _VALUE_NORM,
++        my_value_lost_min=float(my_loss_min) / _VALUE_NORM,
++        my_value_lost_max=float(my_loss_max) / _VALUE_NORM,
++        target_killed_min=1.0 if dmin >= target_hp else 0.0,
++        target_killed_max=1.0 if dmax >= target_hp else 0.0,
++        attacker_killed_min=1.0 if cmin >= int(unit.hp) else 0.0,
++        attacker_killed_max=1.0 if cmax >= int(unit.hp) else 0.0,
++        direct_counter_applicable=1.0 if counter_applicable else 0.0,
++        sonja_counter_break=1.0 if sonja_break else 0.0,
++    )
++
++
++def generate_move_candidates(state: GameState) -> list[CandidateAction]:
++    """Generate merged move/action candidates for the currently selected unit.
++
++    This function expects ``state.action_stage == ActionStage.MOVE`` and does not
++    mutate state after it returns.  ``MOVE_WAIT`` is suppressed for a destination
++    when ``MOVE_CAPTURE`` is legal for that same destination.  ``UNLOAD`` and
++    ``REPAIR`` are left as setup candidates because they require a second target
++    choice after the transport/boat destination is fixed.
++    """
++    if state.action_stage != ActionStage.MOVE or state.selected_unit is None:
++        return []
++    unit = state.selected_unit
++    out: list[CandidateAction] = []
++    move_actions = [a for a in get_legal_actions(state) if a.action_type == ActionType.SELECT_UNIT]
++    for ma in move_actions:
++        if ma.move_pos is None:
++            continue
++        dest = ma.move_pos
++        with _temporary_action_stage(state, stage=ActionStage.ACTION, selected_move_pos=dest):
++            terminators = get_legal_actions(state)
++        has_capture = any(a.action_type == ActionType.CAPTURE for a in terminators)
++        for ta in terminators:
++            at = ta.action_type
++            if at == ActionType.WAIT:
++                if has_capture:
++                    continue
++                out.append(CandidateAction(CandidateKind.MOVE_WAIT, unit.pos, dest))
++            elif at == ActionType.CAPTURE:
++                out.append(CandidateAction(
++                    CandidateKind.MOVE_CAPTURE,
++                    unit.pos,
++                    dest,
++                    preview=_capture_preview(state, unit, dest),
++                ))
++            elif at == ActionType.ATTACK and ta.target_pos is not None:
++                out.append(CandidateAction(
++                    CandidateKind.MOVE_ATTACK,
++                    unit.pos,
++                    dest,
++                    target_pos=ta.target_pos,
++                    preview=_attack_preview(state, unit, dest, ta.target_pos),
++                ))
++            elif at == ActionType.LOAD:
++                out.append(CandidateAction(CandidateKind.MOVE_LOAD, unit.pos, dest))
++            elif at == ActionType.JOIN:
++                out.append(CandidateAction(CandidateKind.MOVE_JOIN, unit.pos, dest))
++            elif at == ActionType.DIVE_HIDE:
++                out.append(CandidateAction(CandidateKind.MOVE_DIVE_HIDE, unit.pos, dest))
++            elif at == ActionType.UNLOAD:
++                # Multiple cargo/drop choices can share a transport destination; keep staged.
++                if not any(c.kind == CandidateKind.MOVE_SETUP_UNLOAD and c.move_pos == dest for c in out):
++                    out.append(CandidateAction(CandidateKind.MOVE_SETUP_UNLOAD, unit.pos, dest))
++            elif at == ActionType.REPAIR:
++                # Black Boat repair target is a meaningful second object; keep staged.
++                if not any(c.kind == CandidateKind.MOVE_SETUP_REPAIR and c.move_pos == dest for c in out):
++                    out.append(CandidateAction(CandidateKind.MOVE_SETUP_REPAIR, unit.pos, dest))
++    return out
++
++
++def candidates_to_arrays(
++    state: GameState,
++    candidates: Iterable[CandidateAction],
++    *,
++    max_candidates: int = MAX_CANDIDATES_DEFAULT,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Pad candidate rows to fixed tensors for vectorized PPO storage."""
++    feats = np.zeros((max_candidates, CANDIDATE_FEATURE_DIM), dtype=np.float32)
++    mask = np.zeros((max_candidates,), dtype=bool)
++    for i, cand in enumerate(candidates):
++        if i >= max_candidates:
++            break
++        feats[i] = cand.to_feature_row(state)
++        mask[i] = True
++    return feats, mask
++
++
++def execute_candidate(state: GameState, cand: CandidateAction) -> None:
++    """Execute a candidate through the existing staged GameState.step contract.
++
++    Terminal candidates commit MOVE then their terminator.  Setup candidates only
++    commit MOVE and leave ``state.action_stage == ACTION`` for the old follow-up
++    selection machinery.
++    """
++    if state.action_stage != ActionStage.MOVE:
++        raise RuntimeError(f"execute_candidate requires MOVE stage, got {state.action_stage}")
++    state.step(cand.setup_move_action())
++    if cand.kind in (
++        CandidateKind.MOVE_SETUP_UNLOAD,
++        CandidateKind.MOVE_SETUP_REPAIR,
++        CandidateKind.MOVE_SETUP_ACTION,
++    ):
++        return
++    state.step(cand.terminal_action())
+--- orig/PPO_v_AW/rl/env.py	2026-05-03 14:20:51.000000000 +0000
++++ repo/PPO_v_AW/rl/env.py	2026-05-03 14:36:38.875977386 +0000
+@@ -53,6 +53,12 @@
+ 
+ from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
+ from rl.network import ACTION_SPACE_SIZE
++from rl.candidate_actions import (
++    CandidateAction,
++    candidates_to_arrays,
++    execute_candidate,
++    generate_move_candidates,
++)
+ from rl.paths import GAME_LOG_PATH, SLOW_GAMES_LOG_PATH
+ from rl.log_timestamp import log_now_iso, log_timestamp_iso
+ from rl.heuristic_termination import (
+@@ -2247,6 +2253,48 @@
+             "contested_income_chips_by_seat": contested_income,
+         }
+ 
++    def move_action_candidates(self) -> list[CandidateAction]:
++        """Return merged move/action candidates for the current selected unit.
++
++        This is a side-channel for candidate-policy experiments.  It does not
++        alter the legacy flat MaskablePPO action space.  Non-MOVE stages return
++        an empty list.
++        """
++        if self.state is None:
++            return []
++        return generate_move_candidates(self.state)
++
++    def move_action_candidate_arrays(
++        self, *, max_candidates: int = 4096
++    ) -> tuple[np.ndarray, np.ndarray]:
++        """Return padded candidate feature rows + bool mask for PPO batching."""
++        if self.state is None:
++            return (
++                np.zeros((max_candidates, 24), dtype=np.float32),
++                np.zeros((max_candidates,), dtype=bool),
++            )
++        return candidates_to_arrays(
++            self.state,
++            generate_move_candidates(self.state),
++            max_candidates=max_candidates,
++        )
++
++    def step_move_action_candidate(self, candidate_idx: int) -> None:
++        """Execute one generated MOVE-stage candidate through the staged engine.
++
++        This helper intentionally does not perform reward/accounting/opponent
++        autoplay.  It is for tests and for a future candidate-mode ``step``
++        wrapper; standard training should continue to call ``step(flat_idx)``.
++        """
++        if self.state is None:
++            raise RuntimeError("Call reset() before step_move_action_candidate().")
++        candidates = generate_move_candidates(self.state)
++        idx = int(candidate_idx)
++        if idx < 0 or idx >= len(candidates):
++            raise IndexError(f"candidate_idx {idx} out of range for {len(candidates)} candidates")
++        execute_candidate(self.state, candidates[idx])
++        self._legal_cache = None
++
+     def action_masks(self) -> np.ndarray:
+         """Return valid-action bool mask. Required by MaskablePPO wrappers."""
+         if self.state is None:

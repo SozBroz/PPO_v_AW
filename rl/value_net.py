@@ -37,7 +37,7 @@ class AWBWValueNet(nn.Module):
         # spatial: [B, 30, 30, C]
         with torch.amp.autocast(
             "cuda",
-            dtype=torch.float16,
+            dtype=torch.float32,
             enabled=(spatial.device.type == "cuda"),
         ):
             x = spatial.permute(0, 3, 1, 2).contiguous()
