@@ -1329,123 +1329,52 @@ class GameState:
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
             # Pass internal HP to CO meter function
-            self._apply_co_meter_from_internal_hp_lost(attacker, defender, internal_dmg)
-            self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
+    def _apply_co_meter_from_display_buckets_lost(
+        self,
+        striker_unit: Unit,
+        victim_unit: Unit,
+        display_buckets_lost: int,
+    ) -> None:
+        """Award CO-meter for one combat swing from display buckets lost.
 
-        # Counterattack (only if defender survived and attacker is direct)
-        att_stats = UNIT_STATS[attacker.unit_type]
-        # Phase 11J-VONBOLT-SCOP-SHIP — stunned defenders do not counter.
-        # AWBW canon (https://awbw.fandom.com/wiki/Von_Bolt): Ex Machina
-        # *"prevents all affected enemy units from acting next turn."* A
-        # counter-attack is an act; PHP correctly emits no counter from a
-        # stunned defender. The pre-fix engine ran the counter regardless,
-        # which (a) damaged the attacker that PHP left untouched and (b)
-        # consumed defender ammo PHP did not — both surfacing as drift in
-        # the cluster-B funds gids (1621434, 1621898, 1622328: see
-        # ``docs/oracle_exception_audit/phase11j_vonbolt_scop_ship.md`` §3
-        # for the drill).
-        defender_can_counter = (
-            defender.is_alive
-            and not att_stats.is_indirect
-            and not defender.is_stunned
-        )
-        if defender_can_counter:
-            # Phase 11J-SASHA-WARBONDS-SHIP: capture attacker display HP BEFORE
-            # the counter so the defender's War Bonds payout (when defender
-            # is Sasha) reflects the correct display-HP loss.
-            pre_atk_disp = attacker.display_hp
-            if override_counter is not None:
-                counter = max(0, int(override_counter))
-            else:
-                counter = calculate_counterattack(
-                    attacker, defender,
-                    att_terrain, def_terrain,
-                    att_co, def_co,
-                    attack_damage=dmg,
-                    luck_rng=self.luck_rng,
-                )
-            if counter is not None and counter > 0:
-                attacker.hp = max(0, attacker.hp - counter)
-                self.losses_hp[attacker.player] += counter  # Track counterattack HP lost
-                if attacker.hp == 0:
-                    self.losses_units[attacker.player] += 1  # Track unit destroyed
-                # Use internal HP lost (counter) for CO meter
-                # AWBW: 9000 funds of damage = 1 star
-                # Formula: internal_hp_lost × cost / 10 = funds value
-                self._apply_co_meter_from_internal_hp_lost(defender, attacker, counter)
-                # War Bonds payout for Sasha when she's defending and her
-                # unit deals counter-damage. Roles flipped: defender is the
-                # damage-dealer, attacker is the recipient of the counter.
-                self._apply_war_bonds_payout(defender, attacker, pre_atk_disp)
+        AWBW formula: CO meter charges based on funds value of damage dealt.
+        9000 funds damage = 1 star = 9000 power_bar units.
 
-        # Phase 11J-CLOSE-1624082 — clear the oracle War Bonds pin once
-        # the primary + counter pair has run (one-shot per Fire, mirrors
-        # ``_oracle_combat_damage_override`` consumption above).
-        self._oracle_war_bonds_payout_override = None
-
-        # Consume attacker ammo. AWBW canon: the secondary Machine Gun is
-        # **unlimited** and does NOT draw from the unit's primary ammo
-        # magazine; only the primary weapon (cannon, bazooka, missile)
-        # consumes one round per shot. Per the AWBW Wiki Machine_Gun page
-        # (https://awbw.fandom.com/wiki/Machine_Gun) the MG is the
-        # secondary weapon for Mech, Tank, Md.Tank, Neotank, Mega Tank and
-        # B-Copter, and is used only against Infantry and Mech defenders.
-        # The pre-fix engine consumed primary ammo on every strike, which
-        # falsely zeroed B-Copter / Mech / Mega Tank magazines several
-        # turns earlier than AWBW (47 GL std-tier engine_bug rows in
-        # logs/desync_register_post_phase9.jsonl bottomed out at ammo=0).
-        att_stats = UNIT_STATS[attacker.unit_type]
-        used_secondary_mg = (
-            attacker.unit_type in _MG_SECONDARY_USERS
-            and defender.unit_type in _MG_SECONDARY_TARGETS
-        )
-        if att_stats.max_ammo > 0 and not used_secondary_mg:
-            attacker.ammo = max(0, attacker.ammo - 1)
-
-        # If a transport just died, all units it was carrying go down with it.
-        # Record their HP and unit losses against the cargo's owner before
-        # zeroing them so the loss tallies stay consistent.
-        for p in (0, 1):
-            for u in self.units[p]:
-                if not u.is_alive and u.loaded_units:
-                    for cargo in u.loaded_units:
-                        if cargo.is_alive:
-                            self.losses_hp[cargo.player]    += cargo.hp
-                            self.losses_units[cargo.player] += 1
-                            cargo.hp = 0
-                    u.loaded_units = []
-
-        # AWBW capture-progress reset on death: when the unit holding mid-capture
-        # is killed (attacker counter-killed on the tile it just stepped onto, or
-        # defender killed while capturing its own property), the partial capture
-        # resets to 20. ``_move_unit`` already covers tile-vacated cases.
-        if not attacker.is_alive:
-            apos = attacker.pos
-            apr  = self.get_property_at(*apos)
-            if apr is not None and apr.capture_points < 20:
-                apr.capture_points = 20
-        if defender is not None and not defender.is_alive:
-            dpos = defender.pos
-            dpr  = self.get_property_at(*dpos)
-            if dpr is not None and dpr.capture_points < 20:
-                dpr.capture_points = 20
-
-        # Prune dead units
-        for p in (0, 1):
-            self.units[p] = [u for u in self.units[p] if u.is_alive]
-
-        # Army wipe only after combat (AWBW: not when opponent has never had units / build races)
-        self._evaluate_army_wipe_after_combat()
-
-        self._finish_action(attacker)
-        self.game_log.append({
-            "type":   "attack",
-            "player": attacker.player,
-            "from":   action.unit_pos,
-            "to":     list(action.move_pos),
-            "target": list(action.target_pos),
-            "dmg":    dmg,
-        })
+        Args:
+            display_buckets_lost: Display HP lost (1-10), where 1 display HP = 10 internal HP.
+        """
+        if display_buckets_lost <= 0:
+            return
+        # Convert display buckets to internal HP
+        internal_hp_lost = display_buckets_lost * 10
+        
+        # AWBW canon: "Real unit cost is also factored into the calculation,
+        # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
+        # charge their powers more slowly / more quickly on a per-unit basis."
+        base_cv = UNIT_STATS[victim_unit.unit_type].cost
+        base_cs = UNIT_STATS[striker_unit.unit_type].cost
+        
+        # Apply victim's own CO cost modifier to victim cost
+        victim_co = self.co_states[int(victim_unit.player)]
+        mod_v = victim_co.unit_cost_modifier_for_unit(victim_unit.unit_type)
+        # Apply striker's own CO cost modifier to striker cost
+        striker_co = self.co_states[int(striker_unit.player)]
+        mod_s = striker_co.unit_cost_modifier_for_unit(striker_unit.unit_type)
+        
+        # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
+        cv = int(base_cv * (100 + mod_v) / 100)
+        cs = int(base_cs * (100 + mod_s) / 100)
+        
+        # Victim credit: internal HP lost × cost / 90 = funds value
+        # (for 9000 = 1 star)
+        victim_credit = _rounded_div_half_up(internal_hp_lost * cv, 90)
+        
+        # Striker credit: 50% of victim credit (per AWBW)
+        striker_credit = _rounded_div_half_up(internal_hp_lost * cs, 180)
+        
+        # Apply to CO states
+        self.co_states[int(striker_unit.player)].power_bar += striker_credit
+        self.co_states[int(victim_unit.player)].power_bar += victim_credit
 
     def _grant_co_meter_credit(self, seat: int, credit: int) -> None:
         """Add CO-meter credit capped at SCOP ceiling."""
@@ -1468,38 +1397,38 @@ class GameState:
 
         Args:
             internal_hp_lost: Internal HP lost (1-100), where 10 internal = 1 display HP.
-        
-        For internal HP lost D and unit cost C:
-        - Victim seat credit: (D/10) × C = D × C / 10 (funds value)
-        - Striker seat credit: 50% of victim credit (per AWBW)
-        
-        Example: 90 internal HP (9 display) of 1000-cost unit = 9000 funds = 1 star.
-
-        Repairs and non-combat HP changes never call this hook.
         """
         if internal_hp_lost <= 0:
             return
+        
         # AWBW canon: "Real unit cost is also factored into the calculation,
         # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
         # charge their powers more slowly / more quickly on a per-unit basis."
         base_cv = UNIT_STATS[victim_unit.unit_type].cost
         base_cs = UNIT_STATS[striker_unit.unit_type].cost
+        
         # Apply victim's own CO cost modifier to victim cost
         victim_co = self.co_states[int(victim_unit.player)]
         mod_v = victim_co.unit_cost_modifier_for_unit(victim_unit.unit_type)
         # Apply striker's own CO cost modifier to striker cost
         striker_co = self.co_states[int(striker_unit.player)]
         mod_s = striker_co.unit_cost_modifier_for_unit(striker_unit.unit_type)
+        
         # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
         cv = int(base_cv * (100 + mod_v) / 100)
         cs = int(base_cs * (100 + mod_s) / 100)
-        # Victim credit: internal_HP_lost × cost / 10 = funds value
-        # 90 internal HP × 1000 cost / 10 = 9000 funds = 1 star = 9000 power_bar
-        credit_v = internal_hp_lost * cv // 10
-        # Striker credit: 50% of victim (per AWBW)
-        credit_s = internal_hp_lost * cs // 20
-        self._grant_co_meter_credit(int(victim_unit.player), credit_v)
-        self._grant_co_meter_credit(int(striker_unit.player), credit_s)
+        
+        # Victim credit: internal HP lost × cost / 90 = funds value
+        # (for 9000 = 1 star)
+        victim_credit = _rounded_div_half_up(internal_hp_lost * cv, 90)
+        
+        # Striker credit: 50% of victim credit (per AWBW)
+        striker_credit = _rounded_div_half_up(internal_hp_lost * cs, 180)
+        
+        # Apply to CO states
+        self.co_states[int(striker_unit.player)].power_bar += striker_credit
+        self.co_states[int(victim_unit.player)].power_bar += victim_credit
+
     def _apply_war_bonds_payout(
         self,
         damage_dealer: Unit,
