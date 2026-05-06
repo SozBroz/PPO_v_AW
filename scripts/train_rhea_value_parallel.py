@@ -1310,7 +1310,12 @@ def main() -> None:
     # Hardcoded output directory
     output_dir = Path("checkpoints")
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "hparams_parallel.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
+    # Convert args to JSON-serializable dict (handle Path objects)
+    hparams = vars(args).copy()
+    for k, v in hparams.items():
+        if isinstance(v, Path):
+            hparams[k] = str(v)
+    (output_dir / "hparams_parallel.json").write_text(json.dumps(hparams, indent=2), encoding="utf-8")
     
     # Game log file
     logs_dir = Path("logs")
