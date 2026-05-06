@@ -755,8 +755,11 @@ class GameState:
             co.scop_active = True
             co.cop_active  = False
         # Consume only the COP/SCOP segment; remainder stays on the bar (AWBW).
-        # Threshold is fixed from pre-increment power_uses (see COState._cop_threshold).
-        thresh = co._cop_threshold if cop else co._scop_threshold
+        # Threshold is stars * 9000 + uses * 1800, but we only subtract
+        # stars * 9000 (the star cost), NOT the threshold (which includes uses).
+        # AWBW: meter keeps the "uses * 1800" portion after activation.
+        stars = co.cop_stars if cop else co.scop_stars
+        thresh = stars * 9000
         co.power_bar = max(0, co.power_bar - thresh)
         co.power_uses += 1  # raises COP/SCOP threshold by +1800/star next time
 
@@ -1324,8 +1327,8 @@ class GameState:
             # Use display HP lost for CO meter per AWBW wiki
             # AWBW: 9000 funds of damage = 1 star = 100 engine units
             # Formula: display_hp_lost × cost / 90 = engine units
-            # (9000/100 = 90, display HP is internal HP / 10)
-            display_lost = (dmg + 9) // 10  # Convert internal HP to display HP
+            # AWBW uses float display HP (2.5, not int 2), so use dmg/10.0
+            display_lost = max(1, int(dmg / 10.0 + 0.5))  # Rounded display HP lost
             self._apply_co_meter_from_display_buckets_lost(attacker, defender, display_lost)
             self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
 
@@ -1445,12 +1448,10 @@ class GameState:
         })
 
     def _grant_co_meter_credit(self, seat: int, credit: int) -> None:
-        """Add CO-meter credit capped at SCOP ceiling; skips during COP/SCOP window."""
+        """Add CO-meter credit capped at SCOP ceiling."""
         if credit <= 0:
             return
         co = self.co_states[int(seat)]
-        if co.cop_active or co.scop_active:
-            return
         ceiling = co._scop_threshold
         co.power_bar = min(ceiling, co.power_bar + int(credit))
 
@@ -1487,13 +1488,15 @@ class GameState:
         cs = int(base_cs * (100 + mod_s) / 100)
         # Victim seat: damage dealt → CO meter (AWBW: 9000 funds = 1 star)
         # display_buckets_lost is internal HP (1-100), so divisor is 90 (9000/100)
+        # Victim seat: damage dealt -> CO meter (AWBW: 9000 funds = 1 star)
+        # display_buckets_lost is display HP (1-10), so divisor is 9
+        # (9000 funds / 1000 cost = 9 display HP per star)
         credit_v = _rounded_div_half_up(display_buckets_lost * cv, 90)
         # Striker seat: 50% credit for damage dealt (AWBW: half of victim)
-        # divisor is 180 (18000/100)
+        # divisor is 18 (half of 9, x 10 for engine units)
         credit_s = _rounded_div_half_up(display_buckets_lost * cs, 180)
         self._grant_co_meter_credit(int(victim_unit.player), credit_v)
         self._grant_co_meter_credit(int(striker_unit.player), credit_s)
-
     def _apply_war_bonds_payout(
         self,
         damage_dealer: Unit,
