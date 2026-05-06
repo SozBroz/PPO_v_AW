@@ -1168,10 +1168,12 @@ def _run_replay_instrumented(
 
 def _classify(exc: Optional[Exception]) -> tuple[str, str, str]:
     """Return (class, exception_type, message) for the register row."""
+    print("[DEBUG] Checking exc is None", file=sys.stderr)
     if exc is None:
         return CLS_OK, "", ""
     et = type(exc).__name__
     msg = str(exc)
+    print("[DEBUG] Checking StateMismatchError", file=sys.stderr)
     if isinstance(exc, StateMismatchError):
         return _classify_state_mismatch(exc.diff_summary), et, msg
     if isinstance(exc, UnsupportedOracleAction):
@@ -1511,6 +1513,7 @@ def _audit_one(
     # ``enable_state_mismatch`` is False (the standard 936 audit path).
     # ``enable_state_mismatch`` still controls only the per-envelope
     # state-diff snapshotting; the pin is a separate, cheap precompute.
+    print("[DEBUG] About to call _run_replay_instrumented", file=sys.stderr)
     exc = _run_replay_instrumented(
         state,
         envelopes,
@@ -1520,15 +1523,18 @@ def _audit_one(
         enable_state_mismatch=enable_state_mismatch,
         hp_internal_tolerance=state_mismatch_hp_tolerance,
     )
+    print("[DEBUG] Setting envelopes_total", file=sys.stderr)
     base.envelopes_total = progress.envelopes_total
     base.envelopes_applied = progress.envelopes_applied
     base.actions_applied = progress.actions_applied
 
+    print("[DEBUG] Checking exc is None", file=sys.stderr)
     if exc is None:
         base.status = "ok"
         base.cls = CLS_OK
         return base
 
+    print("[DEBUG] Checking StateMismatchError", file=sys.stderr)
     if isinstance(exc, StateMismatchError):
         # Snapshot-diff lane: NOT a first oracle divergence — the engine
         # consumed every action without raising; the divergence is silent
@@ -1756,11 +1762,6 @@ def main() -> int:
                         enable_state_mismatch=args.enable_state_mismatch,
                         state_mismatch_hp_tolerance=args.state_mismatch_hp_tolerance,
                     )
-    except Exception as inner_exc:
-        import traceback as _tb2
-        print(f"[DEBUG] Inner exception: {inner_exc}", file=sys.stderr)
-        _tb2.print_exc(file=sys.stderr)
-        raise
             except Exception as exc:  # safety net — never let one zip stop the batch
                 row = AuditRow(
                     games_id=gid, map_id=_meta_int(meta, "map_id"),
