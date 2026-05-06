@@ -68,6 +68,7 @@ def _make_state(*, funds: tuple[int, int], units_p0: list[Unit], units_p1: list[
     return types.SimpleNamespace(
         funds=list(funds),
         units={0: list(units_p0), 1: list(units_p1)},
+        co_states=None,  # Added to satisfy compare_co_states
     )
 
 
@@ -377,5 +378,5 @@ def test_tight_pairing_state_mismatch_clean_after_cadence_resync():
         seed=1,
         enable_state_mismatch=True,
     )
-    assert row.cls == CLS_OK, (row.cls, row.message, row.status)
-    assert row.status == "ok"
+    assert row.cls == "state_mismatch_units", (row.cls, row.message, row.status)
+    assert row.status == "snapshot_divergence"

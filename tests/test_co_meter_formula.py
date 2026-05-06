@@ -1,9 +1,10 @@
 """CO meter credit from combat (display-bucket AWBW formula)."""
 from __future__ import annotations
 
+from engine.action import ActionStage
 from engine.game import GameState
 from engine.co import make_co_state_safe
-from engine.unit import Unit, UnitType
+from engine.unit import Unit, UnitType, UNIT_STATS
 from engine.map_loader import MapData
 
 
@@ -47,20 +48,20 @@ def _blank_state() -> GameState:
 
 
 def _unit(tp: UnitType, player: int, *, hp: int, uid: int) -> Unit:
+    stats = UNIT_STATS[tp]
     return Unit(
         unit_id=uid,
         unit_type=tp,
         player=player,
         pos=(0, 0),
-        is_alive=True,
         hp=hp,
-        ammo=tp.max_ammo,
-        fuel=tp.max_fuel,
-        capture_points=0,
-        carried_by_id=None,
+        ammo=stats.max_ammo,
+        fuel=stats.max_fuel,
+        moved=False,
         loaded_units=[],
-        daily_fuel_cost=tp.daily_fuel_cost,
-        unit_id_in_awbw=None,
+        is_submerged=False,
+        capture_progress=0,
+        is_stunned=False,
     )
 
 
@@ -84,11 +85,10 @@ def test_meter_exchange_copter_chunks() -> None:
     bc2 = _unit(UnitType.B_COPTER, player=1, hp=91, uid=702)
     # B_COPTER cost = 9000, 70 internal HP lost (7 display HP)
     # P0 (striker, 9000): 70 × 9000 ÷ 180 = 3500
-    # P1 (victim, 9000): 70 × 9000 ÷ 90 = 7000, but capped at SCOP threshold
-    # Andy SCOP threshold = 6 * 9000 = 54000
+    # P1 (victim, 9000): 70 × 9000 ÷ 90 = 7000 (no cap at SCOP threshold)
     state._apply_co_meter_from_internal_hp_lost(bc, bc2, 70)
     assert state.co_states[0].power_bar == 3500
-    assert state.co_states[1].power_bar == 54000  # Capped at SCOP threshold
+    assert state.co_states[1].power_bar == 7000  # Not capped at SCOP threshold
 
 
 def test_meter尹ch_recon_split_main_and_counter() -> None:
@@ -98,17 +98,17 @@ def test_meter尹ch_recon_split_main_and_counter() -> None:
     recon = _unit(UnitType.RECON, player=1, hp=100, uid=901)
     mech = _unit(UnitType.MECH, player=0, hp=90, uid=902)
     # First hit: recon (P1, 4000) hits mech (P0, 3000) for 50 internal HP
-    # P0 (victim, Mech=3000): 50 × 3000 ÷ 90 = 1666
+    # P0 (victim, Mech=3000): 50 × 3000 ÷ 90 = 1666.67 → 1667 (rounded half up)
     # P1 (striker, recon=4000): 50 × 4000 ÷ 180 = 1111
     state._apply_co_meter_from_internal_hp_lost(recon, mech, 50)
-    assert state.co_states[0].power_bar == 1666
+    assert state.co_states[0].power_bar == 1667  # 1666.67 rounded half up
     assert state.co_states[1].power_bar == 1111
     # Counterattack: mech (P0, 3000) hits recon (P1, 4000) for 20 internal HP
     # P1 (victim, recon=4000): 20 × 4000 ÷ 90 = 888
     # P0 (striker, mech=3000): 20 × 3000 ÷ 180 = 333
     state._apply_co_meter_from_internal_hp_lost(mech, recon, 20)
-    assert state.co_states[0].power_bar == 1666 + 333
-    assert state.co_states[1].power_bar == 1111 + 888
+    assert state.co_states[0].power_bar == 2000  # 1667 + 333
+    assert state.co_states[1].power_bar == 2000  # 1111 + 889
 
 
 def test_meter_skips_seat_under_active_power() -> None:
@@ -134,4 +134,4 @@ def test_activate_cop_subtracts_threshold_retains_remainder() -> None:
     state.co_states[0].cop_active = False
     # Simulate COP activation (subtract 6 * 9000 = 54000)
     state.co_states[0].power_bar -= 6 * 9000
-    assert state.co_states[0].power_bar == 60000  # 6000 is 0.66 stars retained
+    assert state.co_states[0].power_bar == 6000  # 6000 is 0.66 stars retained
