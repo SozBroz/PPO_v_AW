@@ -366,11 +366,14 @@ def compare_co_states(
     Engine ``COState`` carries ``cop_stars``, ``scop_stars`` (threshold stars),
     ``cop_active``, ``scop_active``, and ``power_bar`` (current charge in 0..max).
 
-    Comparison logic:
-    - PHP ``co_power // 1000`` gives stars charged (2500 → 2 stars)
-    - Engine ``power_bar // 1000`` gives stars charged (3000 → 3 stars)
-    - We compare these normalized values, allowing a tolerance of 1 star
-      to absorb minor timing differences (end-of-turn vs start-of-turn snapshots).
+    Scaling:
+    - PHP ``co_power``: 1000 per star (2500 → 2.5 stars)
+    - Engine ``power_bar``: 100 per star (250 → 2.5 stars)
+    - Empirical ratio: PHP 10x engine units (2500/250 = 10)
+    - Engine thresholds: ``stars * 9000 + uses * 1800`` (from co.py)
+
+    Comparison: Convert PHP to engine-scale by dividing by 10, then compare
+    against ``power_bar`` directly with a tolerance of 100 engine units (1 star).
     """
     out: list[str] = []
     players = php_frame.get("players") or {}
@@ -400,15 +403,15 @@ def compare_co_states(
             php_charge = _php_int_optional(pl.get("co_power"), 0)
             if php_charge > 0:
                 # PHP co_power: 1000 per star (2500 = 2.5 stars)
-                # Engine power_bar: ~100 per star (250 = 2.5 stars)
-                # Empirical ratio: PHP 2500 ~ engine 250 (factor of 10)
-                php_scaled = php_charge / 10.0  # Convert to engine-scale units
+                # Engine power_bar: 100 per star (250 = 2.5 stars)
+                # Empirical ratio: PHP 10x engine units (2500/250 = 10)
+                php_engine = php_charge / 10.0  # Convert to engine-scale (100/star)
                 eng_bar = float(co_state.power_bar)
-                # Allow ~1000 PHP units (~1 star) tolerance for timing differences
-                if abs(php_scaled - eng_bar) > 1000.0:
+                # Tolerance: 100 engine units = 1 star, to absorb timing differences
+                if abs(php_engine - eng_bar) > 100.0:
                     out.append(
                         f"P{eng} charge_mismatch: "
-                        f"php={php_charge/1000.0:.1f} stars (raw={php_charge}, scaled={php_scaled:.0f}) "
+                        f"php={php_charge/1000.0:.1f} stars (raw={php_charge}, engine_scale={php_engine:.0f}) "
                         f"engine={eng_bar/100.0:.1f} stars (power_bar={co_state.power_bar})"
                     )
     return out
@@ -422,8 +425,19 @@ def compare_weather(
 
     PHP: ``weather_type`` / ``weather_code`` (numeric code or string).
     Engine: ``state.weather`` is "clear", "rain", or "snow".
+
+    Timing note: the engine advances weather at **end of turn** (when
+    ``co_weather_segments_remaining`` counts down to 0), while the PHP
+    snapshot captures weather at **start of turn**.  When CO-induced
+    weather is active (``co_weather_segments_remaining > 0``), the two
+    sides are out of sync by one turn, so we skip the comparison for that
+    window.
     """
     out: list[str] = []
+    # Skip comparison when CO-induced weather is active — timing mismatch
+    # between engine (end-of-turn advancement) and PHP (start-of-turn snapshot).
+    if state.co_weather_segments_remaining > 0:
+        return out
     php_weather = php_frame.get("weather_type") or php_frame.get("weather_code")
     if php_weather is None:
         return out
