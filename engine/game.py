@@ -15,7 +15,7 @@ from typing import Callable, Optional, Union
 
 from engine.unit import Unit, UnitType, UNIT_STATS, idle_start_of_day_fuel_drain
 from engine.unit_cap import alive_owned_unit_count
-from engine.terrain import get_terrain, property_terrain_id_after_owner_change
+from engine.terrain import get_terrain, property_terrain_id_after_owner_change, TERRAIN_TABLE
 from engine.co import COState, make_co_state_safe
 from engine.map_loader import MapData, PropertyState
 from engine.predeployed import specs_to_initial_units
@@ -629,6 +629,13 @@ class GameState:
             if moved_previous_turn and drain > 0:
                 drain = 0
             unit.fuel = max(0, unit.fuel - drain)
+            # AWBW: naval units on water (sea/shoal) get +1 fuel per day.
+            # This happens at the start of the owner's turn.
+            if stats.unit_class == "naval":
+                tid = self.map_data.terrain[unit.pos[0]][unit.pos[1]]
+                tinfo = TERRAIN_TABLE.get(tid)
+                if tinfo and ("Sea" in tinfo.name or "Shoal" in tinfo.name):
+                    unit.fuel = min(stats.max_fuel, unit.fuel + 1)
             if unit.fuel == 0 and stats.unit_class in ("air", "copter", "naval"):
                 prop = self.get_property_at(*unit.pos)
                 refuel_exempt = (
@@ -639,6 +646,12 @@ class GameState:
                         or (stats.unit_class in ("air", "copter") and prop.is_airport)
                     )
                 )
+                # AWBW: naval units on water (sea/shoal) also survive
+                if not refuel_exempt and stats.unit_class == "naval":
+                    tid = self.map_data.terrain[unit.pos[0]][unit.pos[1]]
+                    tinfo = TERRAIN_TABLE.get(tid)
+                    if tinfo and ("Sea" in tinfo.name or "Shoal" in tinfo.name):
+                        refuel_exempt = True
                 if not refuel_exempt:
                     unit.hp = 0   # crash / sink
 
