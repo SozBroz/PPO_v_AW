@@ -399,15 +399,17 @@ def compare_co_states(
         if not co_state.cop_active and not co_state.scop_active:
             php_charge = _php_int_optional(pl.get("co_power"), 0)
             if php_charge > 0:
-                # Both values are in units of 1000 per star; convert to integer stars
-                php_stars = php_charge // 1000
-                eng_stars = co_state.power_bar // 1000
-                # Allow 1-star tolerance (timing: snapshot at end-of-turn vs start-of-turn)
-                if abs(php_stars - eng_stars) > 1:
+                # PHP co_power: 1000 per star (2500 = 2.5 stars)
+                # Engine power_bar: ~100 per star (250 = 2.5 stars)
+                # Empirical ratio: PHP 2500 ~ engine 250 (factor of 10)
+                php_scaled = php_charge / 10.0  # Convert to engine-scale units
+                eng_bar = float(co_state.power_bar)
+                # Allow ~1000 PHP units (~1 star) tolerance for timing differences
+                if abs(php_scaled - eng_bar) > 1000.0:
                     out.append(
                         f"P{eng} charge_mismatch: "
-                        f"php={php_stars} stars (raw={php_charge}) "
-                        f"engine={eng_stars} stars (power_bar={co_state.power_bar})"
+                        f"php={php_charge/1000.0:.1f} stars (raw={php_charge}, scaled={php_scaled:.0f}) "
+                        f"engine={eng_bar/100.0:.1f} stars (power_bar={co_state.power_bar})"
                     )
     return out
 

@@ -768,6 +768,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--target-tau", type=float, default=None)
     ap.add_argument("--target-clip", type=float, default=5.0)
 
+    ap.add_argument(
+        "--no-learner",
+        action="store_true",
+        help="Actors only — do not train a value net. Transitions are still produced and (on the orchestrator) polled from remote dirs.",
+    )
+
     # Freeze schedule.
     ap.add_argument("--freeze-encoder", action="store_true")
     ap.add_argument("--unfreeze-last-resblocks", type=int, default=0)
@@ -972,27 +978,29 @@ def main() -> None:
     target = copy.deepcopy(online)
     replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
 
-    learner_cfg = RheaValueLearnerConfig(
-        value_lr=args.value_lr,
-        value_batch_size=args.value_batch_size,
-        replay_buffer_size=args.replay_size,
-        min_replay_before_train=args.min_replay_before_train,
-        updates_per_real_turn=args.updates_per_turn,
-        gamma_turn=args.gamma_turn,
-        gradient_clip_norm=args.grad_clip,
-        weight_decay=args.weight_decay,
-        target_update_interval=args.target_update_interval,
-        target_tau=args.target_tau,
-        target_clip=args.target_clip,
-        freeze_encoder=args.freeze_encoder,
-        unfreeze_last_resblocks=args.unfreeze_last_resblocks,
-    )
-    learner = RheaValueLearner(online, target, replay, learner_cfg, device=args.device)
+    learner = None
+    if not args.no_learner:
+        learner_cfg = RheaValueLearnerConfig(
+            value_lr=args.value_lr,
+            value_batch_size=args.value_batch_size,
+            replay_buffer_size=args.replay_size,
+            min_replay_before_train=args.min_replay_before_train,
+            updates_per_real_turn=args.updates_per_turn,
+            gamma_turn=args.gamma_turn,
+            gradient_clip_norm=args.grad_clip,
+            weight_decay=args.weight_decay,
+            target_update_interval=args.target_update_interval,
+            target_tau=args.target_tau,
+            target_clip=args.target_clip,
+            freeze_encoder=args.freeze_encoder,
+            unfreeze_last_resblocks=args.unfreeze_last_resblocks,
+        )
+        learner = RheaValueLearner(online, target, replay, learner_cfg, device=args.device)
 
     # Save an initial refresh checkpoint so actors can load learner-format .pt.
     # This must be done BEFORE starting actors so they have something to load.
     latest_path = output_dir / "value_rhea_latest.pt"
-    _save_checkpoint(latest_path, online, learner_cfg, 0)
+    _save_checkpoint(latest_path, online, learner_cfg if learner else None, 0)
     print(json.dumps({"event": "initial_checkpoint_saved", "path": str(latest_path)}), flush=True)
 
     ctx = mp.get_context("spawn")
@@ -1099,7 +1107,9 @@ def main() -> None:
                 replay.add(t)
                 transitions += 1
 
-                train_logs = learner.maybe_train_after_turn()
+                train_logs = []
+                if learner:
+                    train_logs = learner.maybe_train_after_turn()
                 if train_logs:
                     last_log = train_logs[-1]
 
@@ -1120,8 +1130,9 @@ def main() -> None:
                         f.write(json.dumps(log_entry) + "\n")
 
                 if args.save_every_transitions > 0 and transitions % args.save_every_transitions == 0:
-                    _save_checkpoint(latest_path, online, learner_cfg, transitions)
-                    _save_checkpoint(output_dir / f"value_rhea_{_timestamp_str()}.pt", online, learner_cfg, transitions)
+                    if learner:
+                        _save_checkpoint(latest_path, online, learner_cfg, transitions)
+                    _save_checkpoint(output_dir / f"value_rhea_{_timestamp_str()}.pt", online, learner_cfg if learner else None, transitions)
 
             elif mtype == "game_done":
                 games_done += 1
@@ -1153,7 +1164,8 @@ def main() -> None:
 
     finally:
         stop_event.set()
-        _save_checkpoint(latest_path, online, learner_cfg, transitions)
+        if learner:
+            _save_checkpoint(latest_path, online, learner_cfg, transitions)
         for p in procs:
             p.join(timeout=5.0)
             if p.is_alive():
