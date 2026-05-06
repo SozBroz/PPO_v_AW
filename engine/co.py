@@ -75,32 +75,50 @@ class COState:
         """
         Return cost modifier in % (positive = cheaper) for a given unit type.
         e.g. Kanbei: {"all": 20} → units cost 120% of base (modifier = 20).
+
+        In co_data.json, unit_cost_modifiers lives inside "day_to_day",
+        not at the top level. We check there first, then fall back to
+        top-level (legacy) and active-power scopes.
         """
         stats = UNIT_STATS.get(ut)
         if stats is None:
             return 0
         cls = stats.unit_class
 
+        def _lookup(mods: dict) -> Optional[int]:
+            """Lookup cls or 'all' in mods dict; return int or None."""
+            if not mods:
+                return None
+            if cls in mods:
+                return int(mods[cls])
+            if "all" in mods:
+                return int(mods["all"])
+            return None
+
         # Active power modifiers take priority
         if self.cop_active and "cop" in self._data:
             mods = self._data["cop"].get("unit_cost_modifiers", {})
-            if cls in mods:
-                return int(mods[cls])
-            if "all" in mods:
-                return int(mods["all"])
+            r = _lookup(mods)
+            if r is not None:
+                return r
         if self.scop_active and "scop" in self._data:
             mods = self._data["scop"].get("unit_cost_modifiers", {})
-            if cls in mods:
-                return int(mods[cls])
-            if "all" in mods:
-                return int(mods["all"])
+            r = _lookup(mods)
+            if r is not None:
+                return r
 
-        # Day-to-day modifiers
+        # Day-to-day modifiers (where unit_cost_modifiers actually lives)
+        d2d = self._data.get("day_to_day", {})
+        mods = d2d.get("unit_cost_modifiers", {})
+        r = _lookup(mods)
+        if r is not None:
+            return r
+
+        # Legacy: top-level (should not be hit with current co_data.json)
         mods = self._data.get("unit_cost_modifiers", {})
-        if cls in mods:
-            return int(mods[cls])
-        if "all" in mods:
-            return int(mods["all"])
+        r = _lookup(mods)
+        if r is not None:
+            return r
         return 0
 
     def movement_modifier_for_unit(self, ut: UnitType) -> int:
@@ -313,15 +331,17 @@ class COState:
 
     @property
     def _cop_threshold(self) -> int:
-        """COP activation threshold (stars * 9000 + uses * 1800)."""
+        """COP activation threshold (stars * 9000 + uses * 1800), capped at 10 uses."""
         if self.cop_stars is None:
             return 0
-        return self.cop_stars * 9000 + self.power_uses * 1800
+        uses = min(self.power_uses, 10)
+        return self.cop_stars * 9000 + uses * 1800
 
     @property
     def _scop_threshold(self) -> int:
-        """SCOP activation threshold (stars * 9000 + uses * 1800)."""
-        return self.scop_stars * 9000 + self.power_uses * 1800
+        """SCOP activation threshold (stars * 9000 + uses * 1800), capped at 10 uses."""
+        uses = min(self.power_uses, 10)
+        return self.scop_stars * 9000 + uses * 1800
 
 
 def make_co_state(co_id: int) -> COState:

@@ -91,7 +91,8 @@ def _maybe_recompile_cython() -> None:
 
 
 # Run the check before importing rl.* (which may import the .pyd files)
-_maybe_recompile_cython()
+# Commented out to avoid rebuild race conditions during multi-process training:
+# _maybe_recompile_cython()
 
 import numpy as np
 import torch
@@ -185,8 +186,51 @@ def _save_checkpoint(path: Path, model: AWBWValueNet, learner_cfg: RheaValueLear
     )
     os.replace(tmp, path)
 
-
 def _timestamp_str() -> str:
+    """Return a compact timestamp string for checkpoint naming."""
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+
+def _save_weight_delta(path: Path, model: AWBWValueNet, base_state_dict: dict, step: int) -> None:
+    """Save weight deltas (current - base) for federated averaging."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = model.state_dict()
+    delta = {k: v - base_state_dict[k] for k, v in current.items()}
+    tmp = path.with_suffix(".tmp")
+    torch.save(
+        {
+            "delta": delta,
+            "step": step,
+            "timestamp": time.time(),
+        },
+        tmp,
+    )
+    os.replace(tmp, path)
+
+
+def _load_weight_deltas(remote_dir: Path) -> list[tuple[int, dict[str, torch.Tensor], Path]]:
+    """Load all pending weight deltas from remote_dir/fleet/*/weights/."""
+    import glob
+
+    pattern = str(remote_dir / "fleet" / "*" / "weights" / "*.pt")
+    files = sorted(glob.glob(pattern), key=os.path.getmtime)
+
+    results = []
+    for fpath in files:
+        f = Path(fpath)
+        try:
+            ckpt = torch.load(f, map_location="cpu")
+            step = int(ckpt["step"])
+            delta = ckpt["delta"]
+            results.append((step, delta, f))
+        except Exception as e:
+            print(json.dumps({
+                "event": "weight_delta_read_error",
+                "file": str(f),
+                "error": str(e),
+            }), flush=True)
+    return results
     """Return a compact timestamp string for checkpoint naming."""
     import time
     return time.strftime("%Y%m%d_%H%M%S")
@@ -232,6 +276,230 @@ def _transition_to_payload(t: RheaTransition) -> dict[str, Any]:
         "value_after_at_search_time": float(t.value_after_at_search_time),
         "search_score": float(t.search_score),
     }
+
+
+def _compute_gradients_for_transitions(
+    model: AWBWValueNet,
+    transitions: list[RheaTransition],
+    device: str,
+    cfg: RheaValueLearnerConfig,
+) -> dict[str, list[float]] | None:
+    """Compute gradients for a batch of transitions using the current model.
+    
+    Returns a dict mapping parameter names to gradient tensors (as lists for JSON serialization).
+    Returns None if no trainable parameters or transitions.
+    """
+    if not transitions:
+        return None
+    
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if not trainable_params:
+        return None
+    
+    # Convert transitions to batch tensors
+    spatial_before = torch.as_tensor(
+        np.stack([t.spatial_before for t in transitions]),
+        dtype=torch.float32,
+        device=device
+    )
+    scalars_before = torch.as_tensor(
+        np.stack([t.scalars_before for t in transitions]),
+        dtype=torch.float32,
+        device=device
+    )
+    spatial_after = torch.as_tensor(
+        np.stack([t.spatial_after for t in transitions]),
+        dtype=torch.float32,
+        device=device
+    )
+    scalars_after = torch.as_tensor(
+        np.stack([t.scalars_after for t in transitions]),
+        dtype=torch.float32,
+        device=device
+    )
+    done = torch.as_tensor(
+        [bool(t.done) for t in transitions],
+        dtype=torch.float32,
+        device=device
+    )
+    winner = torch.as_tensor(
+        [int(t.winner) if t.winner is not None else -1 for t in transitions],
+        dtype=torch.int64,
+        device=device
+    )
+    acting_seat = torch.as_tensor(
+        [int(t.acting_seat) for t in transitions],
+        dtype=torch.int64,
+        device=device
+    )
+    
+    # Compute loss (same as RheaValueLearner.train_one_batch)
+    from torch.nn import functional as F
+    
+    pred_logits = model(spatial_before, scalars_before)
+    
+    with torch.no_grad():
+        next_logits = model(spatial_after, scalars_after)
+        # Detach to avoid computing gradients through target
+        next_logits = next_logits.detach()
+        
+        win_target = torch.where(
+            winner == -1,
+            torch.tensor(0.5, device=device).expand_as(winner),
+            (winner == acting_seat).float(),
+        )
+        
+        next_win_prob = torch.sigmoid(next_logits)
+        immediate_win = win_target * done
+        gamma = cfg.gamma_turn if cfg.gamma_turn is not None else 0.99
+        td_target_win = immediate_win + gamma * next_win_prob * (1.0 - done)
+        
+        if cfg.target_clip is not None:
+            c = float(cfg.target_clip)
+            td_target_win = torch.clamp(td_target_win, 0.0, 1.0)
+    
+    loss = F.binary_cross_entropy_with_logits(pred_logits, td_target_win)
+    
+    # Compute gradients
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+    
+    # Collect gradients (only trainable parameters)
+    grads = {}
+    for name, p in model.named_parameters():
+        if p.requires_grad and p.grad is not None:
+            grads[name] = p.grad.detach().cpu().flatten().tolist()
+    
+    return grads
+
+
+def _write_gradients_to_shared(
+    actor_id: int,
+    grads: dict[str, list[float]],
+    step_num: int,
+    shared_root: str = "Z:",
+) -> str | None:
+    """Write gradient deltas to shared filesystem for main to aggregate.
+    
+    Returns the path where gradients were written, or None on failure.
+    """
+    import json
+    import tempfile
+    
+    try:
+        grad_dir = Path(shared_root) / "fleet" / f"actor-{actor_id}" / "gradients"
+        grad_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Use atomic write: write to temp, then rename
+        grad_data = {
+            "actor_id": actor_id,
+            "step": step_num,
+            "timestamp": time.time(),
+            "gradients": grads,
+        }
+        
+        tmp_path = grad_dir / f"grad_{step_num}_{int(time.time())}.tmp"
+        final_path = grad_dir / f"grad_{step_num}_{int(time.time())}.json"
+        
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(grad_data, f)
+        
+        os.replace(str(tmp_path), str(final_path))
+        return str(final_path)
+    
+    except Exception as e:
+        print(json.dumps({
+            "event": "gradient_write_error",
+            "actor_id": actor_id,
+            "error": str(e),
+        }), flush=True)
+        return None
+
+
+def _apply_gradients_to_model(
+    model: AWBWValueNet,
+    grads_dict: dict[str, torch.Tensor],
+    opt: torch.optim.Optimizer,
+    clip_norm: float = 1.0,
+) -> float:
+    """Apply aggregated gradients to model.
+    
+    Returns gradient norm.
+    """
+    # First, set gradients on model
+    for name, p in model.named_parameters():
+        if p.requires_grad and name in grads_dict:
+            p.grad = grads_dict[name].to(p.device)
+    
+    # Clip and step
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        [p for p in model.parameters() if p.requires_grad],
+        clip_norm,
+    )
+    opt.step()
+    opt.zero_grad(set_to_none=True)
+    
+    return float(grad_norm.detach().cpu().item()) if torch.is_tensor(grad_norm) else float(grad_norm)
+
+
+def _poll_gradients_from_shared(
+    shared_root: str = "Z:",
+    last_poll_time: dict[str, float] | None = None,
+) -> tuple[list[tuple[int, dict[str, torch.Tensor], float]], dict[str, float]]:
+    """Poll shared filesystem for gradient files from actors.
+    
+    Returns:
+        List of tuples: (actor_id, gradients_dict, timestamp)
+        Updated last_poll_time dict
+    """
+    import json
+    import glob
+    
+    if last_poll_time is None:
+        last_poll_time = {}
+    
+    shared_path = Path(shared_root)
+    if not shared_path.exists():
+        return [], last_poll_time
+    
+    # Pattern: Z:/fleet/*/gradients/*.json
+    pattern = str(shared_path / "fleet" / "*" / "gradients" / "*.json")
+    grad_files = glob.glob(pattern)
+    
+    results = []
+    for fpath in grad_files:
+        f = Path(fpath)
+        try:
+            mtime = f.stat().st_mtime
+            if fpath in last_poll_time and last_poll_time[fpath] >= mtime:
+                continue
+            
+            with open(f, "r", encoding="utf-8") as f:
+                grad_data = json.load(f)
+            
+            actor_id = grad_data["actor_id"]
+            timestamp = grad_data.get("timestamp", mtime)
+            
+            # Convert lists back to tensors
+            grads_dict = {}
+            for name, grad_list in grad_data["gradients"].items():
+                grads_dict[name] = torch.tensor(grad_list)
+            
+            results.append((actor_id, grads_dict, timestamp))
+            last_poll_time[fpath] = mtime
+            
+            # Mark as consumed by renaming
+            done_path = f.with_suffix(".json.done")
+            os.rename(str(f), str(done_path))
+            
+        except Exception as e:
+            print(json.dumps({
+                "event": "gradient_read_error",
+                "file": str(f),
+                "error": str(e),
+            }), flush=True)
+    
+    return results, last_poll_time
 
 
 def _maybe_disable_cop_for_seat(co_state, disable_prob: float = 0.10) -> bool:
@@ -545,6 +813,15 @@ def _actor_loop(
                     "message": "dual_gradient_hist_prob > 0 but hist checkpoint not loaded; disabling hist mode",
                 }), flush=True)
 
+        # Gradient pushing state (A3C-style)
+        push_gradients = bool(getattr(args, "push_gradients", False))
+        local_transitions: list[RheaTransition] = []
+        gradient_step = 0
+        learner_cfg_for_grads = RheaValueLearnerConfig(
+            gamma_turn=args.gamma_turn,
+            target_clip=args.target_clip,
+        )
+
         while not stop_event.is_set():
             try:
                 # Decide if this game uses historical checkpoint opponent
@@ -635,26 +912,57 @@ def _actor_loop(
                             search_score=float(result.score),
                         )
 
-                        out_q.put(
-                            {
-                                "type": "transition",
-                                "actor_id": actor_id,
-                                "transition": _transition_to_payload(t),
-                                "log": {
-                                    "day": day,
-                                    "acting": acting,
-                                    "reward_turn": reward_turn,
-                                    "search_score": float(result.score),
-                                    "phi_delta_search": float(result.breakdown.phi_delta),
-                                    "value_after": float(result.breakdown.value),
-                                    "initial_best_score": result.initial_best_score,
-                                    "evolved_gain": result.evolved_gain,
-                                    "illegal_genes": int(result.illegal_genes),
-                                    "actions": len(result.actions),
-                                    "use_hist_checkpoint": use_hist_checkpoint,
-                                },
-                            }
-                        )
+                        # If pushing gradients, accumulate transitions locally
+                        if push_gradients:
+                            local_transitions.append(t)
+                            # Compute and push gradients when batch is ready
+                            if len(local_transitions) >= args.gradient_batch_size:
+                                grads = _compute_gradients_for_transitions(
+                                    value_model,
+                                    local_transitions,
+                                    actor_device,
+                                    learner_cfg_for_grads,
+                                )
+                                if grads:
+                                    gradient_step += 1
+                                    grad_path = _write_gradients_to_shared(
+                                        actor_id,
+                                        grads,
+                                        gradient_step,
+                                        shared_root=args.gradient_shared_root,
+                                    )
+                                    if grad_path:
+                                        print(json.dumps({
+                                            "event": "gradients_pushed",
+                                            "actor_id": actor_id,
+                                            "step": gradient_step,
+                                            "path": grad_path,
+                                            "num_transitions": len(local_transitions),
+                                        }), flush=True)
+                                local_transitions = []
+                        else:
+                            # Original behavior: send transition to main process
+                            out_q.put(
+                                {
+                                    "type": "transition",
+                                    "actor_id": actor_id,
+                                    "transition": _transition_to_payload(t),
+                                    "log": {
+                                        "day": day,
+                                        "acting": acting,
+                                        "reward_turn": reward_turn,
+                                        "search_score": float(result.score),
+                                        "phi_delta_search": float(result.breakdown.phi_delta),
+                                        "value_after": float(result.breakdown.value),
+                                        "initial_best_score": result.initial_best_score,
+                                        "evolved_gain": result.evolved_gain,
+                                        "illegal_genes": int(result.illegal_genes),
+                                        "actions": len(result.actions),
+                                        "use_hist_checkpoint": use_hist_checkpoint,
+                                    },
+                                }
+                            )
+
                         transitions_sent += 1
                         game_turns += 1
 
@@ -900,6 +1208,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--total-transitions", type=int, default=100_000)
     ap.add_argument("--save-every-transitions", type=int, default=500)  # Save more frequently
     ap.add_argument("--log-every-transitions", type=int, default=100)
+
+    # Distributed gradient pushing (A3C-style)
+    ap.add_argument("--push-gradients", action="store_true",
+                      help="Enable actors to compute gradients locally and push to shared filesystem for main to aggregate")
+    ap.add_argument("--gradient-batch-size", type=int, default=32,
+                      help="Number of transitions to accumulate before computing and pushing gradients (default: 32)")
+    ap.add_argument("--gradient-shared-root", type=str, default="Z:",
+                      help="Shared filesystem root for gradient exchange (default: Z:)")
+    ap.add_argument("--gradient-poll-interval", type=float, default=30.0,
+                      help="Seconds between main polling for gradient files (default: 30)")
+
     # Remote transition polling (multi-machine)
     ap.add_argument("--remote-transition-dir", type=str, default=None,
                       help="Directory to poll for remote transition files (default: <shared-root>/fleet/*/transitions/)")
@@ -979,6 +1298,7 @@ def main() -> None:
     replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
 
     learner = None
+    learner_cfg = None
     if not args.no_learner:
         learner_cfg = RheaValueLearnerConfig(
             value_lr=args.value_lr,
@@ -1002,6 +1322,27 @@ def main() -> None:
     latest_path = output_dir / "value_rhea_latest.pt"
     _save_checkpoint(latest_path, online, learner_cfg if learner else None, 0)
     print(json.dumps({"event": "initial_checkpoint_saved", "path": str(latest_path)}), flush=True)
+
+    # Gradient aggregation state (for push-gradients mode)
+    gradient_poll_interval = float(getattr(args, "gradient_poll_interval", 30.0))
+    last_gradient_poll_time = 0.0
+    gradient_poll_mtime: dict[str, float] = {}
+    gradient_step = 0
+    optimizer_for_gradients = None
+    
+    if args.push_gradients and learner is not None:
+        # Create optimizer for applying remote gradients
+        params = [p for p in online.parameters() if p.requires_grad]
+        optimizer_for_gradients = torch.optim.AdamW(
+            params,
+            lr=learner_cfg.value_lr,
+            weight_decay=learner_cfg.weight_decay,
+        )
+        print(json.dumps({
+            "event": "gradient_aggregation_ready",
+            "gradient_poll_interval": gradient_poll_interval,
+            "gradient_shared_root": args.gradient_shared_root,
+        }), flush=True)
 
     ctx = mp.get_context("spawn")
     out_q: mp.Queue = ctx.Queue(maxsize=int(args.queue_size))
@@ -1053,7 +1394,7 @@ def main() -> None:
                     print(json.dumps({"event": "all_actors_dead", "transitions": transitions}), flush=True)
                     break
 
-                # Poll remote transition files
+                # Poll remote transition files (traditional mode)
                 now = time.time()
                 if poll_interval > 0 and now - last_poll_time >= poll_interval:
                     try:
@@ -1078,6 +1419,70 @@ def main() -> None:
                             "event": "remote_poll_error",
                             "error": str(e),
                         }), flush=True)
+
+                # Poll for gradient files (push-gradients mode)
+                if args.push_gradients and optimizer_for_gradients is not None:
+                    now = time.time()
+                    if now - last_gradient_poll_time >= gradient_poll_interval:
+                        try:
+                            gradient_results, gradient_poll_mtime = _poll_gradients_from_shared(
+                                shared_root=args.gradient_shared_root,
+                                last_poll_time=gradient_poll_mtime,
+                            )
+                            
+                            if gradient_results:
+                                # Aggregate gradients from all actors
+                                aggregated_grads: dict[str, torch.Tensor] = {}
+                                total_actors = 0
+                                
+                                for actor_id, grads_dict, timestamp in gradient_results:
+                                    total_actors += 1
+                                    for name, grad_tensor in grads_dict.items():
+                                        if name not in aggregated_grads:
+                                            aggregated_grads[name] = grad_tensor.clone()
+                                        else:
+                                            aggregated_grads[name] += grad_tensor
+                                
+                                # Average the gradients
+                                if total_actors > 0:
+                                    for name in aggregated_grads:
+                                        aggregated_grads[name] /= total_actors
+                                    
+                                    # Apply aggregated gradients
+                                    grad_norm = _apply_gradients_to_model(
+                                        online,
+                                        aggregated_grads,
+                                        optimizer_for_gradients,
+                                        clip_norm=args.grad_clip,
+                                    )
+                                    
+                                    gradient_step += 1
+                                    
+                                    # Update target network if needed
+                                    if learner is not None:
+                                        learner.num_updates = gradient_step
+                                        learner._maybe_update_target()
+                                    
+                                    print(json.dumps({
+                                        "event": "gradients_applied",
+                                        "step": gradient_step,
+                                        "actors_contributed": total_actors,
+                                        "grad_norm": grad_norm,
+                                        "transitions": transitions,
+                                        "replay_size": len(replay),
+                                    }), flush=True)
+                                    
+                                    # Save checkpoint periodically
+                                    if gradient_step % 10 == 0:
+                                        _save_checkpoint(latest_path, online, learner_cfg, gradient_step)
+                        
+                        except Exception as e:
+                            print(json.dumps({
+                                "event": "gradient_poll_error",
+                                "error": str(e),
+                            }), flush=True)
+                        
+                        last_gradient_poll_time = now
 
                 # Periodic heartbeat
                 now = time.time()
@@ -1108,7 +1513,7 @@ def main() -> None:
                 transitions += 1
 
                 train_logs = []
-                if learner:
+                if learner and not args.push_gradients:
                     train_logs = learner.maybe_train_after_turn()
                 if train_logs:
                     last_log = train_logs[-1]

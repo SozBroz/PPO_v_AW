@@ -1451,9 +1451,24 @@ class GameState:
         """
         if display_buckets_lost <= 0:
             return
-        cv = int(UNIT_STATS[victim_unit.unit_type].cost)
+        # AWBW canon: "Real unit cost is also factored into the calculation,
+        # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
+        # charge their powers more slowly / more quickly on a per-unit basis."
+        base_cv = UNIT_STATS[victim_unit.unit_type].cost
+        base_cs = UNIT_STATS[striker_unit.unit_type].cost
+        # Apply victim's own CO cost modifier to victim cost
+        victim_co = self.co_states[int(victim_unit.player)]
+        mod_v = victim_co.unit_cost_modifier_for_unit(victim_unit.unit_type)
+        # Apply striker's own CO cost modifier to striker cost
+        striker_co = self.co_states[int(striker_unit.player)]
+        mod_s = striker_co.unit_cost_modifier_for_unit(striker_unit.unit_type)
+        # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
+        cv = int(base_cv * (100 + mod_v) / 100)
+        cs = int(base_cs * (100 + mod_s) / 100)
+        # Victim seat: Δ×Cv/10  (damage dealt to victim)
         credit_v = _rounded_div_half_up(display_buckets_lost * cv, 10)
-        credit_s = _rounded_div_half_up(display_buckets_lost * cv, 20)
+        # Striker seat: Δ×Cs/20 = (Δ/10)×Cs×0.5  (damage received by striker)
+        credit_s = _rounded_div_half_up(display_buckets_lost * cs, 20)
         self._grant_co_meter_credit(int(victim_unit.player), credit_v)
         self._grant_co_meter_credit(int(striker_unit.player), credit_s)
 
