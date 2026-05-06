@@ -933,7 +933,10 @@ def _run_replay_instrumented(
         # leaves repair/funds drift in SM (``state_mismatch_funds``). The
         # counter/pin for Fire uses a separate, stricter flag below.
         if has_post_for_sync:
+            import sys as _sys
             post_frame_for_sync = frames[env_i + 1]
+            print(f"DEBUG audit loop: env_i={env_i}, comparing to frames[{env_i+1}]", file=_sys.stderr)
+            print(f"DEBUG post_frame keys: {list(post_frame_for_sync.keys())[:10]}", file=_sys.stderr)
             php_units_iter = post_frame_for_sync.get("units") or {}
             if isinstance(php_units_iter, dict):
                 php_units_list = list(php_units_iter.values())

@@ -196,6 +196,11 @@ def compare_units(
         only_php = set(php_by_tile) - set(eng_by_tile)
         only_eng = set(eng_by_tile) - set(php_by_tile)
         if only_php or only_eng:
+            # Debug: print PHP units at only_in_php positions
+            import sys as _sys
+            for _key in only_php:
+                _seat, _r, _c = _key
+                print(f"DEBUG only_in_php: seat={_seat} ({_r},{_c})", file=_sys.stderr)
             out.append(
                 f"unit tile set mismatch only_in_php={sorted(only_php)[:16]}"
                 f"{'…' if len(only_php) > 16 else ''} only_in_engine={sorted(only_eng)[:16]}"
@@ -241,6 +246,13 @@ def compare_snapshot_to_engine(
     check_turn: bool = True,
 ) -> list[str]:
     """Return a list of human-readable mismatch lines (empty => match on checked axes)."""
+    import sys as _sys
+    if not hasattr(compare_snapshot_to_engine, 'call_count'):
+        compare_snapshot_to_engine.call_count = 0
+    compare_snapshot_to_engine.call_count += 1
+    _php_keys = list(php_frame.keys())[:10] if isinstance(php_frame, dict) else []
+    print(f"DEBUG compare_snapshot_to_engine call #{compare_snapshot_to_engine.call_count}: php_frame keys={_php_keys}", file=_sys.stderr)
+    
     out: list[str] = []
     if check_funds:
         out.extend(compare_funds(php_frame, state, awbw_to_engine))
