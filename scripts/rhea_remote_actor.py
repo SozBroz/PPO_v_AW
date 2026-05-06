@@ -699,12 +699,29 @@ def main() -> None:
                 # Plan and execute full turn
                 result = planner.choose_full_turn(state)
 
+                # Track abnormal termination in this game
+                _game_abnormal_error = None
+
                 for action in result.actions:
                     if env.state is None or env.state.winner is not None:
                         break
                     if int(env.state.active_player) != acting:
                         break
-                    env.state.step(action)
+                    try:
+                        env.state.step(action)
+                    except IllegalActionError as illegal_e:
+                        import traceback
+                        print(json.dumps({
+                            "event": "illegal_action",
+                            "machine_id": machine_id,
+                            "error": repr(illegal_e),
+                            "game_turns": game_turns,
+                            "day": day,
+                            "action": str(action),
+                            "traceback": traceback.format_exc(),
+                        }), flush=True)
+                        _game_abnormal_error = repr(illegal_e)
+                        break  # stop executing remaining actions
 
                 after = env.state
                 if after is None:
@@ -774,6 +791,8 @@ def main() -> None:
                     "machine_id": machine_id,
                     "game_num": games_done,
                     "transitions": game_transitions,
+                    "abnormal_termination": _game_abnormal_error is not None,
+                    "termination_error": _game_abnormal_error,
                 }), flush=True)
 
     except KeyboardInterrupt:

@@ -99,6 +99,7 @@ import torch
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv
+from engine.game import IllegalActionError
 from rl.rhea import RheaConfig, RheaPlanner
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaReplayBuffer, RheaTransition
@@ -865,11 +866,20 @@ def _actor_loop(
                     except AttributeError:
                         pass
 
+
+                # Track abnormal termination (e.g. IllegalActionError from RHEA
+                # producing an illegal action).  When set, game_done will carry
+                # abnormal_termination=True so downstream analysis can separate
+                # clean engine wins from buggy early exits.
+                _abnormal_exit_error = None
+
                 while env.state is not None and env.state.winner is None and not stop_event.is_set():
                     try:
                         state = env.state
                         acting = int(state.active_player)
                         day = int(getattr(state, "turn", getattr(state, "day", 0)))
+                        if game_turns <= 20:
+                            print(json.dumps({"event": "debug_turn", "day": day, "max_days": args.max_days, "winner": state.winner, "turn": state.turn, "game_turns": game_turns}), flush=True)
 
                         # Swap value model if using historical checkpoint opponent
                         if use_hist_checkpoint and hist_value_model is not None:
@@ -906,10 +916,28 @@ def _actor_loop(
                                 break
                             if int(env.state.active_player) != acting:
                                 break
-                            env.state.step(action)
+                            try:
+                                env.state.step(action)
+                            except IllegalActionError as illegal_e:
+                                # RHEA produced an illegal action -- log it and
+                                # break the turn cleanly instead of blowing
+                                # up the whole game.
+                                import traceback
+                                print(json.dumps({
+                                    "event": "illegal_action",
+                                    "actor_id": actor_id,
+                                    "error": repr(illegal_e),
+                                    "game_turns": game_turns,
+                                    "day": day,
+                                    "action": str(action),
+                                    "traceback": traceback.format_exc(),
+                                }), flush=True)
+                                _abnormal_exit_error = repr(illegal_e)
+                                break  # stop executing remaining actions
 
                         after = env.state
                         if after is None:
+                            print(json.dumps({"event": "state_none_after_turn", "game_turns": game_turns, "day": day, "acting": acting}), flush=True)
                             break
 
                         _encode_into(after, acting, spatial_buf, scalars_buf)
@@ -988,8 +1016,13 @@ def _actor_loop(
                         transitions_sent += 1
                         game_turns += 1
 
-                        if day > args.max_days + 1:
+                        if day > args.max_days:
+                            print(json.dumps({"event": "day_limit_break", "day": day, "max_days": args.max_days, "game_turns": game_turns, "winner": after.winner, "engine_turn": after.turn}), flush=True)
                             break
+
+                        # Diagnostic: if we're on turn 12 with no winner, log it
+                        if game_turns == 12 and after.winner is None:
+                            print(json.dumps({"event": "turn12_no_winner", "day": day, "max_days": args.max_days, "engine_turn": after.turn, "env_done": after.done}), flush=True)
 
                     except Exception as e:
                         import traceback
@@ -1000,6 +1033,7 @@ def _actor_loop(
                             "game_turns": game_turns,
                             "traceback": traceback.format_exc(),
                         }), flush=True)
+                        _abnormal_exit_error = repr(e)
                         break  # Exit the inner while loop for this game
 
                 games_done += 1
@@ -1013,6 +1047,9 @@ def _actor_loop(
                         "transitions_sent": transitions_sent,
                         "use_hist_checkpoint": use_hist_checkpoint,
                         "dual_gradient_self_play": args.dual_gradient_self_play,
+                        "abnormal_termination": _abnormal_exit_error is not None,
+                        "termination_error": _abnormal_exit_error,
+                        "env_state_none": env.state is None,
                     }
                 )
             except Exception as exc:

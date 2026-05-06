@@ -1329,52 +1329,31 @@ class GameState:
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
             # Pass internal HP to CO meter function
-    def _apply_co_meter_from_display_buckets_lost(
-        self,
-        striker_unit: Unit,
-        victim_unit: Unit,
-        display_buckets_lost: int,
-    ) -> None:
-        """Award CO-meter for one combat swing from display buckets lost.
-
-        AWBW formula: CO meter charges based on funds value of damage dealt.
-        9000 funds damage = 1 star = 9000 power_bar units.
-
-        Args:
-            display_buckets_lost: Display HP lost (1-10), where 1 display HP = 10 internal HP.
-        """
-        if display_buckets_lost <= 0:
-            return
-        # Convert display buckets to internal HP
-        internal_hp_lost = display_buckets_lost * 10
+            if internal_dmg > 0:
+                self._apply_co_meter_from_internal_hp_lost(attacker, defender, internal_dmg)
+            
+        # Counterattack
+        if dmg is not None and dmg > 0 and defender.hp > 0 and defender.is_alive:
+            # Defender becomes the counterattacker, attacker becomes the target
+            counter_dmg = calculate_counterattack(
+                defender, attacker,  # defender counters against attacker
+                def_terrain, att_terrain,  # terrain for counterattacker, target
+                def_co, att_co,  # CO states for counterattacker, target
+                dmg,  # pass primary damage for Sonja SCOP
+                luck_rng=self.luck_rng,
+            )
+            if counter_dmg is not None and counter_dmg > 0:
+                internal_counter = min(counter_dmg * 10, attacker.hp)
+                attacker.hp = max(0, attacker.hp - internal_counter)
+                self.losses_hp[attacker.player] += internal_counter
+                if attacker.hp == 0:
+                    self.losses_units[attacker.player] += 1
+                if internal_counter > 0:
+                    self._apply_co_meter_from_internal_hp_lost(defender, attacker, internal_counter)
         
-        # AWBW canon: "Real unit cost is also factored into the calculation,
-        # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
-        # charge their powers more slowly / more quickly on a per-unit basis."
-        base_cv = UNIT_STATS[victim_unit.unit_type].cost
-        base_cs = UNIT_STATS[striker_unit.unit_type].cost
-        
-        # Apply victim's own CO cost modifier to victim cost
-        victim_co = self.co_states[int(victim_unit.player)]
-        mod_v = victim_co.unit_cost_modifier_for_unit(victim_unit.unit_type)
-        # Apply striker's own CO cost modifier to striker cost
-        striker_co = self.co_states[int(striker_unit.player)]
-        mod_s = striker_co.unit_cost_modifier_for_unit(striker_unit.unit_type)
-        
-        # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
-        cv = int(base_cv * (100 + mod_v) / 100)
-        cs = int(base_cs * (100 + mod_s) / 100)
-        
-        # Victim credit: internal HP lost × cost / 90 = funds value
-        # (for 9000 = 1 star)
-        victim_credit = _rounded_div_half_up(internal_hp_lost * cv, 90)
-        
-        # Striker credit: 50% of victim credit (per AWBW)
-        striker_credit = _rounded_div_half_up(internal_hp_lost * cs, 180)
-        
-        # Apply to CO states
-        self.co_states[int(striker_unit.player)].power_bar += striker_credit
-        self.co_states[int(victim_unit.player)].power_bar += victim_credit
+        self._finish_action(attacker)
+        self._evaluate_army_wipe_after_combat()
+        return
 
     def _grant_co_meter_credit(self, seat: int, credit: int) -> None:
         """Add CO-meter credit capped at SCOP ceiling."""

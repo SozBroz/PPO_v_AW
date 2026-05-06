@@ -88,6 +88,30 @@ class CandidateAction:
     def terminal_action(self) -> Action:
         return self.second if self.second is not None else self.first
 
+    def is_equivalent(self, other: CandidateAction) -> bool:
+        """Check if two candidates represent the same logical action.
+
+        This is needed because candidate lists are regenerated at each simulation
+        step, creating new CandidateAction objects.  Two candidates are
+        equivalent if they have the same terminal action (same type, positions,
+        and unit_type for BUILD actions).
+        """
+        if not isinstance(other, CandidateAction):
+            return False
+        ta_self = self.terminal_action
+        ta_other = other.terminal_action
+        if ta_self.action_type != ta_other.action_type:
+            return False
+        if ta_self.unit_pos != ta_other.unit_pos:
+            return False
+        if ta_self.move_pos != ta_other.move_pos:
+            return False
+        if ta_self.target_pos != ta_other.target_pos:
+            return False
+        if ta_self.unit_type != ta_other.unit_type:
+            return False
+        return True
+
 
 def _norm_pos(pos: Optional[tuple[int, int]]) -> tuple[float, float]:
     if pos is None:

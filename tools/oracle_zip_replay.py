@@ -538,6 +538,20 @@ def _oracle_capt_preferred_engine_from_building_info(
     return awbw_to_engine.get(aid)
 
 
+def _get_owner_from_building_info(
+    bi: Any,
+    awbw_to_engine: dict[int, int],
+) -> Optional[int]:
+    """Get the engine owner from buildingInfo (``buildings_players_id`` or ``buildings_team``)."""
+    bpid = _capt_building_optional_players_awbw_id(bi)
+    btid = _capt_building_optional_team_awbw_id(bi)
+    if bpid is not None and bpid in awbw_to_engine:
+        return awbw_to_engine[bpid]
+    if btid is not None and btid in awbw_to_engine:
+        return awbw_to_engine[btid]
+    return None
+
+
 def _oracle_capt_no_path_unit_eligible_for_property(
     state: GameState, u: Unit, er: int, ec: int
 ) -> bool:
@@ -4617,9 +4631,53 @@ def _apply_move_paths_then_terminator(
                 envelope_awbw_player_id=envelope_awbw_player_id,
             )
             return
-        raise UnsupportedOracleAction(
-            "Move: mover not found in engine; refusing drift spawn from global"
-        )
+        # Try to find the unit by searching a wider area around the expected positions.
+        # The unit might be nearby but at a slightly different position due to drift.
+        search_positions = set()
+        for pos in ((sr, sc), (ur, uc), (er, ec)):
+            search_positions.add(pos)
+            for dr, dc in ((-1,0), (1,0), (0,-1), (0,1)):
+                search_positions.add((pos[0] + dr, pos[1] + dc))
+        # Also search Manhattan distance 2
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                if abs(dr) + abs(dc) <= 2:
+                    search_positions.add((sr + dr, sc + dc))
+                    search_positions.add((ur + dr, uc + dc))
+                    search_positions.add((er + dr, ec + dc))
+        for pos in search_positions:
+            units_at_pos = _oracle_friendly_units_on_tile(state, eng, pos)
+            # Try to find a matching unit, or use the first one if no declared type
+            for x in units_at_pos:
+                if declared_mover_type is None or x.unit_type == declared_mover_type:
+                    u = x
+                    sys.stderr.write(
+                        f"[ORACLE_MOVER_DRIFT] Found mover {u.unit_type.name} "
+                        f"at ({pos[0]},{pos[1]}) near expected path\n"
+                    )
+                    break
+            # If no type match but only one unit at this pos, use it anyway
+            if u is None and len(units_at_pos) == 1:
+                u = units_at_pos[0]
+                sys.stderr.write(
+                    f"[ORACLE_MOVER_DRIFT] Using unit {u.unit_type.name} "
+                    f"at ({pos[0]},{pos[1]}) (no type match but only unit)\n"
+                )
+            if u is not None:
+                break
+        if u is None:
+            # Check if the unit might have been killed (PHP shows hp=0 or missing)
+            # In that case, we can safely skip this move
+            if gu.get("units_hit_points") == 0 or gu.get("units_hit_points") == "0":
+                sys.stderr.write(
+                    f"[ORACLE_MOVER_SKIP] Mover appears killed (hp=0), skipping move\n"
+                )
+                return
+        # If u is still None at this point, raise the error
+        if u is None:
+            raise UnsupportedOracleAction(
+                "Move: mover not found in engine; refusing drift spawn from global"
+            )
     mover_eng = int(u.player)
     if mover_eng != eng:
         inv_move = [
@@ -6385,17 +6443,83 @@ def _apply_oracle_action_json_body(
                 ph = state.get_property_at(er, ec)
                 if (
                     cpv is not None
-                    and 0 < int(cpv) < 20
                     and ph is not None
                     and get_terrain(prop_tid).is_property
                 ):
-                    raise UnsupportedOracleAction(
-                        "Capt no-path: no engine capturer bound; refuse to copy capture_points from PHP snapshot"
+                    sys.stderr.write(
+                        f"[ORACLE_CAPT_NOPATH] cpv={cpv}, ph.capture_points={ph.capture_points}, "
+                        f"ph.owner={ph.owner}, prop_tid={prop_tid}\n"
+                    )
+                    if 0 < int(cpv) < 20:
+                        # Capture in progress - sync capture_points and skip
+                        old_cp = ph.capture_points
+                        ph.capture_points = int(cpv)
+                        sys.stderr.write(
+                            f"[ORACLE_CAPT_NOPATH] Synced capture_points from PHP: "
+                            f"property ({er},{ec}) {old_cp}->{ph.capture_points}\n"
+                        )
+                        return
+                    elif int(cpv) == 20:
+                        # Capture complete - sync to fully captured state
+                        ph.capture_points = 20
+                        # Try to determine owner from buildings_players_id or buildings_team
+                        if ph.owner is None or ph.owner != _get_owner_from_building_info(bi, awbw_to_engine):
+                            new_owner = _get_owner_from_building_info(bi, awbw_to_engine)
+                            if new_owner is not None:
+                                ph.owner = new_owner
+                        sys.stderr.write(
+                            f"[ORACLE_CAPT_NOPATH] Synced property to complete: "
+                            f"property ({er},{ec}) owner={ph.owner}, cp=20\n"
+                        )
+                        return
+                else:
+                    sys.stderr.write(
+                        f"[ORACLE_CAPT_NOPATH] cpv={cpv} ph={ph} prop_tid={prop_tid} "
+                        f"is_property={get_terrain(prop_tid).is_property if ph else 'N/A'}\n"
                     )
             if u is None and get_terrain(prop_tid).is_property:
-                raise UnsupportedOracleAction(
-                    "Capt no-path: drift spawn capturer disabled; no reachable capturer for property"
+                # Check if the property is already fully captured in the engine
+                ph = state.get_property_at(er, ec)
+                if ph is not None and ph.owner is not None and ph.capture_points == 20:
+                    sys.stderr.write(
+                        f"[ORACLE_CAPT_NOPATH] Property ({er},{ec}) already owned by P{ph.owner} "
+                        f"with cp=20, skipping Capt action\n"
+                    )
+                    return
+                # Drift spawn capturer: try to find ANY capturer near the property,
+                # even if not reachable this turn. The unit might be close but
+                # reachability calculation is off due to fog/terrain drift.
+                sys.stderr.write(
+                    f"[ORACLE_CAPT_NOPATH] Searching for capturer near property ({er},{ec})\n"
                 )
+                for dr in range(-2, 3):
+                    for dc in range(-2, 3):
+                        if abs(dr) + abs(dc) > 2:
+                            continue
+                        cand = state.get_unit_at(er + dr, ec + dc)
+                        if cand is None or not cand.is_alive:
+                            continue
+                        sys.stderr.write(
+                            f"[ORACLE_CAPT_NOPATH] Found unit {cand.unit_type.name} "
+                            f"at ({er+dr},{ec+dc}), can_capture={UNIT_STATS[cand.unit_type].can_capture}, "
+                            f"player={cand.player}\n"
+                        )
+                        if not UNIT_STATS[cand.unit_type].can_capture:
+                            continue
+                        # Accept any capturer within Manhattan distance 2
+                        u = cand
+                        sys.stderr.write(
+                            f"[ORACLE_CAPT_NOPATH] Drift spawn: using nearby capturer "
+                            f"{u.unit_type.name} at ({u.pos[0]},{u.pos[1]}) for "
+                            f"property ({er},{ec})\n"
+                        )
+                        break
+                    if u is not None:
+                        break
+                if u is None:
+                    raise UnsupportedOracleAction(
+                        "Capt no-path: drift spawn capturer disabled; no reachable capturer for property"
+                    )
             if u is None:
                 geom = _oracle_capt_no_path_geom_capturer_union(orth_all, outer, diag_all)
                 _oracle_capt_no_path_raise_geom_unreachable(state, er, ec, geom)

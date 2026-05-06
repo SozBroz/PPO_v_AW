@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from engine.game import IllegalActionError
+
 """Train a value-only network from RHEA-generated turn transitions.
 
 This is the RHEA-machine entrypoint. It deliberately does not use PPO rollout
@@ -292,12 +294,29 @@ def main() -> None:
             result = planner.choose_full_turn(state)
 
             # Execute selected full-turn actions on the real game state.
+            # Track abnormal termination in this game
+            _game_abnormal_error = None
+
             for action in result.actions:
                 if env.state is None or env.state.winner is not None:
                     break
                 if int(env.state.active_player) != acting:
                     break
-                env.state.step(action)
+                try:
+                    env.state.step(action)
+                except IllegalActionError as illegal_e:
+                    import traceback
+                    print(json.dumps({
+                        "event": "illegal_action",
+                        "game": game_idx,
+                        "error": repr(illegal_e),
+                        "game_turns": game_turns,
+                        "day": day,
+                        "action": str(action),
+                        "traceback": traceback.format_exc(),
+                    }), flush=True)
+                    _game_abnormal_error = repr(illegal_e)
+                    break  # stop executing remaining actions
 
             after = env.state
             if after is None:
@@ -359,7 +378,14 @@ def main() -> None:
             if day > args.max_days + 1:
                 break
 
-        print(json.dumps({"event": "game_done", "game": game_idx, "winner": None if env.state is None else env.state.winner, "turns": game_turns}))
+        print(json.dumps({
+            "event": "game_done",
+            "game": game_idx,
+            "winner": None if env.state is None else env.state.winner,
+            "turns": game_turns,
+            "abnormal_termination": _game_abnormal_error is not None,
+            "termination_error": _game_abnormal_error,
+        }))
 
         if args.save_every_games > 0 and game_idx % args.save_every_games == 0:
             _save_checkpoint(output_dir / f"value_rhea_{_timestamp_str()}.pt", online, learner_cfg, global_turn)
