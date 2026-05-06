@@ -267,6 +267,11 @@ def effective_move_cost(state: "GameState", unit: "Unit", terrain_id: int) -> in
 
     co_state = state.co_states[unit.player]
 
+    # Sturm (co_id=29) D2D: all terrain costs 1 MP, except in Snow.
+    # AWBW wiki: "Movement cost over all terrain is reduced to 1, except in Snow."
+    if co_state.co_id == 29 and weather != "snow":
+        cost = 1
+
     # Koal (co_id 21) Forced March / Trail of Woe: cheaper road movement.
     if co_state.co_id == 21 and (co_state.cop_active or co_state.scop_active):
         if _terrain_category(terrain_id) == "road":

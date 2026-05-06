@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy as _copy_mod
 import random as _random_mod
+import sys
 from dataclasses import dataclass, field
 from collections import Counter
 from typing import Callable, Optional, Union
@@ -824,20 +825,30 @@ class GameState:
             for u in self.units[opponent]:
                 u.hp = max(1, u.hp - enemy_loss)
 
-        # Sensei COP: spawn Mech on every owned base without a unit
-        elif co.co_id == 13 and cop:
-            # Unit limit includes cargo aboard transports (not on ``units[player]`` rows).
+        # Sensei COP: spawn Infantry on every owned city without a unit
+        # SCOP: spawn Mech on every owned city without a unit
+        # AWBW canon (Tier 1, https://awbw.amarriner.com/co.php Sensei row):
+        #   COP "Copter Command" — *"9 HP unwaited infantry are placed on
+        #        every owned, empty city."*
+        #   SCOP "Airborne Assault" — *"9 HP unwaited mechs are placed on
+        #        every owned, empty city."*
+        # Note: "city" (not base/airport) per canon; AWBW Fandom wiki agrees.
+        elif co.co_id == 13:
+            if cop:
+                spawn_type = UnitType.INFANTRY
+            else:
+                spawn_type = UnitType.MECH
             for prop in self.properties:
                 if alive_owned_unit_count(self.units[player]) >= self.map_data.unit_limit:
                     break
-                if prop.owner == player and prop.is_base:
+                if prop.owner == player and prop.is_city:
                     if self.get_unit_at(prop.row, prop.col) is None:
-                        mech = Unit(
-                            unit_type=UnitType.MECH,
+                        unit = Unit(
+                            unit_type=spawn_type,
                             player=player,
-                            hp=100,
-                            ammo=UNIT_STATS[UnitType.MECH].max_ammo,
-                            fuel=UNIT_STATS[UnitType.MECH].max_fuel,
+                            hp=90,   # 9 HP (AWBW canon: "9 HP unwaited")
+                            ammo=UNIT_STATS[spawn_type].max_ammo,
+                            fuel=UNIT_STATS[spawn_type].max_fuel,
                             pos=(prop.row, prop.col),
                             moved=True,
                             loaded_units=[],
@@ -845,7 +856,7 @@ class GameState:
                             capture_progress=20,
                             unit_id=self._allocate_unit_id(),
                         )
-                        self.units[player].append(mech)
+                        self.units[player].append(unit)
 
         # Drake: deal HP damage + fuel drain to enemy air units
         elif co.co_id == 5:
@@ -3041,6 +3052,7 @@ def make_initial_state(
     luck_seed: Optional[int] = None,
     spirit_map_is_std: Optional[bool] = True,
 ) -> GameState:
+    print(f"[DEBUG] make_initial_state: p0_co_id={p0_co_id}, p1_co_id={p1_co_id}", file=sys.stderr)
     # Treasuries always start at 0g in AWBW; the opening player receives income
     # at the start of their first turn via _grant_income below. ``starting_funds``
     # stays as a parameter only for non-AWBW experiments (tests/handicaps).
@@ -3070,8 +3082,11 @@ def make_initial_state(
         mt = MAX_TURNS
     if mt < 1:
         raise ValueError(f"max_days/max_turns must be >= 1, got {mt}")
+    print(f"[DEBUG] make_initial_state: loading properties", file=sys.stderr)
     props = _copy_mod.deepcopy(map_data.properties)
+    print(f"[DEBUG] make_initial_state: creating units", file=sys.stderr)
     units = specs_to_initial_units(map_data.predeployed_specs)
+    print(f"[DEBUG] make_initial_state: units created, types={[str(u) for u in units[0][:3]] + ['...']}", file=sys.stderr)
 
     # Deep-copy the mutable pieces of ``map_data`` that the engine writes to
     # during play. Terrain flips on seam break (113/114 → 115/116) must not

@@ -21,9 +21,13 @@
       "scop": {
         "name": "Hyper Upgrade",
         "description": "+10% ATK and DEF to all own units (SCOPB only; no unique bonus)",
-        "atk_modifiers": {"all": 10},
+        "atk_modifiers": {
+          "all": 10
+        },
         "def_modifiers": {},
-        "movement_modifiers": {"all": 1}
+        "movement_modifiers": {
+          "all": 1
+        }
       }
     },
     "2": {
@@ -36,23 +40,35 @@
       "day_to_day": {
         "description": "+20% ATK for indirect units, -20% ATK for direct units"
       },
-      "atk_modifiers": {"indirect": 20, "direct": -20},
+      "atk_modifiers": {
+        "indirect": 20,
+        "direct": -20
+      },
       "def_modifiers": {},
-      "range_modifiers": {"indirect": 1},
+      "range_modifiers": {
+        "indirect": 1
+      },
       "cop": {
         "name": "Snipe Attack",
         "description": "+1 attack range to all indirect units",
-        "atk_modifiers": {"indirect": 20},
+        "atk_modifiers": {
+          "indirect": 20
+        },
         "def_modifiers": {},
-        "range_modifiers": {"indirect": 1}
-
+        "range_modifiers": {
+          "indirect": 1
+        }
       },
       "scop": {
         "name": "Super Snipe",
-        "description": "+2 attack range to indirect units; +30% additional ATK for indirect units",
-        "atk_modifiers": {"indirect": 20},
+        "description": "+2 attack range to indirect units; +10% additional ATK for indirect units (total +40% with D2D + SCOPB)",
+        "atk_modifiers": {
+          "indirect": 10
+        },
         "def_modifiers": {},
-        "range_modifiers": {"indirect": 2}
+        "range_modifiers": {
+          "indirect": 2
+        }
       }
     },
     "3": {
@@ -64,20 +80,32 @@
       "scop_stars": 7,
       "day_to_day": {
         "description": "+30% ATK and DEF to all units; own units cost 120% of base price",
-        "unit_cost_modifiers": {"all": 20}
+        "unit_cost_modifiers": {
+          "all": 20
+        }
       },
-      "atk_modifiers": {"all": 30},
-      "def_modifiers": {"all": 30},
+      "atk_modifiers": {
+        "all": 30
+      },
+      "def_modifiers": {
+        "all": 30
+      },
       "cop": {
         "name": "Morale Boost",
         "description": "+10% additional ATK",
-        "atk_modifiers": {"all": 10}
+        "atk_modifiers": {
+          "all": 10
+        }
       },
       "scop": {
         "name": "Samurai Spirit",
         "description": "+10% additional ATK and 20% additional DEF to all own units; counterattacks deal 1.5x damage",
-        "atk_modifiers": {"all": 10},
-        "def_modifiers": {"all": 20}
+        "atk_modifiers": {
+          "all": 10
+        },
+        "def_modifiers": {
+          "all": 20
+        }
       }
     },
     "5": {
@@ -90,9 +118,14 @@
       "day_to_day": {
         "description": "+10% DEF and +1 movement for naval units.  -30% Air attack"
       },
-      "atk_modifiers": {"naval": 20, "air": -30},
+      "atk_modifiers": {
+        "naval": 20,
+        "air": -30
+      },
       "def_modifiers": {},
-      "movement_modifiers": {"naval": 1},
+      "movement_modifiers": {
+        "naval": 1
+      },
       "cop": {
         "name": "Tsunami",
         "description": "All enemy units take 1 HP damage; all enemy air units lose 1 fuel per tile",
@@ -114,23 +147,37 @@
       "cop_stars": 3,
       "scop_stars": 6,
       "day_to_day": {
-        "description": "+20% ATK for direct units, -10% ATK for indirect units"
+        "description": "+20% ATK for direct units, -10% ATK for indirect units; indirect units have -1 range"
       },
-      "atk_modifiers": {"direct": 20, "indirect": -10},
+      "atk_modifiers": {
+        "direct": 20,
+        "indirect": -10
+      },
+      "range_modifiers": {
+        "indirect": -1
+      },
       "def_modifiers": {},
       "cop": {
         "name": "Max Force",
         "description": "+10% additional ATK for direct units",
-        "atk_modifiers": {"direct": 10},
+        "atk_modifiers": {
+          "direct": 10
+        },
         "def_modifiers": {},
-        "movement_modifiers": {"direct": 1}
+        "movement_modifiers": {
+          "direct": 1
+        }
       },
       "scop": {
         "name": "Max Blast",
         "description": "+30% additional ATK for direct units (total +50% over base with D2D)",
-        "atk_modifiers": {"direct": 30},
+        "atk_modifiers": {
+          "direct": 30
+        },
         "def_modifiers": {},
-        "movement_modifiers": {"direct": 2}
+        "movement_modifiers": {
+          "direct": 2
+        }
       }
     },
     "8": {
@@ -143,22 +190,32 @@
       "day_to_day": {
         "description": "+30% ATK for infantry and mech; -10% ATK for vehicles; +50% capture speed for infantry and mech"
       },
-      "atk_modifiers": {"infantry": 30, "mech": 30, "direct": -10},
+      "atk_modifiers": {
+        "infantry": 30,
+        "mech": 30,
+        "direct": -10
+      },
       "def_modifiers": {},
-      "movement_modifiers": {"transport": 1},
+      "movement_modifiers": {
+        "transport": 1
+      },
       "cop": {
         "name": "Double Time",
         "description": "+1 movement to all infantry units",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "movement_modifiers": {"infantry": 1}
+        "movement_modifiers": {
+          "infantry": 1
+        }
       },
       "scop": {
         "name": "Victory March",
-        "description": "All infantry and mech units can complete a capture in one step regardless of remaining HP; +1 movement to infantry",
+        "description": "All infantry and mech units can complete a capture in one step regardless of remaining HP; +2 movement to infantry",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "movement_modifiers": {"infantry": 1}
+        "movement_modifiers": {
+          "infantry": 2
+        }
       }
     },
     "9": {
@@ -173,7 +230,9 @@
       },
       "atk_modifiers": {},
       "def_modifiers": {},
-      "movement_modifiers": {"all": 1},
+      "movement_modifiers": {
+        "all": 1
+      },
       "cop": {
         "name": "Blizzard",
         "description": "Causes snowfall; all enemy units lose 1 movement",
@@ -197,19 +256,32 @@
       "day_to_day": {
         "description": "Air units +15% ATK, +10% DEF, -2 fuel/day; naval units -30% ATK (AWBW wiki)"
       },
-      "atk_modifiers": {"air": 15, "naval": -30},
-      "def_modifiers": {"air": 10},
+      "atk_modifiers": {
+        "air": 15,
+        "naval": -30
+      },
+      "def_modifiers": {
+        "air": 10
+      },
       "cop": {
         "name": "Lightning Drive",
         "description": "Air units +5% ATK and +10% DEF (AWBW wiki; stacks with universal COP/SCOP +10%/+10%)",
-        "atk_modifiers": {"air": 5},
-        "def_modifiers": {"air": 10}
+        "atk_modifiers": {
+          "air": 5
+        },
+        "def_modifiers": {
+          "air": 10
+        }
       },
       "scop": {
         "name": "Lightning Strike",
         "description": "Air +5% ATK and +10% DEF; all non-footsoldier units may move and fire again, even if built this turn (AWBW wiki)",
-        "atk_modifiers": {"air": 5},
-        "def_modifiers": {"air": 10}
+        "atk_modifiers": {
+          "air": 5
+        },
+        "def_modifiers": {
+          "air": 10
+        }
       }
     },
     "11": {
@@ -220,24 +292,28 @@
       "cop_stars": 2,
       "scop_stars": 5,
       "day_to_day": {
-        "description": "+1 movement to all own units"
+        "description": "No day-to-day abilities"
       },
       "atk_modifiers": {},
       "def_modifiers": {},
-      "movement_modifiers": {"all": 1},
+      "movement_modifiers": {},
       "cop": {
         "name": "Sideslip",
-        "description": "+1 additional movement to all own units (stacks with D2D for +2 total)",
+        "description": "+1 additional movement to all own units",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "movement_modifiers": {"all": 1}
+        "movement_modifiers": {
+          "all": 1
+        }
       },
       "scop": {
         "name": "Sidewinder",
-        "description": "+2 additional movement to all own units (stacks with D2D for +3 total)",
+        "description": "+2 additional movement to all own units",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "movement_modifiers": {"all": 2}
+        "movement_modifiers": {
+          "all": 2
+        }
       }
     },
     "12": {
@@ -250,7 +326,9 @@
       "day_to_day": {
         "description": "+10% ATK to all units"
       },
-      "atk_modifiers": {"all": 10},
+      "atk_modifiers": {
+        "all": 10
+      },
       "def_modifiers": {},
       "cop": {
         "name": "Black Wave",
@@ -275,19 +353,31 @@
       "day_to_day": {
         "description": "+40% ATK for infantry, mech, and copter units; -10% ATK for vehicles and naval; spawns mechs on owned bases at turn start"
       },
-      "atk_modifiers": {"infantry": 40, "mech": 40, "copter": 50, "vehicle": -10, "naval": -10},
+      "atk_modifiers": {
+        "infantry": 40,
+        "mech": 40,
+        "copter": 50,
+        "vehicle": -10,
+        "naval": -10
+      },
       "def_modifiers": {},
-      "transport_modifiers": {"transport": 1},
+      "transport_modifiers": {
+        "transport": 1
+      },
       "cop": {
         "name": "Copter Command",
-        "description": "+30% additional ATK for copter units; spawns one infantry on each owned city",
-        "atk_modifiers": {"copter": 15},
+        "description": "Spawns one 9-HP infantry on each owned city; +15% additional ATK for copter units",
+        "atk_modifiers": {
+          "copter": 15
+        },
         "def_modifiers": {}
       },
       "scop": {
         "name": "Airborne Assault",
-        "description": "Spawns one infantry on every owned city and base",
-        "atk_modifiers": {"copter": 15},
+        "description": "Spawns one 9-HP mech on each owned city; +15% additional ATK for copter units",
+        "atk_modifiers": {
+          "copter": 15
+        },
         "def_modifiers": {}
       }
     },
@@ -301,21 +391,36 @@
       "day_to_day": {
         "description": "+10% ATK for vehicles, all others -10% ATK"
       },
-      "atk_modifiers": {"vehicle": 10, "infantry": -10, "mech": -10, "copter": -10, "air": -10, "naval": -10},
+      "atk_modifiers": {
+        "vehicle": 10,
+        "infantry": -10,
+        "mech": -10,
+        "copter": -10,
+        "air": -10,
+        "naval": -10
+      },
       "def_modifiers": {},
       "cop": {
         "name": "Turbo Charge",
         "description": "+10% additional ATK for vehicles; all vehicles gain +1 movement.  All units are refueled and rearmed",
-        "atk_modifiers": {"vehicle": 10},
+        "atk_modifiers": {
+          "vehicle": 10
+        },
         "def_modifiers": {},
-        "movement_modifiers": {"vehicle": 1}
+        "movement_modifiers": {
+          "vehicle": 1
+        }
       },
       "scop": {
         "name": "Overdrive",
         "description": "+20% additional ATK for vehicles; all vehicles gain +2 movement. all units are refueled and rearmed",
-        "atk_modifiers": {"vehicle": 30},
+        "atk_modifiers": {
+          "vehicle": 30
+        },
         "def_modifiers": {},
-        "movement_modifiers": {"vehicle": 2}
+        "movement_modifiers": {
+          "vehicle": 2
+        }
       }
     },
     "15": {
@@ -327,8 +432,12 @@
       "scop_stars": 6,
       "day_to_day": {
         "description": "All own units cost 80% of base price; earns +10% bonus funds per owned property",
-        "unit_cost_modifiers": {"all": -20},
-        "atk_modifiers": {"all": -10}
+        "unit_cost_modifiers": {
+          "all": -20
+        },
+        "atk_modifiers": {
+          "all": -10
+        }
       },
       "atk_modifiers": {},
       "def_modifiers": {},
@@ -353,7 +462,7 @@
       "cop_stars": 3,
       "scop_stars": 6,
       "day_to_day": {
-        "description": "Gains bonus ATK equal to the terrain star rating of the tile the attacking unit occupies, does not apply to air units"
+        "description": "Units gain +10% attack for every terrain star (air units excluded)"
       },
       "atk_modifiers": {},
       "def_modifiers": {},
@@ -365,7 +474,7 @@
       },
       "scop": {
         "name": "Prime Tactics",
-        "description": "Terrain star value counts double for both ATK (D2D bonus doubled) and DEF for all own units, movement cost for all terrain is reduced to 1 except for snow",
+        "description": "Terrain star value counts double for both ATK and DEF for all own units, movement cost for all terrain is reduced to 1 except for snow",
         "atk_modifiers": {},
         "def_modifiers": {}
       }
@@ -379,8 +488,9 @@
       "scop_stars": 5,
       "day_to_day": {
         "description": "unit cost -10% to build",
-        "unit_cost_modifiers": {"all": -10}
-
+        "unit_cost_modifiers": {
+          "all": -10
+        }
       },
       "atk_modifiers": {},
       "def_modifiers": {},
@@ -409,7 +519,9 @@
       },
       "atk_modifiers": {},
       "def_modifiers": {},
-      "luck_modifiers": {"all": "-9,0"},
+      "luck_modifiers": {
+        "all": "-9,9"
+      },
       "cop": {
         "name": "Enhanced Vision",
         "description": "All units gain +1 vision, and can see into forests and reefs.",
@@ -458,18 +570,26 @@
       "day_to_day": {
         "description": "+30% ATK to all units, -20% DEF for all units"
       },
-      "atk_modifiers": {"all": 30},
-      "def_modifiers": {"all": -20},
+      "atk_modifiers": {
+        "all": 30
+      },
+      "def_modifiers": {
+        "all": -20
+      },
       "cop": {
         "name": "Knuckleduster",
         "description": "+20% additional ATK to all own units",
-        "atk_modifiers": {"all": 20},
+        "atk_modifiers": {
+          "all": 20
+        },
         "def_modifiers": {}
       },
       "scop": {
         "name": "Haymaker",
         "description": "+50% additional ATK to all own units",
-        "atk_modifiers": {"all": 50},
+        "atk_modifiers": {
+          "all": 50
+        },
         "def_modifiers": {}
       }
     },
@@ -490,14 +610,18 @@
         "description": "+1 movement to all own units when moving on road tiles, +10% on roads",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "movement_modifiers": {"all": 1}
+        "movement_modifiers": {
+          "all": 1
+        }
       },
       "scop": {
         "name": "Trail of Woe",
         "description": "+20% ATK bonus when attacking from roads; +2 movement",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "movement_modifiers": {"all": 2}
+        "movement_modifiers": {
+          "all": 2
+        }
       }
     },
     "22": {
@@ -518,14 +642,22 @@
         "atk_modifiers": {},
         "def_modifiers": {},
         "movement_modifiers": {},
-        "range_modifiers": {"land_indirect": 1}
+        "range_modifiers": {
+          "land_indirect": 1
+        }
       },
       "scop": {
         "name": "Block Rock",
         "description": "Land indirects gain +1 range, plains bonus is increased to +40%, and vehicles gain +2 movement.",
-        "atk_modifiers": {"all": 10},
-        "range_modifiers": {"land_indirect": 1},
-        "movement_modifiers": {"vehicle": 2}
+        "atk_modifiers": {
+          "all": 10
+        },
+        "range_modifiers": {
+          "land_indirect": 1
+        },
+        "movement_modifiers": {
+          "vehicle": 2
+        }
       }
     },
     "23": {
@@ -562,7 +694,9 @@
       "scop_stars": 5,
       "day_to_day": {
         "description": "+10% luck bonus (attack damage can randomly roll 0-19% higher than base)",
-        "luck_modifiers": {"all": "0,10"}
+        "luck_modifiers": {
+          "all": "0,20"
+        }
       },
       "atk_modifiers": {},
       "def_modifiers": {},
@@ -571,15 +705,18 @@
         "description": "Luck is improved to +0% to +59%.",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "luck_modifiers": {"all": "0,40"}
-
+        "luck_modifiers": {
+          "all": "0,60"
+        }
       },
       "scop": {
         "name": "Lady Luck",
         "description": "Luck is improved to +0% to +99%.",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "luck_modifiers": {"all": "0,80"}
+        "luck_modifiers": {
+          "all": "0,100"
+        }
       }
     },
     "25": {
@@ -594,20 +731,25 @@
       },
       "atk_modifiers": {},
       "def_modifiers": {},
-      "luck_modifiers": {"all": "-9,15"},
+      "luck_modifiers": {
+        "all": "-9,25"
+      },
       "cop": {
         "name": "Brute Force",
         "description": "Luck range is changed to -19% to +49%.",
         "atk_modifiers": {},
-        "def_modifiers": {},
-        "luck_modifiers": {"all": "-10,25"}
+        "luck_modifiers": {
+          "all": "-19,50"
+        }
       },
       "scop": {
         "name": "Barbaric Blow",
         "description": "Luck range is changed to -39% to +89%.",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "luck_modifiers": {"all": "-30,65"}
+        "luck_modifiers": {
+          "all": "-39,90"
+        }
       }
     },
     "26": {
@@ -622,19 +764,25 @@
       },
       "atk_modifiers": {},
       "def_modifiers": {},
-      "luck_modifiers": {"all": "-14,20"},
+      "luck_modifiers": {
+        "all": "-14,30"
+      },
       "cop": {
         "name": "Overclock",
         "description": "Luck range is changed to -24% to +54%.",
         "atk_modifiers": {},
-        "luck_modifiers": {"all": "-10,35"}
+        "luck_modifiers": {
+          "all": "-24,55"
+        }
       },
       "scop": {
         "name": "Firestorm",
         "description": "Luck range is changed to -44% to +94%.",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "luck_modifiers": {"all": "-30,65"}
+        "luck_modifiers": {
+          "all": "-44,95"
+        }
       }
     },
     "27": {
@@ -648,18 +796,24 @@
         "description": "Units gain +20% defense against indirect units. Comm Towers grant all units additional +10% defense."
       },
       "atk_modifiers": {},
-      "def_modifiers": {"against_indirect": 20},
+      "def_modifiers": {
+        "against_indirect": 20
+      },
       "cop": {
         "name": "Tower Shield",
         "description": "Indirect defense is increased to +40%. Comm Tower bonuses are doubled.",
         "atk_modifiers": {},
-        "def_modifiers": {"against_indirect": 20}
+        "def_modifiers": {
+          "against_indirect": 20
+        }
       },
       "scop": {
         "name": "Tower of Power",
         "description": "Indirect defense is increased to +80%. Comm Tower bonuses are tripled.",
         "atk_modifiers": {},
-        "def_modifiers": {"against_indirect": 60}
+        "def_modifiers": {
+          "against_indirect": 60
+        }
       }
     },
     "28": {
@@ -679,7 +833,9 @@
         "description": "Luck is improved to +0% to +39%.",
         "atk_modifiers": {},
         "def_modifiers": {},
-        "luck_modifiers": {"all": "0,30"}
+        "luck_modifiers": {
+          "all": "0,30"
+        }
       },
       "scop": {
         "name": "Covering Fire",
@@ -698,8 +854,12 @@
       "day_to_day": {
         "description": "Movement cost over all terrain is reduced to 1, except in snow. Units lose -20% attack and gain +20% defense."
       },
-      "atk_modifiers": {"all": -20},
-      "def_modifiers": {"all": 20},
+      "atk_modifiers": {
+        "all": -20
+      },
+      "def_modifiers": {
+        "all": 20
+      },
       "cop": {
         "name": "Meteor Strike",
         "description": "A 2-range missile deals 4HP damage. The missile targets an enemy unit located at the greatest accumulation of unit value.",
@@ -723,8 +883,12 @@
       "day_to_day": {
         "description": "+10% ATK and DEF to all units"
       },
-      "atk_modifiers": {"all": 10},
-      "def_modifiers": {"all": 10},
+      "atk_modifiers": {
+        "all": 10
+      },
+      "def_modifiers": {
+        "all": 10
+      },
       "cop": null,
       "scop": {
         "name": "Ex Machina",

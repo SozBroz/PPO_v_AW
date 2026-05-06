@@ -340,7 +340,7 @@ UNIT_STATS: dict[UnitType, UnitStats] = {
     UnitType.BLACK_BOAT: UnitStats(
         unit_type=UnitType.BLACK_BOAT, name="Black Boat",
         move_type=MOVE_LANDER, move_range=7,
-        max_fuel=60, fuel_per_turn=1,
+        max_fuel=50, fuel_per_turn=1,
         max_ammo=0, vision=1, cost=7500,
         unit_class="naval", can_capture=False,
         carry_capacity=2, min_range=1, max_range=1,

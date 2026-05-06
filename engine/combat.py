@@ -242,14 +242,14 @@ def _bounded_luck_digit(roll: int) -> int:
     return max(0, min(int(roll), 9))
 
 
-def _single_roll_net_luck(low: int, high_exclusive: int, roll: int) -> int:
-    """Interpolate one 0–9 digit across inclusive endpoints ``low .. high_exclusive-1``.
+def _single_roll_net_luck(low: int, high: int, roll: int) -> int:
+    """Interpolate one 0–9 digit across inclusive endpoints ``low .. high``.
 
     Used when luck is a **single** stochastic degree of freedom (no mixed good+bad arm).
-    Bounds match ``co_data.json``: ``high_exclusive`` is exclusive (``\"0,10\"`` → 0..9).
+    Bounds match ``co_data.json``: inclusive ``"0,9"`` → 0..9.
     """
     br = _bounded_luck_digit(roll)
-    span = high_exclusive - low
+    span = high - low + 1
     if span <= 1:
         return low
     return low + ((span - 1) * br) // 9
@@ -257,8 +257,8 @@ def _single_roll_net_luck(low: int, high_exclusive: int, roll: int) -> int:
 
 def _is_dual_luck_bounds(bounds: tuple[int, int]) -> bool:
     """True when AWBW uses separate bad-luck and good-luck dice (mixed or symmetric Sonja)."""
-    low, high_ex = bounds
-    return low < 0 and (high_ex > 0 or high_ex == 0)
+    low, high = bounds
+    return low < 0 and (high > 0 or high == 0)
 
 
 def luck_net_bounds_for_co(co: COState) -> tuple[int, int]:
@@ -266,13 +266,15 @@ def luck_net_bounds_for_co(co: COState) -> tuple[int, int]:
     bounds = co.luck_bounds()
     if bounds is None:
         return 0, 9
-    low, high_ex = bounds
+    low, high = bounds
     if _is_dual_luck_bounds(bounds):
-        if high_ex == 0:
-            cap = -low
-            return -cap, cap
-        return -(-low), high_ex - 1
-    vals = [_single_roll_net_luck(low, high_ex, r) for r in range(10)]
+        # Dual-luck: bad arm maps roll 0-9 → low..0, good arm maps roll 0-9 → 0..high
+        # Net min = good_min - bad_max = 0 - 0 = 0... wait, need to think
+        # Actually: net = good - bad
+        # Min net: good=low_good (0), bad=high_bad (|low|) → 0 - |low|
+        # Max net: good=high_good (high), bad=low_bad (0) → high - 0
+        return low, high
+    vals = [_single_roll_net_luck(low, high, r) for r in range(10)]
     return min(vals), max(vals)
 
 
@@ -387,10 +389,29 @@ def calculate_damage(
     # --- Attack Value ---
     av = attacker_co.total_atk_for_unit(attacker.unit_type)
 
-    # Lash (co_id=16): terrain stars add to ATK when her power is active
+    # Lash (co_id=16): terrain stars add to ATK.
+    #
+    # AWBW canon (Tier 1, https://awbw.amarriner.com/co.php Lash row):
+    #   D2D  — *"Units gain +10% attack for every terrain star
+    #            (note: air units are unaffected by terrain)."*
+    #   COP "Terrain Tactics" — *"Terrain star value counts double for
+    #            defensive purposes for all own units, movement cost for
+    #            all terrain is reduced to 1 except for snow."*
+    #            (No attack change — only defense stars doubled.)
+    #   SCOP "Prime Tactics" — *"Terrain stars are doubled (attack and
+    #            defense)."*
+    #   Source (Tier 2, co_data.json Lash entry): matches above; COP
+    #   doubles defense-only, SCOP doubles both ATK (→20%/star) and DEF.
+    #
+    # Air units (air/copter) are excluded from the terrain ATK bonus
+    # (canon says "air units are unaffected by terrain").
     if attacker_co.co_id == 16:
-        if attacker_co.scop_active or attacker_co.cop_active:
-            av += attacker_terrain.defense * 10
+        cls = UNIT_STATS[attacker.unit_type].unit_class
+        if cls not in ("air", "copter"):
+            if attacker_co.scop_active:
+                av += attacker_terrain.defense * 20  # doubled for SCOP
+            else:
+                av += attacker_terrain.defense * 10  # D2D (and COP — no change)
 
     # Kindle (co_id=23): urban-terrain attack rider (D2D / COP / SCOP).
     av += _kindle_atk_rider(attacker_co, attacker_terrain)
@@ -571,9 +592,14 @@ def calculate_counterattack(
         counter_unit = defender
 
     # Sonja D2D "counterattacks do 1.5x more damage" (amarriner Sonja row).
-    # No canon language disables this under COP/SCOP — the ×1.5 stacks on
-    # top of SCOP's "attack first" pre-attack-HP path above.
-    counter_amp = 1.5 if defender_co.co_id == 18 else 1.0
+    # Kanbei SCOP "Samurai Spirit" also does 1.5x counterattack damage
+    # (AWBW CO Chart: "Counterattacks do 1.5x more damage").
+    # No canon language disables this under either CO's COP/SCOP — the
+    # ×1.5 stacks on top of SCOP's "attack first" for Sonja.
+    counter_amp = 1.5 if defender_co.co_id in (18, 3) else 1.0
+    # Kanbei SCOP specifically (co_id=3, scop_active=True)
+    if defender_co.co_id == 3 and not defender_co.scop_active:
+        counter_amp = 1.0
 
     return calculate_damage(
         counter_unit, attacker,
