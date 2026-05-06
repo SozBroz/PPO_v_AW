@@ -170,7 +170,9 @@ def compare_units(
     for _k, u in (php_frame.get("units") or {}).items():
         if not isinstance(u, dict):
             continue
-        if str(u.get("carried", "N")).upper() == "Y":
+        # Skip carried units (PHP marks them "carried: Y" or "Yes" or 1)
+        carried = str(u.get("carried", "N")).upper()
+        if carried in ("Y", "YES", "1", "TRUE"):
             continue
         col, row = int(u["x"]), int(u["y"])
         pid = int(u["players_id"])
@@ -399,12 +401,12 @@ def compare_co_states(
         if not co_state.cop_active and not co_state.scop_active:
             php_charge = _php_int_optional(pl.get("co_power"), 0)
             if php_charge > 0:
-                                # PHP: 1000 per star (2500 = 2.5 stars)
+                # PHP: 1000 per star (2500 = 2.5 stars). The raw value is in
+                # units of 1000, so dividing by 1000.0 gives the star count.
                 php_stars = php_charge / 1000.0
-                # Engine: power_bar is in funds units (9000 per star)
-                # e.g. 9000 funds damage = 1 star = 9000 power_bar units
+                # Engine: 9000 per star (9000 = 1.0 stars)
                 eng_stars = co_state.power_bar / 9000.0
-                # Allow 0.5-star tolerance
+                # Allow 0.5-star tolerance for timing differences
                 if abs(php_stars - eng_stars) > 0.5:
                     out.append(
                         f"P{eng} charge_mismatch: "
