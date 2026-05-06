@@ -258,6 +258,9 @@ def _poll_remote_transitions(
 ) -> tuple[int, dict[str, float]]:
     """Poll remote transition files and ingest them into the replay buffer.
 
+    Reads both plain .jsonl and compressed .jsonl.gz files from
+    fleet/*/transitions/ and flat transitions/ directories.
+
     Args:
         remote_dir: Root directory containing fleet/*/transitions/ subdirectories.
         replay: The replay buffer to add transitions to.
@@ -267,6 +270,8 @@ def _poll_remote_transitions(
     Returns:
         (num_ingested, updated_last_poll_mtime)
     """
+    import gzip
+
     if last_poll_mtime is None:
         last_poll_mtime = {}
 
@@ -274,15 +279,19 @@ def _poll_remote_transitions(
     if not remote_path.exists():
         return 0, last_poll_mtime
 
-    # Glob all transition files under fleet/*/transitions/
-    # Pattern: fleet/*/transitions/*.jsonl
+    # Glob all transition files (both plain and compressed)
     import glob
-    pattern = str(remote_path / "fleet" / "*" / "transitions" / "*.jsonl")
-    transition_files = glob.glob(pattern)
+
+    # Pattern: fleet/*/transitions/*.jsonl and *.jsonl.gz
+    pattern1 = str(remote_path / "fleet" / "*" / "transitions" / "*.jsonl")
+    pattern2 = str(remote_path / "fleet" / "*" / "transitions" / "*.jsonl.gz")
+    transition_files = glob.glob(pattern1) + glob.glob(pattern2)
 
     # Also check flat transitions dir if it exists
-    flat_pattern = str(remote_path / "transitions" / "*.jsonl")
-    transition_files.extend(glob.glob(flat_pattern))
+    flat_pattern1 = str(remote_path / "transitions" / "*.jsonl")
+    flat_pattern2 = str(remote_path / "transitions" / "*.jsonl.gz")
+    transition_files.extend(glob.glob(flat_pattern1))
+    transition_files.extend(glob.glob(flat_pattern2))
 
     total_ingested = 0
     files_to_process = []
@@ -300,8 +309,13 @@ def _poll_remote_transitions(
 
     for f, mtime in files_to_process:
         try:
-            with open(f, "r", encoding="utf-8") as fh:
-                lines = [line.strip() for line in fh.readlines() if line.strip()]
+            # Handle both plain and compressed files
+            if f.suffix == ".gz":
+                with gzip.open(f, "rt", encoding="utf-8") as fh:
+                    lines = [line.strip() for line in fh.readlines() if line.strip()]
+            else:
+                with open(f, "r", encoding="utf-8") as fh:
+                    lines = [line.strip() for line in fh.readlines() if line.strip()]
 
             transitions = []
             for line in lines:
@@ -331,7 +345,10 @@ def _poll_remote_transitions(
 
             # Mark file as consumed by renaming to .done
             try:
-                done_path = f.with_suffix(".jsonl.done")
+                if f.suffix == ".gz":
+                    done_path = f.with_suffix(".jsonl.gz.done")
+                else:
+                    done_path = f.with_suffix(".jsonl.done")
                 os.rename(str(f), str(done_path))
             except OSError:
                 # If rename fails, just continue

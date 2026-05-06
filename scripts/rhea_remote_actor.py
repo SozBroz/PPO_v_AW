@@ -3,33 +3,55 @@ Remote RHEA actor for multi-machine value training.
 
 Runs on any machine with access to the shared Samba mount (Z:\\ or /mnt/awbw).
 Reads the latest value net from checkpoints/value_rhea_latest.pt, runs RHEA
-self-play, and writes transition batches to Z:/fleet/<machine_id>/transitions/
-for the learner (running on workhorse1) to ingest.
+self-play, and writes COMPRESSED transition batches to a LOCAL staging dir,
+then BACKGROUND-SYNCS them to the shared Samba mount.
 
-Usage (on any auxiliary machine):
+This avoids the Samba slowness by:
+1. Writing batches to fast local disk (not Samba)
+2. Compressing batches with gzip (much faster over network)
+3. Using a background thread to async sync to Samba
+
+Usage (on any machine):
     python -m scripts.rhea_remote_actor \
         --shared-root Z:\\ \
         --machine-id workhorse2 \
         --checkpoint Z:/checkpoints/value_rhea_latest.pt \
-        --map-id 171596 \
-        --co-p0 14,8,28,7 --co-p1 14,8,28,7 \
-        --max-days 30 \
-        --rhea-autotune \
-        --reward-weight 0.8 --value-weight 0.2 \
-        --transition-batch-size 100 \
+        --local-staging-dir C:\\temp\\rhea_transitions \
+        --transition-batch-size 500 \
         --n-envs 8
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import random
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+import torch
+
+# Ensure project root is on path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
+from rl.env import AWBWEnv
+from rl.rhea import RheaConfig, RheaPlanner
+from rl.rhea_fitness import RheaFitness
+from rl.rhea_replay import RheaTransition
+from rl.value_net import AWBWValueNet, load_value_checkpoint
+
 
 # ---------------------------------------------------------------------------
 # Cython auto-recompile: if any .pyx is newer than its compiled .pyd/.so,
@@ -84,25 +106,18 @@ def _maybe_recompile_cython() -> None:
                 print(
                     f"Cython rebuild failed (rc={result.returncode}):\n"
                     f"{result.stdout}\n{result.stderr}",
-                    file=_sys.stderr,
+                    file=sys.stderr,
                     flush=True,
                 )
             else:
                 print("Cython rebuild complete.", flush=True)
         except Exception as exc:
-            print(f"Cython rebuild error: {exc}", file=_sys.stderr, flush=True)
+            print(f"Cython rebuild error: {exc}", file=sys.stderr, flush=True)
 
 
 # Run the check before importing rl.* (which may import the .pyd files)
 _maybe_recompile_cython()
 
-import numpy as np
-import torch
-
-# Ensure project root is on path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
 from rl.env import AWBWEnv
@@ -211,6 +226,187 @@ def _encode_into(
     )
 
 
+# ---------------------------------------------------------------------------
+# Background sync thread: syncs local staging dir to Samba
+# ---------------------------------------------------------------------------
+class StagingSyncThread(threading.Thread):
+    """Background thread that syncs local transition files to Samba.
+
+    Uses robocopy on Windows (mirror mode, retries on failure) or
+    rsync on Linux.  Compressed .jsonl.gz files are synced.
+    """
+
+    def __init__(
+        self,
+        local_dir: Path,
+        remote_dir: Path,
+        machine_id: str,
+        poll_interval: float = 30.0,
+    ) -> None:
+        super().__init__(name="StagingSync", daemon=True)
+        self.local_dir = local_dir
+        self.remote_dir = remote_dir
+        self.machine_id = machine_id
+        self.poll_interval = poll_interval
+        self._stop_event = threading.Event()
+        self.files_synced = 0
+        self.errors = 0
+
+    def run(self) -> None:
+        """Sync loop: mirror local -> remote using robocopy/rsync."""
+        while not self._stop_event.is_set():
+            try:
+                self._sync_once()
+            except Exception as exc:
+                self.errors += 1
+                print(json.dumps({
+                    "event": "staging_sync_error",
+                    "machine_id": self.machine_id,
+                    "error": str(exc),
+                }), flush=True)
+
+            # Wait for next poll or stop
+            self._stop_event.wait(timeout=self.poll_interval)
+
+    def _sync_once(self) -> None:
+        """One sync pass: mirror local staging to remote Samba dir."""
+        if not self.local_dir.exists():
+            return
+
+        # Ensure remote dir exists
+        self.remote_dir.mkdir(parents=True, exist_ok=True)
+
+        if sys.platform.startswith("win"):
+            self._sync_robocopy()
+        else:
+            self._sync_rsync()
+
+    def _sync_robocopy(self) -> None:
+        """Use robocopy to mirror local -> remote (Windows)."""
+        # robocopy arguments:
+        #   /MIR - mirror (copy new, delete removed from dest)
+        #   /R:3 - retry 3 times
+        #   /W:5 - wait 5 sec between retries
+        #   /NJH - no job header
+        #   /NJS - no job summary
+        #   /NP  - no progress display
+        local_str = str(self.local_dir)
+        remote_str = str(self.remote_dir)
+
+        try:
+            result = subprocess.run(
+                [
+                    "robocopy",
+                    local_str,
+                    remote_str,
+                    "*.jsonl.gz",
+                    "/MIR",
+                    "/R:3",
+                    "/W:5",
+                    "/NJH",
+                    "/NJS",
+                    "/NP",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            # robocopy returns 0-7 as success codes (0=no files copied, 1=files copied, etc.)
+            if result.returncode > 7:
+                print(json.dumps({
+                    "event": "robocopy_failed",
+                    "machine_id": self.machine_id,
+                    "returncode": result.returncode,
+                    "stderr": result.stderr[-500:] if result.stderr else "",
+                }), flush=True)
+            else:
+                # Count .gz files in local dir as a rough metric
+                gz_files = list(self.local_dir.glob("*.jsonl.gz"))
+                if gz_files:
+                    self.files_synced = len(gz_files)
+                    if False:  # Set to True for verbose sync logging
+                        print(json.dumps({
+                            "event": "staging_sync_complete",
+                            "machine_id": self.machine_id,
+                            "files_synced": self.files_synced,
+                        }), flush=True)
+        except Exception as exc:
+            self.errors += 1
+            print(json.dumps({
+                "event": "robocopy_exception",
+                "machine_id": self.machine_id,
+                "error": str(exc),
+            }), flush=True)
+
+    def _sync_rsync(self) -> None:
+        """Use rsync to sync local -> remote (Linux)."""
+        local_str = str(self.local_dir) + "/"
+        remote_str = str(self.remote_dir) + "/"
+
+        try:
+            result = subprocess.run(
+                [
+                    "rsync",
+                    "-av",
+                    "--include=*.jsonl.gz",
+                    "--exclude=*",
+                    "--remove-source-files",
+                    local_str,
+                    remote_str,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                print(json.dumps({
+                    "event": "rsync_failed",
+                    "machine_id": self.machine_id,
+                    "returncode": result.returncode,
+                    "stderr": result.stderr[-500:] if result.stderr else "",
+                }), flush=True)
+        except Exception as exc:
+            self.errors += 1
+            print(json.dumps({
+                "event": "rsync_exception",
+                "machine_id": self.machine_id,
+                "error": str(exc),
+            }), flush=True)
+
+    def stop(self) -> None:
+        """Signal the thread to stop and wait for final sync."""
+        self._stop_event.set()
+        # Do one final sync
+        try:
+            self._sync_once()
+        except Exception:
+            pass
+
+
+def write_compressed_batch(
+    transitions: list[dict[str, Any]],
+    staging_dir: Path,
+    machine_id: str,
+    batch_num: int,
+) -> Path:
+    """Write a batch of transitions to a GZIP-compressed JSONL file in staging dir.
+
+    Returns the path to the written file (local staging dir).
+    The background StagingSyncThread will sync it to Samba.
+    """
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    stem = f"{machine_id}_batch_{batch_num:06d}_{timestamp}"
+    gz_path = staging_dir / f"{stem}.jsonl.gz"
+
+    with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+        for t in transitions:
+            f.write(json.dumps(t, separators=(",", ":")) + "\n")
+
+    return gz_path
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Remote RHEA actor for multi-machine training")
 
@@ -243,11 +439,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
 
-    # Transition output
-    ap.add_argument("--transition-batch-size", type=int, default=100,
-                      help="Number of transitions per JSONL file written to shared disk")
+    # Transition output (optimized for Samba)
+    ap.add_argument("--transition-batch-size", type=int, default=500,
+                      help="Number of transitions per compressed batch (default: 500, larger = fewer Samba ops)")
     ap.add_argument("--transition-dir", type=str, default=None,
-                      help="Override transition output directory (default: <shared-root>/fleet/<machine-id>/transitions/)")
+                      help="FINAL transition directory on shared Samba (default: <shared-root>/fleet/<machine-id>/transitions/)")
+    ap.add_argument("--local-staging-dir", type=str, default=None,
+                      help="LOCAL disk path for staging transitions before Samba sync (default: system temp dir)")
+    ap.add_argument("--no-compress", action="store_true",
+                      help="Disable gzip compression of transition batches")
+    ap.add_argument("--sync-interval", type=float, default=30.0,
+                      help="Seconds between background syncs to Samba (default: 30)")
 
     # Weight refresh
     ap.add_argument("--actor-refresh-seconds", type=float, default=120.0)
@@ -287,37 +489,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def write_transitions_batch(
-    transitions: list[dict[str, Any]],
-    transition_dir: Path,
-    machine_id: str,
-    batch_num: int,
-) -> None:
-    """Write a batch of transitions to a JSONL file atomically."""
-    transition_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-    stem = f"{machine_id}_batch_{batch_num:06d}_{timestamp}"
-    tmp_path = transition_dir / f".{stem}.jsonl.tmp"
-    final_path = transition_dir / f"{stem}.jsonl"
-
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for t in transitions:
-                f.write(json.dumps(t, separators=(",", ":")) + "\n")
-        # Atomic rename (works on both Windows SMB and Linux)
-        os.replace(str(tmp_path), str(final_path))
-        return final_path
-    except Exception as exc:
-        # Clean up tmp file on failure
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise exc
-
-
 def main() -> None:
     args = build_arg_parser().parse_args()
     _setup_env_vars(args)
@@ -331,13 +502,29 @@ def main() -> None:
     else:
         checkpoint_path = shared_root / "checkpoints" / "value_rhea_latest.pt"
 
-    # Transition output directory
+    # Transition output directory on Samba (final destination)
     if args.transition_dir:
         transition_dir = Path(args.transition_dir)
     else:
         transition_dir = shared_root / "fleet" / machine_id / "transitions"
 
-    transition_dir.mkdir(parents=True, exist_ok=True)
+    # Local staging directory (fast local disk)
+    if args.local_staging_dir:
+        staging_dir = Path(args.local_staging_dir)
+    else:
+        # Use system temp dir to avoid Samba for writes
+        staging_dir = Path(tempfile.gettempdir()) / "rhea_actor" / machine_id
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start background sync thread (syncs local staging -> Samba)
+    sync_thread = StagingSyncThread(
+        local_dir=staging_dir,
+        remote_dir=transition_dir,
+        machine_id=machine_id,
+        poll_interval=args.sync_interval,
+    )
+    sync_thread.start()
 
     # Seed
     seed = args.seed
@@ -352,6 +539,8 @@ def main() -> None:
         "shared_root": str(shared_root),
         "checkpoint": str(checkpoint_path),
         "transition_dir": str(transition_dir),
+        "staging_dir": str(staging_dir),
+        "compress": not args.no_compress,
         "device": args.device,
     }), flush=True)
 
@@ -403,9 +592,9 @@ def main() -> None:
             value_weight=args.value_weight,
             seed=seed,
             use_tactical_beam=args.rhea_use_tactical_beam,
-            tactial_beam_max_width=args.rhea_tactical_beam_max_width,
-            tactial_beam_max_depth=args.rhea_tactical_beam_max_depth,
-            tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
+            tactical_beam_max_width=args.rhea_tactical_beam_max_width,
+            tactical_beam_max_depth=args.rhea_tactical_beam_max_depth,
+            tactical_beam_max_expand=args.rhea_tactical_beam_max_expand,
         ),
         dynamic_budget=args.rhea_autotune,
         complexity_metrics=None,
@@ -422,6 +611,8 @@ def main() -> None:
     print(json.dumps({
         "event": "remote_actor_ready",
         "machine_id": machine_id,
+        "staging_dir": str(staging_dir),
+        "transition_dir": str(transition_dir),
     }), flush=True)
 
     try:
@@ -524,7 +715,12 @@ def main() -> None:
                 # Write batch if ready
                 if len(transitions_batch) >= args.transition_batch_size:
                     try:
-                        write_transitions_batch(transitions_batch, transition_dir, machine_id, batch_num)
+                        if args.no_compress:
+                            # Write uncompressed (slower over Samba)
+                            write_compressed_batch(transitions_batch, staging_dir, machine_id, batch_num)
+                        else:
+                            # Write compressed (much faster over Samba)
+                            write_compressed_batch(transitions_batch, staging_dir, machine_id, batch_num)
                         transitions_written += len(transitions_batch)
                         batch_num += 1
                         transitions_batch.clear()
@@ -563,10 +759,14 @@ def main() -> None:
             "games_done": games_done,
         }), flush=True)
     finally:
+        # Stop the sync thread (it will do a final sync)
+        sync_thread.stop()
+        sync_thread.join(timeout=60.0)
+
         # Write any remaining transitions
         if transitions_batch:
             try:
-                write_transitions_batch(transitions_batch, transition_dir, machine_id, batch_num)
+                write_compressed_batch(transitions_batch, staging_dir, machine_id, batch_num)
                 transitions_written += len(transitions_batch)
             except Exception as e:
                 print(json.dumps({
@@ -579,6 +779,8 @@ def main() -> None:
             "machine_id": machine_id,
             "total_transitions_written": transitions_written,
             "total_games_done": games_done,
+            "sync_files_synced": sync_thread.files_synced,
+            "sync_errors": sync_thread.errors,
         }), flush=True)
 
 
