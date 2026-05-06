@@ -128,7 +128,7 @@ class RheaPlanner:
     def choose_full_turn(self, state: GameState) -> RheaResult:
         acting_seat = int(state.active_player)
         before = state
-        
+
         # Run tactical beam if enabled
         beam_best = None
         if self.cfg.use_tactical_beam and self.tactical_beam is not None:
@@ -141,12 +141,12 @@ class RheaPlanner:
                     'breakdown': best_line.breakdown,
                     'illegal': 0,
                 }
-        
+
         # Use dynamic budgeting if enabled and metrics are provided
         population_size = self.cfg.population
         generations = self.cfg.generations
         max_actions_per_turn = self.cfg.max_actions_per_turn
-        
+
         if self.dynamic_budget and self.complexity_metrics is not None:
             owned_units, factories, contested_captures, enemy_in_range_contacts = self.complexity_metrics
             pop, gen, max_acts = dynamic_rhea_budget(
@@ -155,51 +155,145 @@ class RheaPlanner:
             population_size = pop
             generations = gen
             max_actions_per_turn = max_acts
-        
+
         population = [self._random_genome(before, max_actions_per_turn) for _ in range(population_size)]
         rhea_best = None
         initial_best_score: float | None = None
-        
+
         for _gen in range(generations):
-            scored = []
+            # --- BATCHED VALUE EVALUATION ---
+            # Collect all states that need evaluation (before + after for each genome)
+            states_to_eval = [before]  # We'll need before state for each genome
+            after_states = []
+
             for genome in population:
                 after, actions, illegal = self._simulate_genome(before, genome)
-                breakdown = self.fitness.score(
-                    before,
-                    after,
-                    observer_seat=acting_seat,
-                    illegal_genes=illegal,
-                    actions=actions,
+                after_states.append((after, actions, illegal))
+
+            # Batch evaluate values for all states at once
+            # We need: value(before) for each genome + value(after) for each genome
+            # Total: population_size states (just the after states, before is shared)
+            all_states = [after for after, _, _ in after_states]
+            all_values = self.fitness.batch_value(all_states, acting_seat)  # Batch eval!
+
+            # Also need before value (same for all, eval once)
+            before_value = self.fitness.value(before, acting_seat)
+
+            # Now score each genome using the batched values
+            scored = []
+            for idx, ((after, actions, illegal), v_after) in enumerate(zip(after_states, all_values)):
+                # phi_delta still needs individual computation
+                phi_after = self.fitness.phi(after, acting_seat)
+                phi_before = self.fitness.phi(before, acting_seat)
+                phi_delta = phi_after - phi_before
+
+                # value_delta = (v_after - v_before) * 2.0
+                win_advantage = (v_after - before_value) * 2.0
+
+                # Build breakdown
+                illegal_penalty = -self.fitness.illegal_gene_penalty * float(illegal)
+
+                # Check for build punishment (simplified for batch)
+                build_punishment = 0.0
+                mech_penalty = 0.0
+                unused_funds_penalty = 0.0
+
+                if actions is not None:
+                    # Check if END_TURN is in actions and no BUILD action before it
+                    end_turn_index = None
+                    build_happened = False
+                    build_actions = []
+                    total_build_cost = 0
+                    units_built = 0
+
+                    for i, action in enumerate(actions):
+                        if hasattr(action, 'action_type') and action.action_type.name == "END_TURN":
+                            end_turn_index = i
+                        elif hasattr(action, 'action_type') and action.action_type.name == "BUILD":
+                            build_happened = True
+                            build_actions.append(action)
+                            units_built += 1
+                            if hasattr(action, 'unit_type'):
+                                from engine.unit import UNIT_STATS
+                                unit_cost = UNIT_STATS[action.unit_type].cost
+                                total_build_cost += unit_cost
+
+                    if end_turn_index is not None and not build_happened:
+                        player_has_bases = self.fitness.env_template._player_has_bases(before, acting_seat)
+                        if player_has_bases:
+                            build_punishment_val = self.fitness.env_template._build_punishment
+                            if build_punishment_val > 0.0:
+                                build_punishment = -30000.0 * self.fitness.env_template._phi_alpha
+
+                    if build_happened and end_turn_index is not None:
+                        if self.fitness.env_template._player_has_bases(before, acting_seat):
+                            base_count = 0
+                            for prop in before.properties:
+                                if prop.owner == acting_seat:
+                                    if getattr(prop, "is_base", False) or getattr(prop, "is_airport", False) or getattr(prop, "is_port", False):
+                                        base_count += 1
+
+                            if base_count > 0:
+                                available_funds_before = before.funds[acting_seat]
+                                funds_needed_for_all_bases = base_count * 1000
+
+                                if available_funds_before >= funds_needed_for_all_bases:
+                                    if units_built < base_count:
+                                        missing_units = base_count - units_built
+                                        base_utilization_penalty = -0.05 * missing_units
+                                        unused_funds_penalty = base_utilization_penalty
+                                else:
+                                    max_affordable_with_cheapest = available_funds_before // 1000
+                                    if units_built < max_affordable_with_cheapest:
+                                        missing_units = max_affordable_with_cheapest - units_built
+                                        base_utilization_penalty = -0.05 * missing_units
+                                        unused_funds_penalty = base_utilization_penalty
+
+                total = (
+                    self.fitness.reward_weight * phi_delta
+                    + self.fitness.value_weight * win_advantage
+                    + illegal_penalty
+                    + build_punishment
+                    + mech_penalty
+                    + unused_funds_penalty
                 )
-                scored.append((breakdown.total, genome, actions, breakdown, illegal))
-            
+
+                breakdown = RheaFitnessBreakdown(
+                    phi_delta=float(phi_delta),
+                    value=float(win_advantage),
+                    illegal_penalty=float(illegal_penalty),
+                    total=float(total),
+                )
+
+                scored.append((float(total), population[idx], actions, breakdown, illegal))
+
             scored.sort(key=lambda x: x[0], reverse=True)
-            
+
             if _gen == 0:
                 initial_best_score = float(scored[0][0])
-            
+
             if rhea_best is None or scored[0][0] > rhea_best[0]:
                 rhea_best = scored[0]
-            
+
             elites = scored[: max(1, self.cfg.elite)]
             next_pop: list[list[int]] = [list(g) for _, g, _, _, _ in elites]
-            
+
             while len(next_pop) < population_size:
                 p1 = self.rng.choice(elites)[1]
                 p2 = self.rng.choice(elites)[1]
                 child = self._crossover(p1, p2)
                 self._mutate(child)
                 next_pop.append(child)
-            
+
             population = next_pop
-        
+
         # Compare beam and RHEA, return best
         candidates = []
         if beam_best:
             candidates.append((beam_best['score'], None, beam_best['actions'], beam_best['breakdown'], beam_best['illegal']))
         if rhea_best:
             candidates.append(rhea_best)
-        
+
         if not candidates:
             # Fallback: return empty result
             return RheaResult(
@@ -211,10 +305,10 @@ class RheaPlanner:
                 initial_best_score=None,
                 evolved_gain=None,
             )
-        
+
         candidates.sort(key=lambda x: x[0], reverse=True)
         best_score, _, best_actions, best_breakdown, best_illegal = candidates[0]
-        
+
         # Determine if best is from beam or RHEA
         if beam_best and best_score == beam_best['score']:
             # Beam result is best

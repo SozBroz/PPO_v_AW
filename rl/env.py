@@ -928,6 +928,7 @@ class AWBWEnv(gym.Env):
         opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
         opening_book_force_mask_for_learner: bool = True,
+        opening_book_strike_release: bool = False,
         cop_disable_per_seat_p: float | None = None,
     ) -> None:
         super().__init__()
@@ -948,6 +949,7 @@ class AWBWEnv(gym.Env):
         )
         self._opening_book_seed = int(opening_book_seed)
         self._opening_book_force_mask_for_learner = bool(opening_book_force_mask_for_learner)
+        self._opening_book_strike_release = bool(opening_book_strike_release)
         self._opening_book_manager: Any | None = None
         if cop_disable_per_seat_p is None:
             _cdp_raw = (os.environ.get(COP_DISABLE_PER_SEAT_P_ENV) or "").strip()
@@ -1063,6 +1065,7 @@ class AWBWEnv(gym.Env):
                     strict_co=self._opening_book_strict_co,
                     max_day=self._opening_book_max_day,
                     seed=self._opening_book_seed,
+                    strike_release=self._opening_book_strike_release,
                 )
             except Exception as exc:
                 print(
@@ -2812,8 +2815,18 @@ class AWBWEnv(gym.Env):
         mgr = getattr(self, "_opening_book_manager", None)
         if mgr is None:
             return None
+        
+        # Check for strike release before suggesting a book action
+        active_seat = int(self.state.active_player)
+        ctl = mgr.controllers.get(active_seat)
+        if ctl is not None and hasattr(ctl, 'check_strike_release'):
+            if ctl.check_strike_release(self.state):
+                # Book was released due to strike range
+                self._sync_opening_book_log()
+                return None
+        
         a = mgr.suggest_flat(
-            seat=int(self.state.active_player),
+            seat=active_seat,
             calendar_turn=int(getattr(self.state, "turn", 0) or 0),
             action_mask=mask,
         )

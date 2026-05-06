@@ -49,7 +49,6 @@ for mod_name, pyx_path in all_modules:
     else:
         print("Warning: {} not found, skipping...".format(pyx_path))
 
-
 def get_compiler_directives():
     return {
         "boundscheck": False,
@@ -60,7 +59,6 @@ def get_compiler_directives():
         "overflowcheck": False,
         "language_level": 3,
     }
-
 
 # Custom inplace copy that handles locked .pyd files on Windows
 def robust_inplace_copy(build_dir, src_dir):
@@ -88,7 +86,6 @@ def robust_inplace_copy(build_dir, src_dir):
                     print("  Copied {} (had to rename locked file)".format(fname))
                 copied.append(dst)
     return copied
-
 
 if __name__ == "__main__":
     inplace = "--inplace" in sys.argv
@@ -119,4 +116,3 @@ if __name__ == "__main__":
             print("Done.")
         else:
             print("\nNo build output found to copy.")
-

@@ -156,13 +156,23 @@ def _make_env(args: argparse.Namespace) -> AWBWEnv:
     # max_days parameter is passed as max_turns to AWBWEnv
     # (they are aliases for the same calendar day cap)
     max_turns = args.max_days if args.max_days else None
-    
+
+    # Opening book integration
+    opening_book_path = str(args.opening_book_path) if args.opening_book_path else None
+    opening_book_prob = max(0.0, min(1.0, float(args.opening_book_prob)))
+    opening_book_strike_release = bool(args.opening_book_strike_release)
+
     try:
         return AWBWEnv(
             map_pool=map_pool,
             co_p0=co_p0,
             co_p1=co_p1,
             max_turns=max_turns,
+            opening_book_path=opening_book_path,
+            opening_book_seats="both",
+            opening_book_prob=opening_book_prob,
+            opening_book_strict_co=False,
+            opening_book_strike_release=opening_book_strike_release,
         )
     except TypeError:
         return AWBWEnv(
@@ -170,6 +180,11 @@ def _make_env(args: argparse.Namespace) -> AWBWEnv:
             co_p0=co_p0[0],
             co_p1=co_p1[0],
             max_turns=max_turns,
+            opening_book_path=opening_book_path,
+            opening_book_seats="both",
+            opening_book_prob=opening_book_prob,
+            opening_book_strict_co=False,
+            opening_book_strike_release=opening_book_strike_release,
         )
 
 
@@ -1046,6 +1061,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # COP disable (forces SCOP learning)
     ap.add_argument("--cop-disable-per-seat-p", type=float, default=0.10,
                       help="Probability (0-1) to disable COP for each seat at game start (default 0.10 = 10%%)")
+
+    # Opening book (Designed Desires)
+    ap.add_argument("--opening-book-path", type=Path, default=None,
+                      help="Path to opening book JSONL (e.g., data/designed_desires_opening_book.jsonl)")
+    ap.add_argument("--opening-book-prob", type=float, default=1.0,
+                      help="Probability (0-1) to use opening book vs RHEA from day 1 (default 1.0 = always)")
+    ap.add_argument("--opening-book-strike-release", action="store_true",
+                      help="Release opening book if a unit moves into enemy strike range")
 
     # RHEA search.
     ap.add_argument("--rhea-autotune", action="store_true",

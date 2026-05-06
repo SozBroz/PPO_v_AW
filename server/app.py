@@ -32,6 +32,8 @@ def create_app():
     from server.routes.game import bp as game_bp
     from server.step_visualization import bp as step_viz_bp
     from server.routes.nn_audit import bp as nn_audit_bp
+    from server.routes.analyze import bp as analyze_bp
+    from server.routes.your_games import bp as your_games_bp
 
     app.register_blueprint(watch_bp)
     app.register_blueprint(reward_audit_bp)
@@ -40,6 +42,8 @@ def create_app():
     app.register_blueprint(game_bp)
     app.register_blueprint(step_viz_bp)
     app.register_blueprint(nn_audit_bp)
+    app.register_blueprint(your_games_bp)
+    app.register_blueprint(analyze_bp)
 
     return app
 

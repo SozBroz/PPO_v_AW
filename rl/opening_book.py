@@ -113,6 +113,7 @@ class OpeningBookController:
         strict_co: bool,
         rng: random.Random,
         max_calendar_turn: int | None,
+        strike_release: bool = False,
     ) -> None:
         self._index = index
         self._seat = int(seat)
@@ -120,6 +121,7 @@ class OpeningBookController:
         self._rng = rng
         mct = max_calendar_turn if max_calendar_turn is not None and int(max_calendar_turn) > 0 else None
         self._max_calendar_turn = mct
+        self._strike_release = bool(strike_release)
         self._book: _Book | None = None
         self._cursor = 0
         self._episode_token: int | None = None
@@ -241,6 +243,45 @@ class OpeningBookController:
         self.desync_reason = reason
         self._book = None
 
+    def check_strike_release(self, state: Any) -> bool:
+        """Check if any unit is in enemy strike range. If so, release the book."""
+        if not self._strike_release or not self.episode_enabled or self._book is None:
+            return False
+        
+        player = self._seat
+        enemy = 1 - player
+        
+        if not hasattr(state, 'units') or not hasattr(state, 'map_data'):
+            return False
+        
+        player_units = state.units.get(player, [])
+        enemy_units = state.units.get(enemy, [])
+        
+        from engine.action import get_attack_targets, _build_occupancy
+        
+        try:
+            occupancy = _build_occupancy(state)
+            # For each enemy unit, compute all positions it can attack
+            enemy_attack_positions = set()
+            for enemy_unit in enemy_units:
+                if not enemy_unit.is_alive:
+                    continue
+                # Get all positions this enemy unit can attack from its current position
+                targets = get_attack_targets(state, enemy_unit, enemy_unit.pos, occupancy=occupancy)
+                enemy_attack_positions.update(targets)
+            
+            # Check if any player unit is in an enemy attack position
+            for unit in player_units:
+                if not unit.is_alive:
+                    continue
+                if unit.pos in enemy_attack_positions:
+                    self._mark_desync("strike_range_release")
+                    return True
+        except Exception:
+            pass  # If we can't check, don't release
+        
+        return False
+
     def log_fields(self) -> dict[str, Any]:
         p = "p1" if self._seat == 1 else "p0"
         return {
@@ -267,12 +308,14 @@ class TwoSidedOpeningBookManager:
         strict_co: bool = False,
         max_day: int | None = None,
         seed: int = 0,
+        strike_release: bool = False,
     ) -> None:
         self.index = OpeningBookIndex.from_jsonl(Path(path))
         self.prob = max(0.0, min(1.0, float(prob)))
         self.strict_co = bool(strict_co)
         self.rng = random.Random(int(seed))
         self.enabled_seats = _parse_seats(seats)
+        self.strike_release = bool(strike_release)
         self.controllers = {
             0: OpeningBookController(
                 self.index,
@@ -280,6 +323,7 @@ class TwoSidedOpeningBookManager:
                 strict_co=self.strict_co,
                 rng=random.Random(int(seed) + 101),
                 max_calendar_turn=max_day,
+                strike_release=self.strike_release,
             ),
             1: OpeningBookController(
                 self.index,
@@ -287,6 +331,7 @@ class TwoSidedOpeningBookManager:
                 strict_co=self.strict_co,
                 rng=random.Random(int(seed) + 202),
                 max_calendar_turn=max_day,
+                strike_release=self.strike_release,
             ),
         }
 

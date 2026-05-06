@@ -55,6 +55,61 @@ def evaluate_value_fast(
     return float(win_prob)
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def evaluate_value_batch_fast(
+    object model,              # AWBWValueNet
+    list states,               # List[GameState]
+    int observer_seat,
+    str device="cuda",
+) -> list:
+    """
+    Cython-accelerated batch value evaluation.
+    Encodes all states and does ONE forward pass.
+    Returns list of win probabilities [0.0, 1.0].
+    """
+    cdef int batch_size = len(states)
+    if batch_size == 0:
+        return []
+
+    # Allocate batched arrays
+    cdef np.float32_t[:, :, :, :] spatial_batch = np.zeros(
+        (batch_size, GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32
+    )
+    cdef np.float32_t[:, :] scalars_batch = np.zeros(
+        (batch_size, N_SCALARS), dtype=np.float32
+    )
+
+    # Encode all states
+    cdef int i
+    cdef np.float32_t[:, :, :] spatial_view
+    cdef np.float32_t[:] scalars_view
+
+    for i in range(batch_size):
+        spatial_view = spatial_batch[i]
+        scalars_view = scalars_batch[i]
+        spatial_view[...] = 0.0
+        scalars_view[...] = 0.0
+        encode_state(
+            states[i],
+            observer=int(observer_seat),
+            belief=None,
+            out_spatial=spatial_view,
+            out_scalars=scalars_view,
+        )
+
+    # Call batch evaluation
+    from rl.value_net import evaluate_value_batch
+    win_probs = evaluate_value_batch(
+        model,
+        [np.asarray(spatial_batch[i]) for i in range(batch_size)],
+        [np.asarray(scalars_batch[i]) for i in range(batch_size)],
+        device=device,
+    )
+
+    return [float(p) for p in win_probs]
+
+
 # ---- Phi computation bridge ----
 @cython.boundscheck(False)
 @cython.wraparound(False)

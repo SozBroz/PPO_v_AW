@@ -84,6 +84,67 @@ def evaluate_value_np(
     return float(win_prob)
 
 
+@torch.no_grad()
+def evaluate_value_batch(
+    model: AWBWValueNet,
+    spatial_list: list[np.ndarray],
+    scalars_list: list[np.ndarray],
+    *,
+    device: str | torch.device = "cuda",
+    return_logits: bool = False,
+) -> np.ndarray:
+    """Batch evaluate value for multiple states at once.
+
+    Args:
+        model: AWBWValueNet model
+        spatial_list: List of spatial arrays, each shape (30, 30, C)
+        scalars_list: List of scalar arrays, each shape (N_SCALARS,)
+        device: Device to run on
+        return_logits: If True, return raw logits; else sigmoid probabilities
+
+    Returns:
+        numpy array of shape (batch_size,) with win probabilities or logits
+    """
+    if not spatial_list:
+        return np.array([], dtype=np.float32)
+
+    model.eval()
+    dev = torch.device(device)
+    batch_size = len(spatial_list)
+
+    # Stack all inputs into batches
+    spatial_batch = np.stack(spatial_list, axis=0)  # (B, 30, 30, C)
+    scalars_batch = np.stack(scalars_list, axis=0)  # (B, N_SCALARS)
+
+    # Cache batch tensors on model (reuse if batch size matches)
+    cache = getattr(model, "_value_batch_cache", {})
+    if dev not in cache or cache[dev]["batch_size"] < batch_size:
+        cache[dev] = {
+            "spatial": torch.zeros((batch_size, GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=torch.float32, device=dev),
+            "scalars": torch.zeros((batch_size, N_SCALARS), dtype=torch.float32, device=dev),
+            "batch_size": batch_size,
+        }
+        model._value_batch_cache = cache
+    buf = cache[dev]
+
+    # Copy data to GPU (non-blocking)
+    buf["spatial"][:batch_size].copy_(torch.as_tensor(spatial_batch, dtype=torch.float32), non_blocking=True)
+    buf["scalars"][:batch_size].copy_(torch.as_tensor(scalars_batch, dtype=torch.float32), non_blocking=True)
+
+    # Single forward pass for entire batch
+    logits = model(buf["spatial"][:batch_size], buf["scalars"][:batch_size])  # (B,)
+
+    # Sync once at the end
+    logits_np = logits.float().cpu().numpy()
+
+    if return_logits:
+        return logits_np
+
+    # Apply sigmoid to get win probabilities
+    win_probs = 1.0 / (1.0 + np.exp(-logits_np))
+    return win_probs.astype(np.float32)
+
+
 def load_value_from_maskable_ppo_zip(
     checkpoint_path: str | Path,
     *,
@@ -92,35 +153,57 @@ def load_value_from_maskable_ppo_zip(
     """
     Best-effort transplant from the current MaskablePPO checkpoint.
 
-    Loads same-name, same-shape board-trunk/value tensors. Depending on your
-    SB3 policy layout, the critic MLP may be owned outside the features
-    extractor; this function therefore prints what was actually loaded instead
-    of pretending the transplant is guaranteed perfect.
+    Loads same-name, same-shape board-trunk/value tensors.
+    Handles scalar_to_plane weight shape mismatch (16 vs 20 scalars).
     """
-    from sb3_contrib import MaskablePPO
-    from rl.ckpt_compat import load_maskable_ppo_compat
+    import torch
+    from zipfile import ZipFile
+    from io import BytesIO
 
     dev = torch.device(device)
-    # Use compatibility loader which handles encoder shape migrations
-    ppo = load_maskable_ppo_compat(str(checkpoint_path), device=dev)
+    checkpoint_path = Path(checkpoint_path)
 
+    # Load policy.pth from the zip manually
+    with ZipFile(checkpoint_path, "r") as zf:
+        with zf.open("policy.pth") as f:
+            policy_sd = torch.load(BytesIO(f.read()), map_location=dev, weights_only=False)
+
+    # Also load optimizer.pth to avoid shape mismatch warnings (not needed for inference)
+    # Build a fresh AWBWValueNet
     value = AWBWValueNet().to(dev)
-    src = ppo.policy.state_dict()
-    dst = value.state_dict()
 
+    # Transplant compatible tensors
+    new_sd = value.state_dict()
     transplanted: dict[str, torch.Tensor] = {}
-    prefixes = [
-        "features_extractor.",
-        "policy.features_extractor.",
-        "",
-    ]
 
-    for dst_key, dst_tensor in dst.items():
-        for prefix in prefixes:
+    # Handle scalar_to_plane weight specially (16 vs 20 scalars)
+    for dst_key in new_sd.keys():
+        # Try different prefixes that might be in the PPO checkpoint
+        found = False
+        for prefix in ["", "features_extractor.", "policy.features_extractor."]:
             src_key = prefix + dst_key
-            if src_key in src and tuple(src[src_key].shape) == tuple(dst_tensor.shape):
-                transplanted[dst_key] = src[src_key].detach().clone()
-                break
+            if src_key in policy_sd:
+                src_tensor = policy_sd[src_key]
+                dst_tensor = new_sd[dst_key]
+
+                # Special handling for scalar_to_plane.weight
+                if "scalar_to_plane.weight" in dst_key:
+                    if src_tensor.shape == dst_tensor.shape:
+                        transplanted[dst_key] = src_tensor.detach().clone()
+                    else:
+                        # Shape mismatch: checkpoint has 16 scalars, model wants 20
+                        # Copy what we can, zero-fill the rest
+                        print(f"[value_net] Resizing {src_key} from {src_tensor.shape} to {dst_tensor.shape}")
+                        new_weight = torch.zeros_like(dst_tensor)
+                        min_shape = min(src_tensor.shape[0], dst_tensor.shape[0])
+                        new_weight[:min_shape, :min_shape] = src_tensor[:min_shape, :min_shape]
+                        transplanted[dst_key] = new_weight
+                    found = True
+                    break
+                elif src_tensor.shape == dst_tensor.shape:
+                    transplanted[dst_key] = src_tensor.detach().clone()
+                    found = True
+                    break
 
     missing, unexpected = value.load_state_dict(transplanted, strict=False)
 

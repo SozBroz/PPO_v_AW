@@ -1323,7 +1323,7 @@ class GameState:
             # AWBW: 9000 funds damage = 1 star = 9000 power_bar units
             # dmg is display HP lost (1-10) from oracle (pre/post are internal_HP/10)
             # Convert to internal HP (1-100) for engine unit state
-            internal_dmg = dmg * 10
+            internal_dmg = min(dmg * 10, defender.hp)
             defender.hp = max(0, defender.hp - internal_dmg)
             self.losses_hp[defender.player] += internal_dmg  # Track HP lost
             if defender.hp == 0:

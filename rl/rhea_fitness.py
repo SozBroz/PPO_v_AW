@@ -8,14 +8,15 @@ import numpy as np
 from engine.game import GameState
 from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS, encode_state
 from rl.env import AWBWEnv
-from rl.value_net import AWBWValueNet, evaluate_value_np
+from rl.value_net import AWBWValueNet, evaluate_value_np, evaluate_value_batch
 
 # Cython acceleration for hot paths
 USE_CYTHON_FITNESS = True
 try:
-    from rl._rhea_fitness_cython import evaluate_value_fast, phi_cython
+    from rl._rhea_fitness_cython import evaluate_value_fast, evaluate_value_batch_fast, phi_cython
 except ImportError:
     USE_CYTHON_FITNESS = False
+    evaluate_value_batch_fast = None
 
 
 @dataclass(slots=True)
@@ -98,6 +99,52 @@ class RheaFitness:
         )
         win_prob = evaluate_value_np(self.value_model, self._spatial_buf, self._scalars_buf, device=self.device)
         return float(win_prob)
+
+    def batch_value(self, states: list[GameState], observer_seat: int) -> list[float]:
+        """Batch evaluate win probabilities for multiple states at once.
+
+        This is MUCH faster than calling value() repeatedly because it batches
+        all forward passes into one GPU call.
+
+        Args:
+            states: List of GameState objects to evaluate
+            observer_seat: Which seat to evaluate from
+
+        Returns:
+            List of win probabilities, one per state
+        """
+        if self.value_model is None:
+            return [0.5] * len(states)
+
+        if not states:
+            return []
+
+        # Use Cython batch if available (fastest path)
+        if USE_CYTHON_FITNESS and evaluate_value_batch_fast is not None:
+            return list(evaluate_value_batch_fast(self.value_model, states, observer_seat, self.device))
+
+        # Fallback: encode all states into batches
+        spatial_list = []
+        scalars_list = []
+        for state in states:
+            spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
+            scalars = np.zeros((N_SCALARS,), dtype=np.float32)
+            encode_state(
+                state,
+                observer=int(observer_seat),
+                belief=None,
+                out_spatial=spatial,
+                out_scalars=scalars,
+            )
+            spatial_list.append(spatial)
+            scalars_list.append(scalars)
+
+        # Batch evaluate
+        win_probs = evaluate_value_batch(
+            self.value_model, spatial_list, scalars_list, device=self.device
+        )
+
+        return [float(p) for p in win_probs]
 
     def score(
         self,

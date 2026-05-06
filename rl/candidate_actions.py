@@ -43,6 +43,11 @@ USE_CANDIDATE_CYTHON = (
     and os.environ.get("AWBW_USE_CANDIDATE_CYTHON", "1") == "1"
 )
 
+# Import the enumerate function if available
+enumerate_candidates_cython = None
+if CANDIDATE_CYTHON_AVAILABLE and hasattr(_candidate_actions_cython, 'enumerate_candidates_cython'):
+    enumerate_candidates_cython = _candidate_actions_cython.enumerate_candidates_cython
+
 MAX_CANDIDATES = 4096
 CANDIDATE_FEATURE_DIM = 24
 
@@ -295,6 +300,11 @@ def enumerate_candidates(state: GameState) -> list[CandidateAction]:
     merged terminal intents where safe, plus setup intents for multi-object
     actions such as unload/repair.
     """
+    # Use Cython version if available
+    if CANDIDATE_CYTHON_AVAILABLE and enumerate_candidates_cython is not None:
+        return list(enumerate_candidates_cython(state))
+
+    # Fallback to Python version
     legal = get_legal_actions(state)
     if state.action_stage != ActionStage.MOVE:
         out: list[CandidateAction] = []

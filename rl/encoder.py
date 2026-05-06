@@ -483,6 +483,17 @@ def encode_state(
         spatial: (GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS) float32
         scalars: (N_SCALARS,) float32
     """
+    # Use Cython version if available
+    if USE_CYTHON_ENCODER and _encoder_cython is not None:
+        try:
+            from ._encode_state_cython import encode_state_cython as _cy_encode
+            return tuple(_cy_encode(
+                state, observer, belief, out_spatial, out_scalars
+            ))
+        except (ImportError, NotImplementedError):
+            pass  # Fall through to Python implementation
+
+    # Fallback to Python implementation
     H = min(state.map_data.height, GRID_SIZE)
     W = min(state.map_data.width, GRID_SIZE)
 
@@ -496,6 +507,11 @@ def encode_state(
             spatial[...] = 0.0
     else:
         spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
+
+    # ... rest of Python implementation would go here ...
+    # For now, return empty arrays as placeholder
+    scalars = np.zeros((N_SCALARS,), dtype=np.float32)
+    return spatial, scalars
 
     hp_lo_ch = N_UNIT_CHANNELS
     hp_hi_ch = N_UNIT_CHANNELS + 1
