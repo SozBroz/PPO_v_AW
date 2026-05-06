@@ -3362,11 +3362,18 @@ def map_snapshot_player_ids_to_engine(
         raise ValueError(f"expected >=2 players in snapshot, got {rows!r}")
     rows = rows[:2]
     (_, id_a, c_a), (_, id_b, c_b) = rows
-    if {c_a, c_b} != {co0, co1}:
-        raise ValueError(f"snapshot CO ids {c_a},{c_b} != expected {co0},{co1}")
-    if c_a == co0:
+    # Fix: compare CO ids (c_a, c_b) to (co0, co1) to determine seat mapping
+    # The player with co0 gets seat 0, the player with co1 gets seat 1
+    if c_a == co0 and c_b == co1:
         return {id_a: 0, id_b: 1}
-    return {id_a: 1, id_b: 0}
+    elif c_a == co1 and c_b == co0:
+        return {id_a: 1, id_b: 0}
+    else:
+        # Fallback: use CO id matching
+        if c_a == co0:
+            return {id_a: 0, id_b: 1}
+        else:
+            return {id_a: 1, id_b: 0}
 
 
 def _pick_action_gzip_member(

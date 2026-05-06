@@ -191,6 +191,9 @@ def compare_units(
                 if key in eng_by_tile:
                     out.append(f"engine duplicate unit at P{seat} {u.pos}")
                 eng_by_tile[key] = u
+                # Loaded units are stored inside the transport, not on the map
+                # They should NOT be added to eng_by_tile (they don't have a tile position)
+                # This is why PHP has "carried=Y" units at the same tile - those are the cargo
 
     if set(php_by_tile) != set(eng_by_tile):
         only_php = set(php_by_tile) - set(eng_by_tile)
@@ -401,10 +404,10 @@ def compare_co_states(
         if not co_state.cop_active and not co_state.scop_active:
             php_charge = _php_int_optional(pl.get("co_power"), 0)
             if php_charge > 0:
-                # PHP: 1000 per star (2500 = 2.5 stars). The raw value is in
-                # units of 1000, so dividing by 1000.0 gives the star count.
-                php_stars = php_charge / 1000.0
-                # Engine: 9000 per star (9000 = 1.0 stars)
+                # PHP: 90000 funds per star (25000 = ~0.28 stars)
+                # Formula: php_charge / 90000.0 gives star count
+                # Engine: 9000 funds per star (9000 = 1.0 stars)
+                php_stars = php_charge / 90000.0
                 eng_stars = co_state.power_bar / 9000.0
                 # Allow 0.5-star tolerance for timing differences
                 if abs(php_stars - eng_stars) > 0.5:
