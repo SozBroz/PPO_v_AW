@@ -714,20 +714,23 @@ def _sync_checkpoint_from_shared_worker(
     username: str = "sshuser",
     remote_checkpoint_dir: str = "D:/awbw/checkpoints",
 ) -> None:
-    """Background thread that SCPs value_rhea_latest.pt from workhorse1 to local dir."""
+    """Background thread that SCPs checkpoints from workhorse1 to local dir.
+    
+    Syncs both value_rhea_latest.pt and historical checkpoints (value_rhea_*.pt)
+    so actors can find them for dual-gradient self-play.
+    """
     local_path = Path(local_dir)
     local_path.mkdir(parents=True, exist_ok=True)
     local_checkpoint = local_path / "value_rhea_latest.pt"
     remote_checkpoint = f"{remote_checkpoint_dir}\\value_rhea_latest.pt"
 
-    last_synced_mtime = 0.0
-
     while not stop_event.is_set():
         try:
-            # List remote files to check if newer checkpoint exists
+            # List remote checkpoint files
             remote_files = _ssh_list_files(remote_checkpoint_dir, hostname, username)
+            
+            # Sync latest checkpoint
             if "value_rhea_latest.pt" in remote_files:
-                # Try to SCP the checkpoint
                 if _ssh_scp_get(remote_checkpoint, str(local_checkpoint), hostname, username):
                     print(json.dumps({
                         "event": "checkpoint_synced_from_learner",
@@ -735,6 +738,24 @@ def _sync_checkpoint_from_shared_worker(
                         "remote": remote_checkpoint,
                         "local": str(local_checkpoint),
                     }), flush=True)
+            
+            # Sync historical checkpoints for dual-gradient self-play
+            # Actors look for value_rhea_*.pt in the same directory as latest
+            hist_pattern = "value_rhea_"
+            local_checkpoints = set(f.name for f in local_path.glob("value_rhea_*.pt"))
+            
+            for remote_file in remote_files:
+                if remote_file.startswith(hist_pattern) and remote_file not in local_checkpoints:
+                    remote_file_path = f"{remote_checkpoint_dir}\\{remote_file}"
+                    local_file_path = local_path / remote_file
+                    if _ssh_scp_get(remote_file_path, str(local_file_path), hostname, username):
+                        print(json.dumps({
+                            "event": "historical_checkpoint_synced",
+                            "machine_id": machine_id,
+                            "remote": remote_file_path,
+                            "local": str(local_file_path),
+                        }), flush=True)
+                        
         except Exception as e:
             print(json.dumps({
                 "event": "checkpoint_sync_worker_error",
@@ -767,9 +788,10 @@ def _poll_gradients_for_learner(
     grad_dir = Path(gradient_dir)
     if not grad_dir.exists():
         return [], last_poll_mtime
-    
-    pattern = str(grad_dir / "*.json")
-    grad_files = glob.glob(pattern)
+
+    # Use recursive glob to catch files in subdirectories (e.g. actor-0/, actor-1/)
+    pattern = str(grad_dir / "**" / "*.json")
+    grad_files = glob.glob(pattern, recursive=True)
     
     results = []
     for fpath in grad_files:
@@ -1043,6 +1065,18 @@ def _actor_loop(
         _actor_project_root = Path(__file__).resolve().parents[1]
         latest_path = _actor_project_root / "checkpoints" / "value_rhea_latest.pt"
         
+        # If local checkpoint dir is specified, use it for latest_path
+        local_ckpt_dir = args.local_checkpoint_dir
+        if local_ckpt_dir:
+            latest_path = Path(local_ckpt_dir) / "value_rhea_latest.pt"
+            print(json.dumps({
+                "event": "actor_using_local_checkpoint_dir",
+                "actor_id": actor_id,
+                "local_ckpt_dir": local_ckpt_dir,
+                "latest_path": str(latest_path),
+            }), flush=True)
+        
+        # Now that latest_path is finalized, use its parent for all checkpoint operations
         # Load checkpoint - use clean checkpoint, never the potentially corrupted latest.pt
         # This prevents NaN gradient propagation from corrupted models.
         actor_checkpoint = args.checkpoint
@@ -1095,7 +1129,8 @@ def _actor_loop(
             if not hist_checkpoint_path:
                 # Auto-discover: use the oldest saved timestamped checkpoint as historical
                 try:
-                    ckpt_dir = Path("checkpoints")
+                    # Use the same directory as latest_path (where checkpoints are synced to)
+                    ckpt_dir = latest_path.parent
                     hist_candidates = sorted(
                         [p for p in ckpt_dir.glob("value_rhea_*.pt")
                          if p.name not in ("value_rhea_latest.pt", "value_rhea_latest_backup.pt")],
@@ -1203,7 +1238,7 @@ def _actor_loop(
         # If local dirs not specified but push-gradients is set, use sensible defaults
         # Gradients go under D:/awbw/data/ (project-local), checkpoints stay under D:/awbw/checkpoints/
         if push_gradients and local_grad_dir is None:
-            local_grad_dir = "D:/awbw/data/gradients/actor-{actor_id}"
+            local_grad_dir = f"D:/awbw/data/gradients/actor-{actor_id}"
         
         if push_gradients and local_ckpt_dir is None:
             local_ckpt_dir = "D:/awbw/checkpoints/local_checkpoints"
@@ -1259,6 +1294,32 @@ def _actor_loop(
                 if args.actor_refresh_seconds > 0 and now - last_refresh >= args.actor_refresh_seconds:
                     if _load_value_pt_into_model(latest_path, value_model, actor_device, verbose=True):
                         last_refresh = now
+                    
+                    # Also refresh historical checkpoint if auto-discovered
+                    if args.dual_gradient_self_play and args.dual_gradient_hist_prob > 0 and not args.hist_checkpoint_path:
+                        try:
+                            ckpt_dir = latest_path.parent
+                            hist_candidates = sorted(
+                                [p for p in ckpt_dir.glob("value_rhea_*.pt")
+                                 if p.name not in ("value_rhea_latest.pt", "value_rhea_latest_backup.pt")],
+                                key=lambda p: p.stat().st_mtime
+                            )
+                            if len(hist_candidates) >= 1:
+                                new_hist_path = str(hist_candidates[0])  # Oldest
+                                if new_hist_path != hist_checkpoint_path:
+                                    hist_checkpoint_path = new_hist_path
+                                    hist_value_model = load_value_checkpoint(hist_checkpoint_path, device=actor_device)
+                                    print(json.dumps({
+                                        "event": "hist_checkpoint_refreshed",
+                                        "actor_id": actor_id,
+                                        "hist_checkpoint_path": hist_checkpoint_path,
+                                    }), flush=True)
+                        except Exception as e:
+                            print(json.dumps({
+                                "event": "hist_checkpoint_refresh_failed",
+                                "actor_id": actor_id,
+                                "error": str(e),
+                            }), flush=True)
 
                 env.reset()
                 game_turns = 0
@@ -1824,7 +1885,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Distributed gradient pushing (A3C-style)
     ap.add_argument("--push-gradients", action="store_true",
-                      help="Enable actors to compute gradients locally and push to workhorse1:D:\\data\\gradients\\")
+                      help="Enable actors to compute gradients locally and push to workhorse1:D:/awbw/data/gradients/")
     ap.add_argument("--gradient-batch-size", type=int, default=32,
                       help="Number of transitions to accumulate before computing and pushing gradients (default: 32)")
     ap.add_argument("--gradient-poll-interval", type=float, default=30.0,
@@ -1833,14 +1894,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Local gradient / checkpoint optimization (avoid Samba writes)
     ap.add_argument("--local-gradient-dir", type=str, default=None,
                       help="Local directory for gradient writes (actors write here, background thread SCPs to workhorse1). "
-                           "Default: on Windows aux (Z: mounted) -> D:/awbw/checkpoints/local_gradients/actor-{id} "
-                           "(or C:/Users/sshuser/AWBW if exists), else -> checkpoints/local_gradients/actor-{id}")
+                           "Default: D:/awbw/data/gradients/actor-{id}")
     ap.add_argument("--gradient-sync-interval", type=float, default=30.0,
                       help="Seconds between SCPing local gradients to workhorse1 (default: 30)")
     ap.add_argument("--local-checkpoint-dir", type=str, default=None,
                       help="Local directory for checkpoints (background thread SCPs from workhorse1 to here). "
-                           "Default: on Windows aux (Z: mounted) -> D:/awbw/checkpoints/local_checkpoints "
-                           "(or C:/Users/sshuser/AWBW if exists), else -> checkpoints/local_checkpoints")
+                           "Default: D:/awbw/checkpoints/local_checkpoints")
     ap.add_argument("--checkpoint-sync-interval", type=float, default=60.0,
                       help="Seconds between SCPing checkpoints from workhorse1 to local (default: 60)")
 
@@ -1912,7 +1971,7 @@ def main() -> None:
     _project_root = Path(__file__).resolve().parents[1]
 
     # Checkpoints always land under D:/awbw/checkpoints/ (project root).
-    # Gradients remain on D:/data/ (separate disk, see below).
+    # Gradients go under D:/awbw/data/ (project-local, see below).
     output_dir = _project_root / "checkpoints"
     latest_path = output_dir / "value_rhea_latest.pt"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2035,17 +2094,21 @@ def main() -> None:
                 # Check actor health
                 alive_count = sum(actor_alive)
                 elapsed = time.time() - last_transition_time
-                timeout_log_entry = {
-                    "event": "queue_timeout",
-                    "transitions": (gradient_step if args.push_gradients else transitions),
-                    "replay": len(replay),
-                    "actors_alive": alive_count,
-                    "seconds_since_last_transition": round(elapsed, 1),
-                }
-                print(json.dumps(timeout_log_entry), flush=True)
-                # Write to game log file
-                with open(game_log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(timeout_log_entry) + "\n")
+
+                # In push-gradients mode, the queue is intentionally quiet;
+                # only warn if it's been an unusually long time since last progress
+                if not args.push_gradients or elapsed > 600:  # 10 minutes in push-gradients mode
+                    timeout_log_entry = {
+                        "event": "queue_timeout",
+                        "transitions": (gradient_step if args.push_gradients else transitions),
+                        "replay": len(replay),
+                        "actors_alive": alive_count,
+                        "seconds_since_last_transition": round(elapsed, 1),
+                    }
+                    print(json.dumps(timeout_log_entry), flush=True)
+                    # Write to game log file
+                    with open(game_log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(timeout_log_entry) + "\n")
 
                 # If all actors are dead, abort
                 if alive_count == 0:
@@ -2136,6 +2199,17 @@ def main() -> None:
                                             "count": len(nan_grads),
                                             "first_few": nan_grads[:5],
                                         }), flush=True)
+                                        # Still delete the bad gradient files before skipping
+                                        if getattr(args, "machine_id", "actor") == "learner":
+                                            for fp in file_paths_to_delete:
+                                                try:
+                                                    Path(fp).unlink()
+                                                except Exception as e:
+                                                    print(json.dumps({
+                                                        "event": "gradient_delete_error",
+                                                        "file": str(fp),
+                                                        "error": str(e),
+                                                    }), flush=True)
                                         continue
                                     
                                     # Apply aggregated gradients
@@ -2147,12 +2221,13 @@ def main() -> None:
                                     )
                                     
                                     gradient_step += 1
-                                    
+                                    last_transition_time = time.time()  # Reset timeout tracker for push-gradients mode
+
                                     # Update target network if needed
                                     if learner is not None:
                                         learner.num_updates = gradient_step
                                         learner._maybe_update_target()
-                                    
+
                                     print(json.dumps({
                                         "event": "gradients_applied",
                                         "step": gradient_step,
