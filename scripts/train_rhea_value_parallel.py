@@ -1038,12 +1038,9 @@ def _actor_loop(
         hist_value_model = None
         
         # Determine where to read checkpoints from:
-        # - If push-gradients: all .pt I/O goes through Z: (shared root)
+        # - If push-gradients: background thread SCPs from workhorse1:D:\data\checkpoints\ to local
         # - Otherwise: use local checkpoints/
-        if args.push_gradients and args.gradient_shared_root:
-            latest_path = Path(args.gradient_shared_root) / "checkpoints" / "value_rhea_latest.pt"
-        else:
-            latest_path = Path("checkpoints") / "value_rhea_latest.pt"
+        latest_path = Path("checkpoints") / "value_rhea_latest.pt"
         
         # Load checkpoint - use clean checkpoint, never the potentially corrupted latest.pt
         # This prevents NaN gradient propagation from corrupted models.
@@ -1857,27 +1854,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Distributed gradient pushing (A3C-style)
     ap.add_argument("--push-gradients", action="store_true",
-                      help="Enable actors to compute gradients locally and push to shared filesystem for main to aggregate")
+                      help="Enable actors to compute gradients locally and push to workhorse1:D:\\data\\gradients\\")
     ap.add_argument("--gradient-batch-size", type=int, default=32,
                       help="Number of transitions to accumulate before computing and pushing gradients (default: 32)")
-    ap.add_argument("--gradient-shared-root", type=str, default="Z:",
-                      help="Shared filesystem root for gradient exchange (default: Z:)")
     ap.add_argument("--gradient-poll-interval", type=float, default=30.0,
-                      help="Seconds between main polling for gradient files (default: 30)")
+                      help="Seconds between learner polling for gradient files (default: 30)")
 
     # Local gradient / checkpoint optimization (avoid Samba writes)
     ap.add_argument("--local-gradient-dir", type=str, default=None,
-                      help="Local directory for gradient writes (actors write here, background thread syncs to shared root). "
+                      help="Local directory for gradient writes (actors write here, background thread SCPs to workhorse1). "
                            "Default: on Windows aux (Z: mounted) -> D:/awbw/checkpoints/local_gradients/actor-{id} "
                            "(or C:/Users/sshuser/AWBW if exists), else -> checkpoints/local_gradients/actor-{id}")
     ap.add_argument("--gradient-sync-interval", type=float, default=30.0,
-                      help="Seconds between syncing local gradients to shared root (default: 30)")
+                      help="Seconds between SCPing local gradients to workhorse1 (default: 30)")
     ap.add_argument("--local-checkpoint-dir", type=str, default=None,
-                      help="Local directory for checkpoints (background thread syncs from shared root to here). "
+                      help="Local directory for checkpoints (background thread SCPs from workhorse1 to here). "
                            "Default: on Windows aux (Z: mounted) -> D:/awbw/checkpoints/local_checkpoints "
                            "(or C:/Users/sshuser/AWBW if exists), else -> checkpoints/local_checkpoints")
     ap.add_argument("--checkpoint-sync-interval", type=float, default=60.0,
-                      help="Seconds between syncing checkpoints from shared root to local (default: 60)")
+                      help="Seconds between SCPing checkpoints from workhorse1 to local (default: 60)")
 
     # Remote transition polling (multi-machine)
     ap.add_argument("--remote-transition-dir", type=str, default=None,
@@ -1948,8 +1943,9 @@ def main() -> None:
         # Learner runs on workhorse1 - use D:\data\checkpoints\
         output_dir = Path("D:/data/checkpoints")
         latest_path = output_dir / "value_rhea_latest.pt"
-    elif args.push_gradients and args.gradient_shared_root:
-        output_dir = Path(args.gradient_shared_root) / "checkpoints"
+    elif getattr(args, "push_gradients", False):
+        # Workers: background thread syncs from workhorse1 to local
+        output_dir = Path("checkpoints")
         latest_path = output_dir / "value_rhea_latest.pt"
     else:
         output_dir = Path("checkpoints")
@@ -2125,13 +2121,15 @@ def main() -> None:
                             # Learner (machine-id == "learner") polls local D:\data\gradients\
                             # Workers use _poll_gradients_from_shared (Z:)
                             if getattr(args, "machine_id", "actor") == "learner":
-                                gradient_results, gradient_poll_mtime = _poll_gradients_for_learner(
-                                    gradient_dir="D:\\data\\gradients",
-                                    last_poll_mtime=gradient_poll_mtime,
-                                )
+                                    gradient_results, gradient_poll_mtime = _poll_gradients_for_learner(
+                                        gradient_dir="D:\\data\\gradients",
+                                        last_poll_mtime=gradient_poll_mtime,
+                                    )
                             else:
+                                # Backward compatibility: workers still use _poll_gradients_from_shared
+                                # but this should not be reached in the new SCP architecture
                                 gradient_results, gradient_poll_mtime = _poll_gradients_from_shared(
-                                    shared_root=args.gradient_shared_root,
+                                    shared_root="Z:",
                                     last_poll_time=gradient_poll_mtime,
                                 )
                             
