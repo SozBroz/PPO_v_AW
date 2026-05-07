@@ -1527,7 +1527,7 @@ def _actor_loop(
                                 )
                                 if grads:
                                     gradient_step += 1
-                                    # Write gradients locally or to shared based on config
+                                    # Write gradients locally (background thread SCPs to workhorse1)
                                     if local_grad_dir:
                                         grad_path = _write_gradients_locally(
                                             actor_id,
@@ -1535,13 +1535,6 @@ def _actor_loop(
                                             gradient_step,
                                             local_grad_dir,
                                             machine_id=args.machine_id,
-                                        )
-                                    else:
-                                        grad_path = _write_gradients_to_shared(
-                                            actor_id,
-                                            grads,
-                                            gradient_step,
-                                            shared_root=args.gradient_shared_root,
                                         )
                                     if grad_path:
                                         print(json.dumps({
@@ -1941,7 +1934,7 @@ def main() -> None:
     # Output directory - use machine-id aware paths
     if getattr(args, "machine_id", "actor") == "learner":
         # Learner runs on workhorse1 - use D:\data\checkpoints\
-        output_dir = Path("D:/data/checkpoints")
+        output_dir = Path("D:/awbw/checkpoints")
         latest_path = output_dir / "value_rhea_latest.pt"
     elif getattr(args, "push_gradients", False):
         # Workers: background thread syncs from workhorse1 to local
@@ -2034,7 +2027,7 @@ def main() -> None:
         print(json.dumps({
             "event": "gradient_aggregation_ready",
             "gradient_poll_interval": gradient_poll_interval,
-            "gradient_shared_root": args.gradient_shared_root,
+            "machine_id": args.machine_id,
         }), flush=True)
 
     ctx = mp.get_context("spawn")
