@@ -14,6 +14,11 @@ Architecture:
 This is not PPO VecEnv. The actors are independent RHEA self-play workers.
 They periodically refresh their value net from the learner checkpoint if it
 exists, but stale actor values are acceptable for the first parallel collector.
+
+Gradient flow (--push-gradients):
+    Actors write gradients to local dir (or SSH to workhorse1:D:\\data\\gradients\\)
+    Learner (if machine-id == "learner") polls workhorse1:D:\\data\\gradients\\
+    After training, learner deletes the gradient files.
 """
 
 import argparse
@@ -26,8 +31,17 @@ import queue
 import random
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+
+# SSH/SCP for gradient transfer to workhorse1
+try:
+    import paramiko
+    import scp
+    _HAVE_PARAMIKO = True
+except ImportError:
+    _HAVE_PARAMIKO = False
 
 # ---------------------------------------------------------------------------
 # Cython auto-recompile: if any .pyx is newer than its compiled .pyd/.so,
@@ -107,6 +121,98 @@ from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaReplayBuffer, RheaTransition
 from rl.rhea_value_learner import RheaValueLearner, RheaValueLearnerConfig
 from rl.value_net import AWBWValueNet, load_value_checkpoint
+
+# ── Helper functions for gradient file naming and SSH transfer ──────────
+
+def _est_timestamp() -> str:
+    """Return human-readable timestamp in EST timezone."""
+    est = timezone(timedelta(hours=-5))
+    now = datetime.now(est)
+    return now.strftime("%Y-%m-%d_%I-%M-%S_%p_EST")
+
+
+def _gradient_filename(machine_id: str, actor_id: int) -> str:
+    """Generate gradient filename: <machine-id>_<actor-id>_<EST-timestamp>.json"""
+    return f"{machine_id}_{actor_id}_{_est_timestamp()}.json"
+
+
+def _ssh_scp_put(local_path: str, remote_path: str, hostname: str = "workhorse1", username: str = "sshuser") -> bool:
+    """SCP a file to remote host via paramiko. Returns True on success."""
+    if not _HAVE_PARAMIKO:
+        print(json.dumps({"event": "ssh_scp_error", "error": "paramiko or scp not installed"}), flush=True)
+        return False
+    try:
+        import paramiko
+        import scp
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname, username=username)
+        with scp.SCPClient(client.get_transport()) as scp_client:
+            scp_client.put(local_path, remote_path)
+        client.close()
+        return True
+    except Exception as e:
+        print(json.dumps({"event": "ssh_scp_put_error", "error": str(e), "local": local_path, "remote": remote_path}), flush=True)
+        return False
+
+
+def _ssh_scp_get(remote_path: str, local_path: str, hostname: str = "workhorse1", username: str = "sshuser") -> bool:
+    """SCP a file from remote host via paramiko. Returns True on success."""
+    if not _HAVE_PARAMIKO:
+        print(json.dumps({"event": "ssh_scp_error", "error": "paramiko or scp not installed"}), flush=True)
+        return False
+    try:
+        import paramiko
+        import scp
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname, username=username)
+        with scp.SCPClient(client.get_transport()) as scp_client:
+            scp_client.get(remote_path, local_path)
+        client.close()
+        return True
+    except Exception as e:
+        print(json.dumps({"event": "ssh_scp_get_error", "error": str(e), "remote": remote_path, "local": local_path}), flush=True)
+        return False
+
+
+def _ssh_list_files(remote_dir: str, hostname: str = "workhorse1", username: str = "sshuser") -> list[str]:
+    """List files in remote directory via SSH. Returns list of filenames."""
+    if not _HAVE_PARAMIKO:
+        return []
+    try:
+        import paramiko
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname, username=username)
+        stdin, stdout, stderr = client.exec_command(f'dir /b "{remote_dir}" 2>NUL')
+        files = [line.strip() for line in stdout.readlines() if line.strip()]
+        client.close()
+        return files
+    except Exception as e:
+        print(json.dumps({"event": "ssh_list_error", "error": str(e)}), flush=True)
+        return []
+
+
+def _ssh_delete_file(remote_path: str, hostname: str = "workhorse1", username: str = "sshuser") -> bool:
+    """Delete a file on remote host via SSH. Returns True on success."""
+    if not _HAVE_PARAMIKO:
+        return False
+    try:
+        import paramiko
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname, username=username)
+        stdin, stdout, stderr = client.exec_command(f'del "{remote_path}" /q')
+        client.close()
+        return True
+    except Exception as e:
+        print(json.dumps({"event": "ssh_delete_error", "error": str(e)}), flush=True)
+        return False
 
 
 def _parse_co_list(s: str) -> list[int]:
@@ -537,48 +643,55 @@ def _poll_gradients_from_shared(
 
 def _sync_local_gradients_to_shared_worker(
     local_dir: str,
-    shared_root: str,
+    machine_id: str,
     actor_id: int,
     stop_event: mp.synchronize.Event,
     sync_interval: float = 30.0,
+    hostname: str = "workhorse1",
+    username: str = "sshuser",
+    remote_grad_dir: str = "D:\\data\\gradients",
 ) -> None:
-    """Background thread that syncs local gradient files to shared root."""
+    """Background thread that SCPs local gradient files to workhorse1:D:\\data\\gradients\\."""
     import json
     import glob
-    import shutil
+    import os
 
     local_path = Path(local_dir)
-    shared_grad_dir = Path(shared_root) / "fleet" / f"actor-{actor_id}" / "gradients"
-    shared_grad_dir.mkdir(parents=True, exist_ok=True)
+    if not local_path.exists():
+        return
 
     while not stop_event.is_set():
         try:
-            if local_path.exists():
-                pattern = str(local_path / "grad_*.json")
-                local_files = glob.glob(pattern)
+            pattern = str(local_path / "*.json")
+            local_files = glob.glob(pattern)
 
-                for lf in local_files:
-                    lf_path = Path(lf)
-                    try:
-                        dest = shared_grad_dir / lf_path.name
-                        try:
-                            os.replace(str(lf_path), str(dest))
-                        except OSError:
-                            shutil.copy2(str(lf_path), str(dest))
-                            lf_path.unlink()
+            for lf in local_files:
+                lf_path = Path(lf)
+                try:
+                    # SCP to workhorse1
+                    remote_path = f"{remote_grad_dir}\\{lf_path.name}"
+                    if _ssh_scp_put(str(lf_path), remote_path, hostname, username):
+                        lf_path.unlink()  # Delete local copy after successful transfer
                         print(json.dumps({
-                            "event": "gradient_synced_to_shared",
+                            "event": "gradient_scp_to_learner",
                             "actor_id": actor_id,
-                            "local": str(lf_path),
-                            "shared": str(dest),
+                            "machine_id": machine_id,
+                            "file": lf_path.name,
+                            "remote": remote_path,
                         }), flush=True)
-                    except Exception as e:
+                    else:
                         print(json.dumps({
-                            "event": "gradient_sync_error",
+                            "event": "gradient_scp_failed",
                             "actor_id": actor_id,
-                            "file": str(lf_path),
-                            "error": str(e),
+                            "file": lf_path.name,
                         }), flush=True)
+                except Exception as e:
+                    print(json.dumps({
+                        "event": "gradient_sync_error",
+                        "actor_id": actor_id,
+                        "file": str(lf_path),
+                        "error": str(e),
+                    }), flush=True)
         except Exception as e:
             print(json.dumps({
                 "event": "gradient_sync_worker_error",
@@ -593,43 +706,39 @@ def _sync_local_gradients_to_shared_worker(
 
 
 def _sync_checkpoint_from_shared_worker(
-    shared_root: str,
+    machine_id: str,
     local_dir: str,
     stop_event: mp.synchronize.Event,
     sync_interval: float = 60.0,
+    hostname: str = "workhorse1",
+    username: str = "sshuser",
+    remote_checkpoint_dir: str = "D:\\data\\checkpoints",
 ) -> None:
-    """Background thread that syncs value_rhea_latest.pt from shared root to local dir."""
-    import shutil
-
-    shared_checkpoint = Path(shared_root) / "checkpoints" / "value_rhea_latest.pt"
+    """Background thread that SCPs value_rhea_latest.pt from workhorse1 to local dir."""
     local_path = Path(local_dir)
     local_path.mkdir(parents=True, exist_ok=True)
     local_checkpoint = local_path / "value_rhea_latest.pt"
+    remote_checkpoint = f"{remote_checkpoint_dir}\\value_rhea_latest.pt"
 
     last_synced_mtime = 0.0
 
     while not stop_event.is_set():
         try:
-            if shared_checkpoint.exists():
-                shared_mtime = shared_checkpoint.stat().st_mtime
-                if shared_mtime > last_synced_mtime:
-                    try:
-                        shutil.copy2(str(shared_checkpoint), str(local_checkpoint))
-                        last_synced_mtime = shared_mtime
-                        print(json.dumps({
-                            "event": "checkpoint_synced_from_shared",
-                            "shared": str(shared_checkpoint),
-                            "local": str(local_checkpoint),
-                            "mtime": shared_mtime,
-                        }), flush=True)
-                    except Exception as e:
-                        print(json.dumps({
-                            "event": "checkpoint_sync_error",
-                            "error": str(e),
-                        }), flush=True)
+            # List remote files to check if newer checkpoint exists
+            remote_files = _ssh_list_files(remote_checkpoint_dir, hostname, username)
+            if "value_rhea_latest.pt" in remote_files:
+                # Try to SCP the checkpoint
+                if _ssh_scp_get(remote_checkpoint, str(local_checkpoint), hostname, username):
+                    print(json.dumps({
+                        "event": "checkpoint_synced_from_learner",
+                        "machine_id": machine_id,
+                        "remote": remote_checkpoint,
+                        "local": str(local_checkpoint),
+                    }), flush=True)
         except Exception as e:
             print(json.dumps({
                 "event": "checkpoint_sync_worker_error",
+                "machine_id": machine_id,
                 "error": str(e),
             }), flush=True)
 
@@ -639,13 +748,73 @@ def _sync_checkpoint_from_shared_worker(
             time.sleep(0.1)
 
 
+def _poll_gradients_for_learner(
+    gradient_dir: str = "D:\\data\\gradients",
+    last_poll_mtime: dict[str, float] | None = None,
+) -> tuple[list[tuple[str, dict[str, torch.Tensor], float]], dict[str, float]]:
+    """Poll local gradient directory for gradient files.
+    
+    For learner (machine-id == "learner") running on workhorse1.
+    Reads gradient files directly from D:\\data\\gradients\\.
+    Returns: (results, updated_last_poll_mtime)
+    """
+    import json
+    import glob
+    
+    if last_poll_mtime is None:
+        last_poll_mtime = {}
+    
+    grad_dir = Path(gradient_dir)
+    if not grad_dir.exists():
+        return [], last_poll_mtime
+    
+    pattern = str(grad_dir / "*.json")
+    grad_files = glob.glob(pattern)
+    
+    results = []
+    for fpath in grad_files:
+        f = Path(fpath)
+        try:
+            mtime = f.stat().st_mtime
+            if fpath in last_poll_mtime and last_poll_mtime[fpath] >= mtime:
+                continue
+            
+            with open(f, "r", encoding="utf-8") as fh:
+                grad_data = json.load(fh)
+            
+            machine_id = grad_data.get("machine_id", "unknown")
+            actor_id = grad_data["actor_id"]
+            timestamp = grad_data.get("timestamp", mtime)
+            
+            # Convert lists back to tensors
+            grads_dict = {}
+            for name, grad_list in grad_data["gradients"].items():
+                grads_dict[name] = torch.tensor(grad_list)
+            
+            results.append((fpath, machine_id, actor_id, grads_dict, timestamp))
+            last_poll_mtime[fpath] = mtime
+            
+        except Exception as e:
+            print(json.dumps({
+                "event": "gradient_read_error",
+                "file": str(f),
+                "error": str(e),
+            }), flush=True)
+    
+    return results, last_poll_mtime
+
+
 def _write_gradients_locally(
     actor_id: int,
     grads: dict,
     step_num: int,
     local_dir: str,
+    machine_id: str = "actor",
 ) -> str | None:
-    """Write gradient deltas to local filesystem."""
+    """Write gradient deltas to local filesystem.
+    
+    Filename: <machine-id>_<actor-id>_<EST-timestamp>.json
+    """
     import json
 
     try:
@@ -654,12 +823,14 @@ def _write_gradients_locally(
 
         grad_data = {
             "actor_id": actor_id,
+            "machine_id": machine_id,
             "step": step_num,
             "timestamp": time.time(),
             "gradients": grads,
         }
 
-        final_path = grad_dir / f"grad_{step_num}_{int(time.time())}.json"
+        filename = _gradient_filename(machine_id, actor_id)
+        final_path = grad_dir / filename
 
         with open(final_path, "w", encoding="utf-8") as f:
             json.dump(grad_data, f)
@@ -1077,7 +1248,7 @@ def _actor_loop(
         if push_gradients and local_grad_dir:
             grad_sync_thread = threading.Thread(
                 target=_sync_local_gradients_to_shared_worker,
-                args=(local_grad_dir, args.gradient_shared_root, actor_id, sync_stop_event, args.gradient_sync_interval),
+                args=(local_grad_dir, args.machine_id, actor_id, sync_stop_event, args.gradient_sync_interval),
                 daemon=True,
                 name=f"grad-sync-{actor_id}",
             )
@@ -1085,14 +1256,14 @@ def _actor_loop(
             print(json.dumps({
                 "event": "gradient_sync_thread_started",
                 "actor_id": actor_id,
+                "machine_id": args.machine_id,
                 "local_dir": local_grad_dir,
-                "shared_root": args.gradient_shared_root,
             }), flush=True)
         
         if push_gradients and local_ckpt_dir:
             ckpt_sync_thread = threading.Thread(
                 target=_sync_checkpoint_from_shared_worker,
-                args=(args.gradient_shared_root, local_ckpt_dir, sync_stop_event, args.checkpoint_sync_interval),
+                args=(args.machine_id, local_ckpt_dir, sync_stop_event, args.checkpoint_sync_interval),
                 daemon=True,
                 name=f"ckpt-sync-{actor_id}",
             )
@@ -1100,8 +1271,8 @@ def _actor_loop(
             print(json.dumps({
                 "event": "checkpoint_sync_thread_started",
                 "actor_id": actor_id,
+                "machine_id": args.machine_id,
                 "local_dir": local_ckpt_dir,
-                "shared_root": args.gradient_shared_root,
             }), flush=True)
 
         while not stop_event.is_set():
@@ -1366,6 +1537,7 @@ def _actor_loop(
                                             grads,
                                             gradient_step,
                                             local_grad_dir,
+                                            machine_id=args.machine_id,
                                         )
                                     else:
                                         grad_path = _write_gradients_to_shared(
@@ -1484,6 +1656,12 @@ def _actor_loop(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
+
+    # Machine identity
+    ap.add_argument("--machine-id", type=str, default="actor",
+                      help="Machine identifier (e.g. 'pc-b', 'workhorse1', 'learner'). "
+                           "If 'learner', this machine trains on gradients from all machines. "
+                           "Gradients are written to sshuser@workhorse1:D:\\data\\gradients\\")
 
     # Env / checkpoint.
     ap.add_argument("--checkpoint", type=str, required=True)
@@ -1765,11 +1943,17 @@ def main() -> None:
         if args.verbose:
             print(json.dumps({"event": "warning", "message": "--gpu-actors > 0 but --actor-gpu-device is not cuda*"}), flush=True)
 
-    # Output directory - use shared root if provided, otherwise local checkpoints/
-    if args.push_gradients and args.gradient_shared_root:
+    # Output directory - use machine-id aware paths
+    if getattr(args, "machine_id", "actor") == "learner":
+        # Learner runs on workhorse1 - use D:\data\checkpoints\
+        output_dir = Path("D:/data/checkpoints")
+        latest_path = output_dir / "value_rhea_latest.pt"
+    elif args.push_gradients and args.gradient_shared_root:
         output_dir = Path(args.gradient_shared_root) / "checkpoints"
+        latest_path = output_dir / "value_rhea_latest.pt"
     else:
         output_dir = Path("checkpoints")
+        latest_path = output_dir / "value_rhea_latest.pt"
     output_dir.mkdir(parents=True, exist_ok=True)
     # Convert args to JSON-serializable dict (handle Path objects)
     hparams = vars(args).copy()
@@ -1938,17 +2122,33 @@ def main() -> None:
                     now = time.time()
                     if now - last_gradient_poll_time >= gradient_poll_interval:
                         try:
-                            gradient_results, gradient_poll_mtime = _poll_gradients_from_shared(
-                                shared_root=args.gradient_shared_root,
-                                last_poll_time=gradient_poll_mtime,
-                            )
+                            # Learner (machine-id == "learner") polls local D:\data\gradients\
+                            # Workers use _poll_gradients_from_shared (Z:)
+                            if getattr(args, "machine_id", "actor") == "learner":
+                                gradient_results, gradient_poll_mtime = _poll_gradients_for_learner(
+                                    gradient_dir="D:\\data\\gradients",
+                                    last_poll_mtime=gradient_poll_mtime,
+                                )
+                            else:
+                                gradient_results, gradient_poll_mtime = _poll_gradients_from_shared(
+                                    shared_root=args.gradient_shared_root,
+                                    last_poll_time=gradient_poll_mtime,
+                                )
                             
                             if gradient_results:
                                 # Aggregate gradients from all actors
                                 aggregated_grads: dict[str, torch.Tensor] = {}
                                 total_actors = 0
+                                file_paths_to_delete = []
                                 
-                                for actor_id, grads_dict, timestamp in gradient_results:
+                                for item in gradient_results:
+                                    if len(item) == 3:  # (actor_id, grads_dict, timestamp)
+                                        actor_id, grads_dict, timestamp = item
+                                        machine_id = "unknown"
+                                    else:  # (file_path, machine_id, actor_id, grads_dict, timestamp)
+                                        file_path, machine_id, actor_id, grads_dict, timestamp = item
+                                        file_paths_to_delete.append(file_path)
+                                    
                                     total_actors += 1
                                     for name, grad_tensor in grads_dict.items():
                                         if name not in aggregated_grads:
@@ -1961,6 +2161,10 @@ def main() -> None:
                                     for name in aggregated_grads:
                                         aggregated_grads[name] /= total_actors
                                 
+                                    # Adaptive learning rate: higher LR when more gradients
+                                    adaptive_lr = learner_cfg.value_lr * min(2.0, 1.0 + (total_actors / 100.0))
+                                    optimizer_for_gradients.param_groups[0]["lr"] = adaptive_lr
+                                    
                                     # Check for NaN gradients before applying
                                     nan_grads = [name for name, g in aggregated_grads.items() if torch.isnan(g).any()]
                                     if nan_grads:
@@ -1991,9 +2195,22 @@ def main() -> None:
                                         "step": gradient_step,
                                         "actors_contributed": total_actors,
                                         "grad_norm": grad_norm,
+                                        "adaptive_lr": adaptive_lr,
                                         "transitions": (gradient_step if args.push_gradients else transitions),
                                         "replay_size": len(replay),
                                     }), flush=True)
+                                    
+                                    # Delete gradient files after training (learner only)
+                                    if getattr(args, "machine_id", "actor") == "learner":
+                                        for fp in file_paths_to_delete:
+                                            try:
+                                                Path(fp).unlink()
+                                            except Exception as e:
+                                                print(json.dumps({
+                                                    "event": "gradient_delete_error",
+                                                    "file": str(fp),
+                                                    "error": str(e),
+                                                }), flush=True)
                                     
                                     # Save checkpoint periodically (only if grad_norm is valid)
                                     if gradient_step % 10 == 0 and grad_norm is not None and not (isinstance(grad_norm, float) and torch.isnan(torch.tensor(grad_norm))):
