@@ -16,8 +16,8 @@ They periodically refresh their value net from the learner checkpoint if it
 exists, but stale actor values are acceptable for the first parallel collector.
 
 Gradient flow (--push-gradients):
-    Actors write gradients to local dir (or SSH to workhorse1:D:\\data\\gradients\\)
-    Learner (if machine-id == "learner") polls workhorse1:D:\\data\\gradients\\
+    Actors write gradients to local dir (or SSH to workhorse1:D:/awbw/data/gradients/)
+    Learner (if machine-id == "learner") polls workhorse1:D:/awbw/data/gradients/
     After training, learner deletes the gradient files.
 """
 
@@ -649,9 +649,9 @@ def _sync_local_gradients_to_shared_worker(
     sync_interval: float = 30.0,
     hostname: str = "workhorse1",
     username: str = "sshuser",
-    remote_grad_dir: str = "D:\\data\\gradients",
+    remote_grad_dir: str = "D:/awbw/data/gradients",
 ) -> None:
-    """Background thread that SCPs local gradient files to workhorse1:D:\\data\\gradients\\."""
+    """Background thread that SCPs local gradient files to workhorse1:D:/awbw/data/gradients/."""
     import json
     import glob
     import os
@@ -712,7 +712,7 @@ def _sync_checkpoint_from_shared_worker(
     sync_interval: float = 60.0,
     hostname: str = "workhorse1",
     username: str = "sshuser",
-    remote_checkpoint_dir: str = "D:\\data\\checkpoints",
+    remote_checkpoint_dir: str = "D:/awbw/checkpoints",
 ) -> None:
     """Background thread that SCPs value_rhea_latest.pt from workhorse1 to local dir."""
     local_path = Path(local_dir)
@@ -749,13 +749,13 @@ def _sync_checkpoint_from_shared_worker(
 
 
 def _poll_gradients_for_learner(
-    gradient_dir: str = "D:\\data\\gradients",
+    gradient_dir: str = "D:/awbw/data/gradients",
     last_poll_mtime: dict[str, float] | None = None,
 ) -> tuple[list[tuple[str, dict[str, torch.Tensor], float]], dict[str, float]]:
     """Poll local gradient directory for gradient files.
     
     For learner (machine-id == "learner") running on workhorse1.
-    Reads gradient files directly from D:\\data\\gradients\\.
+    Reads gradient files directly from D:/awbw/data/gradients/.
     Returns: (results, updated_last_poll_mtime)
     """
     import json
@@ -1038,9 +1038,10 @@ def _actor_loop(
         hist_value_model = None
         
         # Determine where to read checkpoints from:
-        # - If push-gradients: background thread SCPs from workhorse1:D:\data\checkpoints\ to local
-        # - Otherwise: use local checkpoints/
-        latest_path = Path("checkpoints") / "value_rhea_latest.pt"
+        # Checkpoints always land under D:/awbw/checkpoints/ (project root).
+        # Gradients remain on D:/data/ (separate disk).
+        _actor_project_root = Path(__file__).resolve().parents[1]
+        latest_path = _actor_project_root / "checkpoints" / "value_rhea_latest.pt"
         
         # Load checkpoint - use clean checkpoint, never the potentially corrupted latest.pt
         # This prevents NaN gradient propagation from corrupted models.
@@ -1200,36 +1201,12 @@ def _actor_loop(
         local_ckpt_dir = args.local_checkpoint_dir
         
         # If local dirs not specified but push-gradients is set, use sensible defaults
-        # On aux machines (with Z: mounted), use local disk path, not Z:
+        # Gradients go under D:/awbw/data/ (project-local), checkpoints stay under D:/awbw/checkpoints/
         if push_gradients and local_grad_dir is None:
-            # Detect local base path: prefer C:/Users/sshuser/AWBW on Windows aux,
-            # fall back to D:/awbw if that doesn't exist, then cwd
-            import os
-            if os.name == "nt" and os.path.exists("Z:\\"):
-                # Windows aux machine - use local disk, not Z: (Samba mount)
-                if os.path.exists("C:/Users/sshuser/AWBW"):
-                    local_base = Path("C:/Users/sshuser/AWBW")
-                elif os.path.exists("D:/awbw"):
-                    local_base = Path("D:/awbw")
-                else:
-                    local_base = Path.cwd()
-            else:
-                local_base = Path.cwd()
-            local_grad_dir = str(local_base / "checkpoints" / "local_gradients" / f"actor-{actor_id}")
+            local_grad_dir = "D:/awbw/data/gradients/actor-{actor_id}"
         
         if push_gradients and local_ckpt_dir is None:
-            import os
-            if os.name == "nt" and os.path.exists("Z:\\"):
-                # Windows aux machine - use local disk, not Z: (Samba mount)
-                if os.path.exists("C:/Users/sshuser/AWBW"):
-                    local_base = Path("C:/Users/sshuser/AWBW")
-                elif os.path.exists("D:/awbw"):
-                    local_base = Path("D:/awbw")
-                else:
-                    local_base = Path.cwd()
-            else:
-                local_base = Path.cwd()
-            local_ckpt_dir = str(local_base / "checkpoints" / "local_checkpoints")
+            local_ckpt_dir = "D:/awbw/checkpoints/local_checkpoints"
         
         # Update latest_path to use local checkpoint dir if available
         if local_ckpt_dir:
@@ -1931,18 +1908,13 @@ def main() -> None:
         if args.verbose:
             print(json.dumps({"event": "warning", "message": "--gpu-actors > 0 but --actor-gpu-device is not cuda*"}), flush=True)
 
-    # Output directory - use machine-id aware paths
-    if getattr(args, "machine_id", "actor") == "learner":
-        # Learner runs on workhorse1 - use D:\data\checkpoints\
-        output_dir = Path("D:/awbw/checkpoints")
-        latest_path = output_dir / "value_rhea_latest.pt"
-    elif getattr(args, "push_gradients", False):
-        # Workers: background thread syncs from workhorse1 to local
-        output_dir = Path("checkpoints")
-        latest_path = output_dir / "value_rhea_latest.pt"
-    else:
-        output_dir = Path("checkpoints")
-        latest_path = output_dir / "value_rhea_latest.pt"
+    # Resolve project root: scripts/../ = D:/awbw/
+    _project_root = Path(__file__).resolve().parents[1]
+
+    # Checkpoints always land under D:/awbw/checkpoints/ (project root).
+    # Gradients remain on D:/data/ (separate disk, see below).
+    output_dir = _project_root / "checkpoints"
+    latest_path = output_dir / "value_rhea_latest.pt"
     output_dir.mkdir(parents=True, exist_ok=True)
     # Convert args to JSON-serializable dict (handle Path objects)
     hparams = vars(args).copy()
@@ -2115,7 +2087,7 @@ def main() -> None:
                             # Workers use _poll_gradients_from_shared (Z:)
                             if getattr(args, "machine_id", "actor") == "learner":
                                     gradient_results, gradient_poll_mtime = _poll_gradients_for_learner(
-                                        gradient_dir="D:\\data\\gradients",
+                                        gradient_dir="D:/awbw/data/gradients",
                                         last_poll_mtime=gradient_poll_mtime,
                                     )
                             else:
