@@ -1431,12 +1431,28 @@ def main() -> None:
     # Save an initial refresh checkpoint so actors can load learner-format .pt.
     # This must be done BEFORE starting actors so they have something to load.
     latest_path = output_dir / "value_rhea_latest.pt"
-    # Use a clean checkpoint for actors - copy it safely
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Use a clean checkpoint for actors - copy it safely.
+    # IMPORTANT: Check if source and dest are the same file (WindowsPath equality).
     import shutil
     clean_checkpoint = Path(args.checkpoint) if Path(args.checkpoint).exists() else None
     if clean_checkpoint and clean_checkpoint.exists():
-        shutil.copy(clean_checkpoint, latest_path)
-        print(json.dumps({"event": "initial_checkpoint_copied", "from": str(clean_checkpoint), "to": str(latest_path)}), flush=True)
+        # Resolve to absolute paths to detect same-file case.
+        abs_src = clean_checkpoint.resolve()
+        abs_dst = latest_path.resolve()
+        if abs_src == abs_dst:
+            print(json.dumps({
+                "event": "initial_checkpoint_same_file",
+                "path": str(abs_src),
+            }), flush=True)
+        else:
+            shutil.copy(abs_src, abs_dst)
+            print(json.dumps({
+                "event": "initial_checkpoint_copied",
+                "from": str(abs_src),
+                "to": str(abs_dst),
+            }), flush=True)
     else:
         _save_checkpoint(latest_path, online, learner_cfg if learner else None, 0)
     print(json.dumps({"event": "initial_checkpoint_ready", "path": str(latest_path)}), flush=True)

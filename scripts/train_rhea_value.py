@@ -316,6 +316,19 @@ def main() -> None:
                         "traceback": traceback.format_exc(),
                     }), flush=True)
                     _game_abnormal_error = repr(illegal_e)
+                    # Try to find a legal action for the CURRENT state
+                    try:
+                        from engine.action import get_legal_actions, ActionType
+                        legal = get_legal_actions(env.state)
+                        if legal:
+                            env.state.step(legal[0])
+                        else:
+                            env.state.step(ActionType.END_TURN)
+                    except Exception:
+                        try:
+                            env.state.step(ActionType.END_TURN)
+                        except:
+                            pass
                     break  # stop executing remaining actions
 
             after = env.state

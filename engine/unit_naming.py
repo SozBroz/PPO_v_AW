@@ -177,7 +177,7 @@ _TABLE_RAW: dict[UnitType, dict[UnitNameSurface, tuple[str, ...]]] = {
     UnitType.ROCKET: {
         UnitNameSurface.ENGINE: ("Rocket",),
         UnitNameSurface.AWBW_PHP: ("Rockets", "Rocket"),
-        UnitNameSurface.AWBW_VIEWER: ("Rocket", "Rockets"),
+        UnitNameSurface.AWBW_VIEWER: ("Rockets", "Rocket"),  # C# viewer expects plural
         UnitNameSurface.AWBW_DAMAGE_PHP: ("Rocket",),
         UnitNameSurface.DISPLAY: ("Rocket",),
     },

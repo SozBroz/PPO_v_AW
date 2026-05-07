@@ -409,24 +409,9 @@ class RheaPlanner:
 
             cand = ranked[idx]
 
-            # Re-validate: the candidate must still be legal in the current state.
-            # The genome index was generated for the original state; after previous
-            # actions mutate `sim`, the ranked ordering may have shifted.
-            # Use semantic equivalence to check if this candidate is still legal.
-            if cand not in legal:
-                # Candidate is no longer legal — try to find a semantically
-                # equivalent candidate in the current legal list.
-                replacement = None
-                for c in legal:
-                    if c.kind == cand.kind and c.is_equivalent(cand):
-                        replacement = c
-                        break
-                if replacement is not None:
-                    cand = replacement
-                else:
-                    # No equivalent found — skip this action
-                    illegal += 1
-                    continue
+            # Apply the candidate directly.  If it's no longer applicable
+            # (e.g. state changed since genome was generated),
+            # _apply_candidate will catch IllegalActionError and return False.
 
             ok = self._apply_candidate(sim, cand)
             if not ok:

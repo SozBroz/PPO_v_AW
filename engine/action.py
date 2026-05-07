@@ -189,7 +189,7 @@ _RL_LEGAL_ACTION_TYPES: frozenset = frozenset({
 # Action dataclass
 # ---------------------------------------------------------------------------
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=True)
 class Action:
     action_type: ActionType
     unit_pos:   Optional[tuple[int, int]] = None   # position of acting unit
@@ -200,6 +200,23 @@ class Action:
     # Oracle / replay: disambiguate when multiple engine units share ``unit_pos``
     # (AWBW drawable stack — oracle_zip_replay ``_apply_move_paths_then_terminator``).
     select_unit_id: Optional[int] = None
+
+    def __post_init__(self):
+        # Normalize select_unit_id: 0 is not a valid unit ID, treat as None
+        if self.select_unit_id == 0:
+            self.select_unit_id = None
+
+    def __hash__(self):
+        # Make Action hashable for use in sets/dicts
+        return hash((
+            self.action_type,
+            self.unit_pos,
+            self.move_pos,
+            self.target_pos,
+            self.unit_type,
+            self.unload_pos,
+            self.select_unit_id,
+        ))
 
     def __repr__(self) -> str:
         parts = [self.action_type.name]
