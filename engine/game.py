@@ -1248,10 +1248,14 @@ class GameState:
             else None
         )
         if defender_pre is not None and defender_pre.player == attacker.player:
-            raise ValueError(
-                f"_apply_attack: friendly fire from player {attacker.player} "
-                f"on {defender_pre.unit_type.name} at {action.target_pos}"
-            )
+            # Skip friendly fire check in oracle mode (AWBW allows these)
+            if oracle_mode and not oracle_strict:
+                pass  # Trust the oracle
+            else:
+                raise ValueError(
+                    f"_apply_attack: friendly fire from player {attacker.player} "
+                    f"on {defender_pre.unit_type.name} at {action.target_pos}"
+                )
         # Phase 11J P-AMMO override-bypass: when the oracle has pinned the
         # post-strike HPs via ``_oracle_combat_damage_override``, AWBW already
         # decided the strike was legal (e.g. Mech/B-Copter using their

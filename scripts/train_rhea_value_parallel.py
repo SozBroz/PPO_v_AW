@@ -24,6 +24,7 @@ import multiprocessing as mp
 import os
 import queue
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,7 @@ import torch
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv
 from engine.game import IllegalActionError
+from engine.action import get_legal_actions, Action
 from rl.rhea import RheaConfig, RheaPlanner
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaReplayBuffer, RheaTransition
@@ -533,6 +535,146 @@ def _poll_gradients_from_shared(
     return results, last_poll_time
 
 
+def _sync_local_gradients_to_shared_worker(
+    local_dir: str,
+    shared_root: str,
+    actor_id: int,
+    stop_event: mp.synchronize.Event,
+    sync_interval: float = 30.0,
+) -> None:
+    """Background thread that syncs local gradient files to shared root."""
+    import json
+    import glob
+    import shutil
+
+    local_path = Path(local_dir)
+    shared_grad_dir = Path(shared_root) / "fleet" / f"actor-{actor_id}" / "gradients"
+    shared_grad_dir.mkdir(parents=True, exist_ok=True)
+
+    while not stop_event.is_set():
+        try:
+            if local_path.exists():
+                pattern = str(local_path / "grad_*.json")
+                local_files = glob.glob(pattern)
+
+                for lf in local_files:
+                    lf_path = Path(lf)
+                    try:
+                        dest = shared_grad_dir / lf_path.name
+                        try:
+                            os.replace(str(lf_path), str(dest))
+                        except OSError:
+                            shutil.copy2(str(lf_path), str(dest))
+                            lf_path.unlink()
+                        print(json.dumps({
+                            "event": "gradient_synced_to_shared",
+                            "actor_id": actor_id,
+                            "local": str(lf_path),
+                            "shared": str(dest),
+                        }), flush=True)
+                    except Exception as e:
+                        print(json.dumps({
+                            "event": "gradient_sync_error",
+                            "actor_id": actor_id,
+                            "file": str(lf_path),
+                            "error": str(e),
+                        }), flush=True)
+        except Exception as e:
+            print(json.dumps({
+                "event": "gradient_sync_worker_error",
+                "actor_id": actor_id,
+                "error": str(e),
+            }), flush=True)
+
+        for _ in range(int(sync_interval * 10)):
+            if stop_event.is_set():
+                break
+            time.sleep(0.1)
+
+
+def _sync_checkpoint_from_shared_worker(
+    shared_root: str,
+    local_dir: str,
+    stop_event: mp.synchronize.Event,
+    sync_interval: float = 60.0,
+) -> None:
+    """Background thread that syncs value_rhea_latest.pt from shared root to local dir."""
+    import shutil
+
+    shared_checkpoint = Path(shared_root) / "checkpoints" / "value_rhea_latest.pt"
+    local_path = Path(local_dir)
+    local_path.mkdir(parents=True, exist_ok=True)
+    local_checkpoint = local_path / "value_rhea_latest.pt"
+
+    last_synced_mtime = 0.0
+
+    while not stop_event.is_set():
+        try:
+            if shared_checkpoint.exists():
+                shared_mtime = shared_checkpoint.stat().st_mtime
+                if shared_mtime > last_synced_mtime:
+                    try:
+                        shutil.copy2(str(shared_checkpoint), str(local_checkpoint))
+                        last_synced_mtime = shared_mtime
+                        print(json.dumps({
+                            "event": "checkpoint_synced_from_shared",
+                            "shared": str(shared_checkpoint),
+                            "local": str(local_checkpoint),
+                            "mtime": shared_mtime,
+                        }), flush=True)
+                    except Exception as e:
+                        print(json.dumps({
+                            "event": "checkpoint_sync_error",
+                            "error": str(e),
+                        }), flush=True)
+        except Exception as e:
+            print(json.dumps({
+                "event": "checkpoint_sync_worker_error",
+                "error": str(e),
+            }), flush=True)
+
+        for _ in range(int(sync_interval * 10)):
+            if stop_event.is_set():
+                break
+            time.sleep(0.1)
+
+
+def _write_gradients_locally(
+    actor_id: int,
+    grads: dict,
+    step_num: int,
+    local_dir: str,
+) -> str | None:
+    """Write gradient deltas to local filesystem."""
+    import json
+
+    try:
+        grad_dir = Path(local_dir)
+        grad_dir.mkdir(parents=True, exist_ok=True)
+
+        grad_data = {
+            "actor_id": actor_id,
+            "step": step_num,
+            "timestamp": time.time(),
+            "gradients": grads,
+        }
+
+        final_path = grad_dir / f"grad_{step_num}_{int(time.time())}.json"
+
+        with open(final_path, "w", encoding="utf-8") as f:
+            json.dump(grad_data, f)
+
+        return str(final_path)
+
+    except Exception as e:
+        print(json.dumps({
+            "event": "local_gradient_write_error",
+            "actor_id": actor_id,
+            "error": str(e),
+        }), flush=True)
+        return None
+
+
 def _maybe_disable_cop_for_seat(co_state, disable_prob: float = 0.10) -> bool:
     """Randomly disable COP for a seat at game start (10% default).
     
@@ -723,9 +865,15 @@ def _actor_loop(
 
         value_model = None
         hist_value_model = None
-        latest_path = Path("checkpoints") / "value_rhea_latest.pt"
         
-        # Try to load checkpoint, but don't fail if it doesn't exist yet
+        # Determine where to read checkpoints from:
+        # - If push-gradients: all .pt I/O goes through Z: (shared root)
+        # - Otherwise: use local checkpoints/
+        if args.push_gradients and args.gradient_shared_root:
+            latest_path = Path(args.gradient_shared_root) / "checkpoints" / "value_rhea_latest.pt"
+        else:
+            latest_path = Path("checkpoints") / "value_rhea_latest.pt"
+        
         # Load checkpoint - use clean checkpoint, never the potentially corrupted latest.pt
         # This prevents NaN gradient propagation from corrupted models.
         actor_checkpoint = args.checkpoint
@@ -734,8 +882,10 @@ def _actor_loop(
         if checkpoint_path.name.lower() == "value_rhea_latest.pt":
             # Look for clean historical checkpoints (not latest)
             import glob
+            # Search in the same directory where we expect latest.pt to be
+            search_dir = latest_path.parent
             clean_candidates = sorted(
-                [p for p in checkpoint_path.parent.glob("value_rhea_*.pt") 
+                [p for p in search_dir.glob("value_rhea_*.pt") 
                  if "latest" not in p.name.lower()],
                 key=lambda p: p.stat().st_mtime,
                 reverse=True  # Newest first
@@ -876,6 +1026,84 @@ def _actor_loop(
             target_clip=args.target_clip,
         )
 
+        # Background sync threads for local gradient/checkpoint optimization
+        sync_stop_event = mp.Event()
+        local_grad_dir = args.local_gradient_dir
+        local_ckpt_dir = args.local_checkpoint_dir
+        
+        # If local dirs not specified but push-gradients is set, use sensible defaults
+        # On aux machines (with Z: mounted), use local disk path, not Z:
+        if push_gradients and local_grad_dir is None:
+            # Detect local base path: prefer C:/Users/sshuser/AWBW on Windows aux,
+            # fall back to D:/awbw if that doesn't exist, then cwd
+            import os
+            if os.name == "nt" and os.path.exists("Z:\\"):
+                # Windows aux machine - use local disk, not Z: (Samba mount)
+                if os.path.exists("C:/Users/sshuser/AWBW"):
+                    local_base = Path("C:/Users/sshuser/AWBW")
+                elif os.path.exists("D:/awbw"):
+                    local_base = Path("D:/awbw")
+                else:
+                    local_base = Path.cwd()
+            else:
+                local_base = Path.cwd()
+            local_grad_dir = str(local_base / "checkpoints" / "local_gradients" / f"actor-{actor_id}")
+        
+        if push_gradients and local_ckpt_dir is None:
+            import os
+            if os.name == "nt" and os.path.exists("Z:\\"):
+                # Windows aux machine - use local disk, not Z: (Samba mount)
+                if os.path.exists("C:/Users/sshuser/AWBW"):
+                    local_base = Path("C:/Users/sshuser/AWBW")
+                elif os.path.exists("D:/awbw"):
+                    local_base = Path("D:/awbw")
+                else:
+                    local_base = Path.cwd()
+            else:
+                local_base = Path.cwd()
+            local_ckpt_dir = str(local_base / "checkpoints" / "local_checkpoints")
+        
+        # Update latest_path to use local checkpoint dir if available
+        if local_ckpt_dir:
+            latest_path = Path(local_ckpt_dir) / "value_rhea_latest.pt"
+            print(json.dumps({
+                "event": "actor_using_local_checkpoint_dir",
+                "actor_id": actor_id,
+                "local_ckpt_dir": local_ckpt_dir,
+                "latest_path": str(latest_path),
+            }), flush=True)
+        
+        # Start background threads for syncing
+        if push_gradients and local_grad_dir:
+            grad_sync_thread = threading.Thread(
+                target=_sync_local_gradients_to_shared_worker,
+                args=(local_grad_dir, args.gradient_shared_root, actor_id, sync_stop_event, args.gradient_sync_interval),
+                daemon=True,
+                name=f"grad-sync-{actor_id}",
+            )
+            grad_sync_thread.start()
+            print(json.dumps({
+                "event": "gradient_sync_thread_started",
+                "actor_id": actor_id,
+                "local_dir": local_grad_dir,
+                "shared_root": args.gradient_shared_root,
+            }), flush=True)
+        
+        if push_gradients and local_ckpt_dir:
+            ckpt_sync_thread = threading.Thread(
+                target=_sync_checkpoint_from_shared_worker,
+                args=(args.gradient_shared_root, local_ckpt_dir, sync_stop_event, args.checkpoint_sync_interval),
+                daemon=True,
+                name=f"ckpt-sync-{actor_id}",
+            )
+            ckpt_sync_thread.start()
+            print(json.dumps({
+                "event": "checkpoint_sync_thread_started",
+                "actor_id": actor_id,
+                "local_dir": local_ckpt_dir,
+                "shared_root": args.gradient_shared_root,
+            }), flush=True)
+
         while not stop_event.is_set():
             try:
                 # Decide if this game uses historical checkpoint opponent
@@ -947,33 +1175,153 @@ def _actor_loop(
 
                         result = planner.choose_full_turn(state)
 
+                        # Replay RHEA actions on the real state, validating
+                        # each against the current legal set.  RHEA planned
+                        # on a *clone*; the real state may have diverged
+                        # (different candidate ranking, Cython/Python path
+                        # differences, or a previous action executing
+                        # differently).  We match by action signature, skip
+                        # anything that can't be matched, and salvage the
+                        # turn by forcing END_TURN if needed.
+                        #
+                        # Performance: we cache the legal set and only
+                        # refresh it when the state actually changes
+                        # (step() succeeded or we need to re-check).
+                        skipped_actions = 0
+                        applied_actions = 0
+                        _cached_legal = None
+                        _cached_legal_stage = None
+                        _cached_legal_player = None
+
+                        def _get_legal():
+                            """Return legal actions for the current real state,
+                            cached until the state's stage or active player
+                            changes (i.e. after a successful step())."""
+                            nonlocal _cached_legal, _cached_legal_stage, _cached_legal_player
+                            if env.state is None:
+                                return []
+                            s = env.state
+                            stage = s.action_stage.name
+                            player = int(s.active_player)
+                            if (_cached_legal is not None
+                                    and _cached_legal_stage == stage
+                                    and _cached_legal_player == player):
+                                return _cached_legal
+                            _cached_legal = get_legal_actions(s)
+                            _cached_legal_stage = stage
+                            _cached_legal_player = player
+                            return _cached_legal
+
+                        def _sig(a):
+                            return (
+                                a.action_type,
+                                a.unit_pos,
+                                a.move_pos,
+                                a.target_pos,
+                                a.unit_type,
+                            )
+
                         for action in result.actions:
                             if env.state is None or env.state.winner is not None:
                                 break
                             if int(env.state.active_player) != acting:
                                 break
-                            try:
-                                env.state.step(action)
-                            except IllegalActionError as illegal_e:
-                                # RHEA produced an illegal action -- log it and
-                                # break the turn cleanly instead of blowing
-                                # up the whole game.
-                                import traceback
+
+                            planned_sig = _sig(action)
+                            legal = _get_legal()
+                            matched = None
+                            for leg in legal:
+                                if _sig(leg) == planned_sig:
+                                    matched = leg
+                                    break
+
+                            if matched is not None:
+                                try:
+                                    env.state.step(matched)
+                                    applied_actions += 1
+                                    # Invalidate cache — state changed.
+                                    _cached_legal = None
+                                except IllegalActionError as step_e:
+                                    # Shouldn't happen (we checked), but
+                                    # guard the training loop regardless.
+                                    import traceback
+                                    print(json.dumps({
+                                        "event": "illegal_action_post_check",
+                                        "actor_id": actor_id,
+                                        "error": repr(step_e),
+                                        "game_turns": game_turns,
+                                        "day": day,
+                                        "action": str(action),
+                                        "traceback": traceback.format_exc(),
+                                    }), flush=True)
+                                    skipped_actions += 1
+                                    _abnormal_exit_error = repr(step_e)
+                            else:
+                                skipped_actions += 1
                                 print(json.dumps({
-                                    "event": "illegal_action",
+                                    "event": "action_skipped_not_legal",
                                     "actor_id": actor_id,
-                                    "error": repr(illegal_e),
                                     "game_turns": game_turns,
                                     "day": day,
                                     "action": str(action),
-                                    "traceback": traceback.format_exc(),
+                                    "action_stage": env.state.action_stage.name,
+                                    "legal_count": len(legal),
                                 }), flush=True)
-                                _abnormal_exit_error = repr(illegal_e)
-                                break  # stop executing remaining actions
+
+                        # If we skipped actions or the turn didn't complete
+                        # naturally, try to force END_TURN to salvage it.
+                        if env.state is not None and env.state.winner is None and int(env.state.active_player) == acting:
+                            legal = get_legal_actions(env.state)
+                            enders = [a for a in legal if a.action_type.name == "END_TURN"]
+                            if enders:
+                                try:
+                                    env.state.step(enders[0])
+                                    applied_actions += 1
+                                    print(json.dumps({
+                                        "event": "turn_salvaged_with_end_turn",
+                                        "actor_id": actor_id,
+                                        "game_turns": game_turns,
+                                        "day": day,
+                                        "skipped": skipped_actions,
+                                        "applied": applied_actions,
+                                    }), flush=True)
+                                except IllegalActionError as salvage_e:
+                                    print(json.dumps({
+                                        "event": "salvage_failed",
+                                        "actor_id": actor_id,
+                                        "error": repr(salvage_e),
+                                        "game_turns": game_turns,
+                                    }), flush=True)
+                                    _abnormal_exit_error = repr(salvage_e)
+                            else:
+                                # No END_TURN available -- turn is stuck.
+                                print(json.dumps({
+                                    "event": "turn_irrecoverable_no_end_turn",
+                                    "actor_id": actor_id,
+                                    "game_turns": game_turns,
+                                    "day": day,
+                                    "action_stage": env.state.action_stage.name,
+                                }), flush=True)
+                                _abnormal_exit_error = "turn_irrecoverable_no_end_turn"
 
                         after = env.state
                         if after is None:
                             print(json.dumps({"event": "state_none_after_turn", "game_turns": game_turns, "day": day, "acting": acting}), flush=True)
+                            break
+
+                        # If no actions were applied and we're still on the
+                        # same player, the turn is stuck -- break to avoid
+                        # an infinite loop of zero-progress "transitions".
+                        if applied_actions == 0 and after is not None and int(after.active_player) == acting:
+                            print(json.dumps({
+                                "event": "turn_stuck_no_progress",
+                                "actor_id": actor_id,
+                                "game_turns": game_turns,
+                                "day": day,
+                                "skipped": skipped_actions,
+                                "action_stage": after.action_stage.name,
+                            }), flush=True)
+                            _abnormal_exit_error = _abnormal_exit_error or "turn_stuck_no_progress"
                             break
 
                         _encode_into(after, acting, spatial_buf, scalars_buf)
@@ -1011,12 +1359,21 @@ def _actor_loop(
                                 )
                                 if grads:
                                     gradient_step += 1
-                                    grad_path = _write_gradients_to_shared(
-                                        actor_id,
-                                        grads,
-                                        gradient_step,
-                                        shared_root=args.gradient_shared_root,
-                                    )
+                                    # Write gradients locally or to shared based on config
+                                    if local_grad_dir:
+                                        grad_path = _write_gradients_locally(
+                                            actor_id,
+                                            grads,
+                                            gradient_step,
+                                            local_grad_dir,
+                                        )
+                                    else:
+                                        grad_path = _write_gradients_to_shared(
+                                            actor_id,
+                                            grads,
+                                            gradient_step,
+                                            shared_root=args.gradient_shared_root,
+                                        )
                                     if grad_path:
                                         print(json.dumps({
                                             "event": "gradients_pushed",
@@ -1043,7 +1400,9 @@ def _actor_loop(
                                         "initial_best_score": result.initial_best_score,
                                         "evolved_gain": result.evolved_gain,
                                         "illegal_genes": int(result.illegal_genes),
-                                        "actions": len(result.actions),
+                                        "actions_planned": len(result.actions),
+                                        "actions_applied": applied_actions,
+                                        "actions_skipped": skipped_actions,
                                         "use_hist_checkpoint": use_hist_checkpoint,
                                     },
                                 }
@@ -1089,6 +1448,9 @@ def _actor_loop(
                     }
                 )
             except Exception as exc:
+                # Signal background threads to stop
+                if 'sync_stop_event' in dir():
+                    sync_stop_event.set()
                 print(json.dumps({
                     "event": "actor_exception",
                     "actor_id": actor_id,
@@ -1104,6 +1466,9 @@ def _actor_loop(
                 raise  # Re-raise to stop this actor
 
     except Exception as exc:
+        # Signal background threads to stop
+        if 'sync_stop_event' in dir():
+            sync_stop_event.set()
         print(json.dumps({
             "event": "actor_fatal",
             "actor_id": actor_id,
@@ -1321,6 +1686,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                       help="Shared filesystem root for gradient exchange (default: Z:)")
     ap.add_argument("--gradient-poll-interval", type=float, default=30.0,
                       help="Seconds between main polling for gradient files (default: 30)")
+
+    # Local gradient / checkpoint optimization (avoid Samba writes)
+    ap.add_argument("--local-gradient-dir", type=str, default=None,
+                      help="Local directory for gradient writes (actors write here, background thread syncs to shared root). "
+                           "Default: on Windows aux (Z: mounted) -> D:/awbw/checkpoints/local_gradients/actor-{id} "
+                           "(or C:/Users/sshuser/AWBW if exists), else -> checkpoints/local_gradients/actor-{id}")
+    ap.add_argument("--gradient-sync-interval", type=float, default=30.0,
+                      help="Seconds between syncing local gradients to shared root (default: 30)")
+    ap.add_argument("--local-checkpoint-dir", type=str, default=None,
+                      help="Local directory for checkpoints (background thread syncs from shared root to here). "
+                           "Default: on Windows aux (Z: mounted) -> D:/awbw/checkpoints/local_checkpoints "
+                           "(or C:/Users/sshuser/AWBW if exists), else -> checkpoints/local_checkpoints")
+    ap.add_argument("--checkpoint-sync-interval", type=float, default=60.0,
+                      help="Seconds between syncing checkpoints from shared root to local (default: 60)")
 
     # Remote transition polling (multi-machine)
     ap.add_argument("--remote-transition-dir", type=str, default=None,
