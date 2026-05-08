@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Parallel RHEA value training.
 
@@ -798,6 +798,7 @@ def _poll_gradients_for_learner(
     
     For learner (machine-id == "learner") running on workhorse1.
     Reads gradient files directly from D:/awbw/data/gradients/.
+    Also checks D:/awbw/.tmp/vessel/ for worker gradients and moves them.
     Returns: (results, updated_last_poll_mtime)
     """
     import json
@@ -805,6 +806,37 @@ def _poll_gradients_for_learner(
     
     if last_poll_mtime is None:
         last_poll_mtime = {}
+    
+    # First, move any files from vessel directory to gradient_dir
+    vessel_dir = Path("d:/awbw/.tmp/vessel")
+    if vessel_dir.exists():
+        try:
+            for vf in vessel_dir.glob("workstation_*.json"):
+                try:
+                    with open(vf, "r", encoding="utf-8") as f:
+                        grad_data = json.load(f)
+                    actor_id = grad_data.get("actor_id", 0)
+                    target_dir = Path(gradient_dir) / f"actor-{actor_id}"
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target_path = target_dir / vf.name
+                    vf.rename(target_path)
+                    print(json.dumps({
+                        "event": "vessel_moved",
+                        "file": str(vf.name),
+                        "actor_id": actor_id,
+                        "to": str(target_path),
+                    }), flush=True)
+                except Exception as e:
+                    print(json.dumps({
+                        "event": "vessel_error",
+                        "file": str(vf),
+                        "error": str(e),
+                    }), flush=True)
+        except Exception as e:
+            print(json.dumps({
+                "event": "vessel_poll_error",
+                "error": str(e),
+            }), flush=True)
     
     grad_dir = Path(gradient_dir)
     if not grad_dir.exists():
@@ -2183,14 +2215,32 @@ def main() -> None:
                                     adaptive_lr = learner_cfg.value_lr * min(2.0, 1.0 + (total_actors / 100.0))
                                     optimizer_for_gradients.param_groups[0]["lr"] = adaptive_lr
                                     
-                                    # Check for NaN gradients before applying
+                                    # Check for NaN/Inf gradients before applying
                                     nan_grads = [name for name, g in aggregated_grads.items() if torch.isnan(g).any()]
-                                    if nan_grads:
+                                    inf_grads = [name for name, g in aggregated_grads.items() if torch.isinf(g).any()]
+                                    if nan_grads or inf_grads:
                                         print(json.dumps({
                                             "event": "skip_nan_grads",
-                                            "count": len(nan_grads),
-                                            "first_few": nan_grads[:5],
+                                            "nan_count": len(nan_grads),
+                                            "inf_count": len(inf_grads),
+                                            "first_few": (nan_grads + inf_grads)[:5],
                                         }), flush=True)
+                                        # Delete ALL gradient files to prevent re-processing
+                                        all_files_to_delete = set()
+                                        for item in gradient_results:
+                                            if len(item) == 5:
+                                                all_files_to_delete.add(item[0])  # file_path
+                                        if getattr(args, "machine_id", "actor") == "learner":
+                                            for fp in all_files_to_delete:
+                                                try:
+                                                    Path(fp).unlink()
+                                                    print(json.dumps({
+                                                        "event": "gradient_deleted",
+                                                        "file": str(fp),
+                                                        "reason": "NaN/Inf grads",
+                                                    }), flush=True)
+                                                except Exception as e:
+                                                    pass
                                         continue
                                     
                                     # Apply aggregated gradients
@@ -2337,3 +2387,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
