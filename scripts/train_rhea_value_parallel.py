@@ -756,6 +756,7 @@ def _poll_gradients_for_learner(
     
     For learner (machine-id == "learner") running on workhorse1.
     Reads gradient files directly from D:/awbw/data/gradients/.
+    Also checks D:/awbw/.tmp/vessel/ for worker gradients and moves them.
     Returns: (results, updated_last_poll_mtime)
     """
     import json
@@ -763,6 +764,37 @@ def _poll_gradients_for_learner(
     
     if last_poll_mtime is None:
         last_poll_mtime = {}
+    
+    # First, move any files from vessel directory to gradient_dir
+    vessel_dir = Path("d:/awbw/.tmp/vessel")
+    if vessel_dir.exists():
+        try:
+            for vf in vessel_dir.glob("workstation_*.json"):
+                try:
+                    with open(vf, "r", encoding="utf-8") as f:
+                        grad_data = json.load(f)
+                    actor_id = grad_data.get("actor_id", 0)
+                    target_dir = Path(gradient_dir) / f"actor-{actor_id}"
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target_path = target_dir / vf.name
+                    vf.rename(target_path)
+                    print(json.dumps({
+                        "event": "vessel_moved",
+                        "file": str(vf.name),
+                        "actor_id": actor_id,
+                        "to": str(target_path),
+                    }), flush=True)
+                except Exception as e:
+                    print(json.dumps({
+                        "event": "vessel_error",
+                        "file": str(vf),
+                        "error": str(e),
+                    }), flush=True)
+        except Exception as e:
+            print(json.dumps({
+                "event": "vessel_poll_error",
+                "error": str(e),
+            }), flush=True)
     
     grad_dir = Path(gradient_dir)
     if not grad_dir.exists():
