@@ -136,20 +136,41 @@ def _gradient_filename(machine_id: str, actor_id: int) -> str:
     return f"{machine_id}_{actor_id}_{_est_timestamp()}.json"
 
 
-def _ssh_scp_put(local_path: str, remote_path: str, hostname: str = "workhorse1", username: str = "sshuser") -> bool:
-    """SCP a file to remote host via paramiko. Returns True on success."""
+def _ssh_scp_put(local_path: str, remote_path: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> bool:
+    """SCP a file to remote host via paramiko. Uses atomic write (tmp + rename) on remote.
+    Returns True on success."""
     if not _HAVE_PARAMIKO:
         print(json.dumps({"event": "ssh_scp_error", "error": "paramiko or scp not installed"}), flush=True)
         return False
     try:
         import paramiko
         import scp
+        # Normalize remote path (use forward slashes for remote command)
+        remote_path = remote_path.replace("\\", "/")
+        remote_tmp = remote_path + ".tmp"
         client = paramiko.SSHClient()
         client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(hostname, username=username)
+        # Create remote directory if it doesn't exist (Windows)
+        remote_path_win = remote_path.replace("/", "\\")
+        remote_dir = str(__import__('pathlib').PureWindowsPath(remote_path_win).parent)
+        mkdir_cmd = f'if not exist "{remote_dir}" mkdir "{remote_dir}"'
+        client.exec_command(mkdir_cmd)
         with scp.SCPClient(client.get_transport()) as scp_client:
-            scp_client.put(local_path, remote_path)
+            # Atomic write: SCP to .tmp, then rename on remote
+            scp_client.put(local_path, remote_tmp)
+            # Use Windows 'move' command (both machines are Windows)
+            # Need backslashes for Windows move command
+            remote_path_win = remote_path.replace("/", "\\")
+            remote_tmp_win = remote_tmp.replace("/", "\\")
+            rename_cmd = f'move /Y "{remote_tmp_win}" "{remote_path_win}"'
+            stdin, stdout, stderr = client.exec_command(rename_cmd)
+            err = stderr.read().decode(errors="replace").strip()
+            if err:
+                print(json.dumps({"event": "ssh_scp_rename_error", "error": err, "remote": remote_path, "cmd": rename_cmd}), flush=True)
+                client.close()
+                return False
         client.close()
         return True
     except Exception as e:
@@ -157,28 +178,36 @@ def _ssh_scp_put(local_path: str, remote_path: str, hostname: str = "workhorse1"
         return False
 
 
-def _ssh_scp_get(remote_path: str, local_path: str, hostname: str = "workhorse1", username: str = "sshuser") -> bool:
-    """SCP a file from remote host via paramiko. Returns True on success."""
+def _ssh_scp_get(remote_path: str, local_path: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> bool:
+    """SCP a file from remote host via paramiko. Uses atomic write (tmp + rename) locally.
+    Returns True on success."""
     if not _HAVE_PARAMIKO:
         print(json.dumps({"event": "ssh_scp_error", "error": "paramiko or scp not installed"}), flush=True)
         return False
     try:
         import paramiko
         import scp
+        import tempfile
+        # Normalize remote path
+        remote_path = remote_path.replace("\\", "/")
         client = paramiko.SSHClient()
         client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(hostname, username=username)
+        # Atomic write: download to tmp, then rename
+        local = Path(local_path)
+        tmp_path = str(local.parent / (local.stem + ".tmp"))
         with scp.SCPClient(client.get_transport()) as scp_client:
-            scp_client.get(remote_path, local_path)
+            scp_client.get(remote_path, tmp_path)
         client.close()
+        os.replace(tmp_path, str(local))
         return True
     except Exception as e:
         print(json.dumps({"event": "ssh_scp_get_error", "error": str(e), "remote": remote_path, "local": local_path}), flush=True)
         return False
 
 
-def _ssh_list_files(remote_dir: str, hostname: str = "workhorse1", username: str = "sshuser") -> list[str]:
+def _ssh_list_files(remote_dir: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> list[str]:
     """List files in remote directory via SSH. Returns list of filenames."""
     if not _HAVE_PARAMIKO:
         return []
@@ -197,7 +226,7 @@ def _ssh_list_files(remote_dir: str, hostname: str = "workhorse1", username: str
         return []
 
 
-def _ssh_delete_file(remote_path: str, hostname: str = "workhorse1", username: str = "sshuser") -> bool:
+def _ssh_delete_file(remote_path: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> bool:
     """Delete a file on remote host via SSH. Returns True on success."""
     if not _HAVE_PARAMIKO:
         return False
@@ -647,11 +676,11 @@ def _sync_local_gradients_to_shared_worker(
     actor_id: int,
     stop_event: mp.synchronize.Event,
     sync_interval: float = 30.0,
-    hostname: str = "workhorse1",
+    hostname: str = "192.168.0.160",
     username: str = "sshuser",
     remote_grad_dir: str = "D:/awbw/data/gradients",
 ) -> None:
-    """Background thread that SCPs local gradient files to workhorse1:D:/awbw/data/gradients/."""
+    """Background thread that SCPs local gradient files to 192.168.0.160:D:/awbw/data/gradients/."""
     import json
     import glob
     import os
@@ -663,7 +692,7 @@ def _sync_local_gradients_to_shared_worker(
     while not stop_event.is_set():
         try:
             pattern = str(local_path / "*.json")
-            local_files = glob.glob(pattern)
+            local_files = [f for f in glob.glob(pattern) if not f.endswith(".tmp")]
 
             for lf in local_files:
                 lf_path = Path(lf)
@@ -710,15 +739,18 @@ def _sync_checkpoint_from_shared_worker(
     local_dir: str,
     stop_event: mp.synchronize.Event,
     sync_interval: float = 60.0,
-    hostname: str = "workhorse1",
+    hostname: str = "192.168.0.160",
     username: str = "sshuser",
     remote_checkpoint_dir: str = "D:/awbw/checkpoints",
 ) -> None:
-    """Background thread that SCPs value_rhea_latest.pt from workhorse1 to local dir."""
+    """Background thread that SCPs value_rhea_latest.pt from 192.168.0.160 to local dir."""
     local_path = Path(local_dir)
     local_path.mkdir(parents=True, exist_ok=True)
     local_checkpoint = local_path / "value_rhea_latest.pt"
-    remote_checkpoint = f"{remote_checkpoint_dir}\\value_rhea_latest.pt"
+    # Normalize remote path
+    remote_checkpoint = remote_checkpoint_dir.replace("\\", "/") + "/value_rhea_latest.pt"
+    # Use .new suffix to avoid clobbering the running checkpoint
+    local_new = local_checkpoint.with_suffix(".pt.new")
 
     last_synced_mtime = 0.0
 
@@ -726,15 +758,25 @@ def _sync_checkpoint_from_shared_worker(
         try:
             # List remote files to check if newer checkpoint exists
             remote_files = _ssh_list_files(remote_checkpoint_dir, hostname, username)
-            if "value_rhea_latest.pt" in remote_files:
-                # Try to SCP the checkpoint
-                if _ssh_scp_get(remote_checkpoint, str(local_checkpoint), hostname, username):
-                    print(json.dumps({
-                        "event": "checkpoint_synced_from_learner",
-                        "machine_id": machine_id,
-                        "remote": remote_checkpoint,
-                        "local": str(local_checkpoint),
-                    }), flush=True)
+            if "value_rhea_latest.pt" not in remote_files:
+                # No checkpoint yet from learner — sleep and retry
+                for _ in range(int(sync_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
+                continue
+
+            # Download to .new (don't touch the running .pt)
+            if _ssh_scp_get(remote_checkpoint, str(local_new), hostname, username):
+                # Signal the actor to swap checkpoints by writing a flag file
+                flag = local_checkpoint.with_suffix(".pt.flag")
+                flag.write_text("new")
+                print(json.dumps({
+                    "event": "checkpoint_synced_from_learner",
+                    "machine_id": machine_id,
+                    "remote": remote_checkpoint,
+                    "local": str(local_new),
+                }), flush=True)
         except Exception as e:
             print(json.dumps({
                 "event": "checkpoint_sync_worker_error",
@@ -768,9 +810,9 @@ def _poll_gradients_for_learner(
     if not grad_dir.exists():
         return [], last_poll_mtime
     
-    # Recursively find all .json files in subdirectories
+    # Recursively find all .json files in subdirectories (skip .tmp)
     pattern = str(grad_dir / "**/*.json")
-    grad_files = glob.glob(pattern, recursive=True)
+    grad_files = [f for f in glob.glob(pattern, recursive=True) if not f.endswith(".tmp")]
     
     results = []
     for fpath in grad_files:
@@ -832,9 +874,13 @@ def _write_gradients_locally(
 
         filename = _gradient_filename(machine_id, actor_id)
         final_path = grad_dir / filename
+        tmp_path = grad_dir / (filename + ".tmp")
 
-        with open(final_path, "w", encoding="utf-8") as f:
+        # Write to temp file, then atomically rename to final path.
+        # This prevents corrupt files if the process is killed mid-write.
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(grad_data, f)
+        os.replace(str(tmp_path), str(final_path))
 
         return str(final_path)
 
@@ -1235,23 +1281,31 @@ def _actor_loop(
                 "local_dir": local_grad_dir,
             }), flush=True)
         
-        if push_gradients and local_ckpt_dir:
-            ckpt_sync_thread = threading.Thread(
-                target=_sync_checkpoint_from_shared_worker,
-                args=(args.machine_id, local_ckpt_dir, sync_stop_event, args.checkpoint_sync_interval),
-                daemon=True,
-                name=f"ckpt-sync-{actor_id}",
-            )
-            ckpt_sync_thread.start()
-            print(json.dumps({
-                "event": "checkpoint_sync_thread_started",
-                "actor_id": actor_id,
-                "machine_id": args.machine_id,
-                "local_dir": local_ckpt_dir,
-            }), flush=True)
+        # Checkpoint sync disabled: no learner running yet to push checkpoints.
+        # Re-enable when a learner is pushing value_rhea_latest.pt to 192.168.0.160.
+        # if push_gradients and local_ckpt_dir:
+        #     ckpt_sync_thread = threading.Thread(
+        #         target=_sync_checkpoint_from_shared_worker,
+        #         args=(args.machine_id, local_ckpt_dir, sync_stop_event, args.checkpoint_sync_interval),
+        #         daemon=True,
+        #         name=f"ckpt-sync-{actor_id}",
+        #     )
+        #     ckpt_sync_thread.start()
+        #     print(json.dumps({
+        #         "event": "checkpoint_sync_thread_started",
+        #         "actor_id": actor_id,
+        #         "machine_id": args.machine_id,
+        #         "local_dir": local_ckpt_dir,
+        #     }), flush=True)
 
         while not stop_event.is_set():
             try:
+                # Checkpoint reload disabled: no sync thread running.
+                # Re-enable when checkpoint sync is re-enabled.
+                # flag = Path(local_ckpt_dir) / "value_rhea_latest.pt.flag"
+                # if flag.exists():
+                #     ... (reload logic)
+
                 # Decide if this game uses historical checkpoint opponent
                 use_hist_checkpoint = random.random() < local_hist_prob
                 
@@ -2038,7 +2092,7 @@ def main() -> None:
                 elapsed = time.time() - last_transition_time
                 timeout_log_entry = {
                     "event": "queue_timeout",
-                    "transitions": (gradient_step if args.push_gradients else transitions),
+                    "transitions": transitions,
                     "replay": len(replay),
                     "actors_alive": alive_count,
                     "seconds_since_last_transition": round(elapsed, 1),
@@ -2160,7 +2214,7 @@ def main() -> None:
                                         "actors_contributed": total_actors,
                                         "grad_norm": grad_norm,
                                         "adaptive_lr": adaptive_lr,
-                                        "transitions": (gradient_step if args.push_gradients else transitions),
+                                        "transitions": transitions,
                                         "replay_size": len(replay),
                                     }), flush=True)
                                     
