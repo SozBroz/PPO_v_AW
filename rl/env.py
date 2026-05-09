@@ -115,12 +115,15 @@ def coerce_map_id_filter(raw: int | Sequence[int] | None) -> list[int] | None:
     return out
 
 
-def coerce_co_selection(raw: int | Sequence[int] | None) -> list[int] | None:
+def coerce_co_selection(raw: int | str | Sequence[int] | None) -> list[int] | None:
     """``None`` = sample CO from tier each episode; else uniform choice from list per reset."""
     if raw is None:
         return None
     if isinstance(raw, int):
         return [int(raw)]
+    if isinstance(raw, str):
+        # Handle comma-separated string like "14,8,28,7"
+        return [int(x.strip()) for x in raw.split(",") if x.strip()]
     out = [int(x) for x in raw]
     if not out:
         raise ValueError("CO list must be non-empty")

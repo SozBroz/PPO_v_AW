@@ -451,7 +451,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-elite", type=int, default=4)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=24)
-    ap.add_argument("--rhea-max-actions-per-turn", type=int, default=128)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
 
@@ -607,7 +606,6 @@ def main() -> None:
             elite=args.rhea_elite,
             mutation_rate=args.rhea_mutation_rate,
             top_k_per_state=args.rhea_top_k_per_state,
-            max_actions_per_turn=args.rhea_max_actions_per_turn,
             reward_weight=args.reward_weight,
             value_weight=args.value_weight,
             seed=seed,

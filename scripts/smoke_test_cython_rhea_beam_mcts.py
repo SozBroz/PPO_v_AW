@@ -81,10 +81,11 @@ try:
         (30, 10, 5, 15, "complex position"),
     ]
     
-    for owned, factories, captures, contacts, desc in test_cases:
-        pop, gen, max_acts = dynamic_rhea_budget(owned, factories, captures, contacts)
-        valid = (12 <= pop <= 64) and (2 <= gen <= 7) and (48 <= max_acts <= 240)
-        check(f"Rhea budget ({desc}): pop={pop}, gen={gen}, max_acts={max_acts}", 
+for owned, factories, captures, contacts, desc in test_cases:
+        pop, gen = dynamic_rhea_budget(owned, factories, captures, contacts)
+        max_acts = 0  # removed — genome is self-sizing
+        valid = (12 <= pop <= 64) and (2 <= gen <= 7)
+        check(f"Rhea budget ({desc}): pop={pop}, gen={gen} (max_acts removed)",
               valid, f"out of range for {desc}")
     
     check("Rhea dynamic budget calculation", True)
@@ -180,7 +181,6 @@ try:
         generations=3,
         elite=4,
         mutation_rate=0.20,
-        max_actions_per_turn=64,
         use_tactical_beam=True,
         tactial_beam_max_width=32,
         tactial_beam_max_depth=8,

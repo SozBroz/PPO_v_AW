@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Parallel RHEA value training.
 
@@ -180,7 +180,7 @@ def _ssh_scp_put(local_path: str, remote_path: str, hostname: str = "192.168.0.1
 
 def _ssh_scp_get(remote_path: str, local_path: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> bool:
     """SCP a file from remote host via paramiko. Uses atomic write (tmp + rename) locally.
-    Returns True on success."""
+    Retries on Windows file-lock errors (WinError 32). Returns True on success."""
     if not _HAVE_PARAMIKO:
         print(json.dumps({"event": "ssh_scp_error", "error": "paramiko or scp not installed"}), flush=True)
         return False
@@ -196,12 +196,23 @@ def _ssh_scp_get(remote_path: str, local_path: str, hostname: str = "192.168.0.1
         client.connect(hostname, username=username)
         # Atomic write: download to tmp, then rename
         local = Path(local_path)
-        tmp_path = str(local.parent / (local.stem + ".tmp"))
+        tmp_path = str(local.parent / (local.stem + ".tmp.tmp"))
         with scp.SCPClient(client.get_transport()) as scp_client:
             scp_client.get(remote_path, tmp_path)
         client.close()
-        os.replace(tmp_path, str(local))
-        return True
+        # Retry on Windows file-lock (WinError 32) since actors may be reading the checkpoint
+        for attempt in range(10):
+            try:
+                os.replace(tmp_path, str(local))
+                return True
+            except OSError as e:
+                if getattr(e, "winerror", None) == 32 and attempt < 9:
+                    import time
+                    print(json.dumps({"event": "ssh_scp_get_retry", "error": str(e), "remote": remote_path, "attempt": attempt + 1}), flush=True)
+                    time.sleep(0.5)
+                else:
+                    raise
+        return False
     except Exception as e:
         print(json.dumps({"event": "ssh_scp_get_error", "error": str(e), "remote": remote_path, "local": local_path}), flush=True)
         return False
@@ -1229,7 +1240,6 @@ def _actor_loop(
                     elite=args.rhea_elite,
                     mutation_rate=args.rhea_mutation_rate,
                     top_k_per_state=args.rhea_top_k_per_state,
-                    max_actions_per_turn=args.rhea_max_actions_per_turn,
                     reward_weight=args.reward_weight,
                     value_weight=args.value_weight,
                     seed=seed,
@@ -1754,7 +1764,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-elite", type=int, default=4)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=24)
-    ap.add_argument("--rhea-max-actions-per-turn", type=int, default=128)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.

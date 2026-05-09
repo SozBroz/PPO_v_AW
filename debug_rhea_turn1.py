@@ -104,7 +104,6 @@ def main():
         generations=3,   # Fewer for debugging
         elite=2,
         mutation_rate=0.20,
-        max_actions_per_turn=64,
         top_k_per_state=24,
         reward_weight=0.90,
         value_weight=0.10,
