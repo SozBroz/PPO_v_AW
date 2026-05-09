@@ -2190,7 +2190,9 @@ def main() -> None:
                                 aggregated_grads: dict[str, torch.Tensor] = {}
                                 total_actors = 0
                                 file_paths_to_delete = []
-                                
+                                machine_gradient_counts: dict[str, int] = {}
+                                gradient_contributors: list[dict[str, Any]] = []
+
                                 for item in gradient_results:
                                     if len(item) == 3:  # (actor_id, grads_dict, timestamp)
                                         actor_id, grads_dict, timestamp = item
@@ -2198,7 +2200,13 @@ def main() -> None:
                                     else:  # (file_path, machine_id, actor_id, grads_dict, timestamp)
                                         file_path, machine_id, actor_id, grads_dict, timestamp = item
                                         file_paths_to_delete.append(file_path)
-                                    
+
+                                    mid = str(machine_id)
+                                    machine_gradient_counts[mid] = machine_gradient_counts.get(mid, 0) + 1
+                                    gradient_contributors.append(
+                                        {"machine_id": mid, "actor_id": int(actor_id)},
+                                    )
+
                                     total_actors += 1
                                     for name, grad_tensor in grads_dict.items():
                                         if name not in aggregated_grads:
@@ -2258,6 +2266,10 @@ def main() -> None:
                                         learner.num_updates = gradient_step
                                         learner._maybe_update_target()
                                     
+                                    non_learner_in_batch = sum(
+                                        n for mid, n in machine_gradient_counts.items()
+                                        if mid.lower() != "learner"
+                                    )
                                     print(json.dumps({
                                         "event": "gradients_applied",
                                         "step": gradient_step,
@@ -2266,6 +2278,9 @@ def main() -> None:
                                         "adaptive_lr": adaptive_lr,
                                         "transitions": transitions,
                                         "replay_size": len(replay),
+                                        "machines_in_batch": machine_gradient_counts,
+                                        "contributors": gradient_contributors,
+                                        "non_learner_files_in_batch": non_learner_in_batch,
                                     }), flush=True)
                                     
                                     # Delete gradient files after training (learner only)
