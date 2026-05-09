@@ -114,9 +114,7 @@ import torch
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv
-from engine.game import IllegalActionError
-from engine.action import get_legal_actions, Action
-from rl.rhea import RheaConfig, RheaPlanner
+from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaReplayBuffer, RheaTransition
 from rl.rhea_value_learner import RheaValueLearner, RheaValueLearnerConfig
@@ -1417,134 +1415,19 @@ def _actor_loop(
 
                         result = planner.choose_full_turn(state)
 
-                        # Replay RHEA actions on the real state, validating
-                        # each against the current legal set.  RHEA planned
-                        # on a *clone*; the real state may have diverged
-                        # (different candidate ranking, Cython/Python path
-                        # differences, or a previous action executing
-                        # differently).  We match by action signature, skip
-                        # anything that can't be matched, and salvage the
-                        # turn by forcing END_TURN if needed.
-                        #
-                        # Performance: we cache the legal set and only
-                        # refresh it when the state actually changes
-                        # (step() succeeded or we need to re-check).
-                        skipped_actions = 0
-                        applied_actions = 0
-                        _cached_legal = None
-                        _cached_legal_stage = None
-                        _cached_legal_player = None
+                        # Replay actions on real environment.
+                        applied_actions, skipped_actions = replay_rhea_actions(env.state, result.actions, acting)
 
-                        def _get_legal():
-                            """Return legal actions for the current real state,
-                            cached until the state's stage or active player
-                            changes (i.e. after a successful step())."""
-                            nonlocal _cached_legal, _cached_legal_stage, _cached_legal_player
-                            if env.state is None:
-                                return []
-                            s = env.state
-                            stage = s.action_stage.name
-                            player = int(s.active_player)
-                            if (_cached_legal is not None
-                                    and _cached_legal_stage == stage
-                                    and _cached_legal_player == player):
-                                return _cached_legal
-                            _cached_legal = get_legal_actions(s)
-                            _cached_legal_stage = stage
-                            _cached_legal_player = player
-                            return _cached_legal
-
-                        def _sig(a):
-                            return (
-                                a.action_type,
-                                a.unit_pos,
-                                a.move_pos,
-                                a.target_pos,
-                                a.unit_type,
-                            )
-
-                        for action in result.actions:
-                            if env.state is None or env.state.winner is not None:
-                                break
-                            if int(env.state.active_player) != acting:
-                                break
-
-                            planned_sig = _sig(action)
-                            legal = _get_legal()
-                            matched = None
-                            for leg in legal:
-                                if _sig(leg) == planned_sig:
-                                    matched = leg
-                                    break
-
-                            if matched is not None:
-                                try:
-                                    env.state.step(matched)
-                                    applied_actions += 1
-                                    # Invalidate cache — state changed.
-                                    _cached_legal = None
-                                except IllegalActionError as step_e:
-                                    # Shouldn't happen (we checked), but
-                                    # guard the training loop regardless.
-                                    import traceback
-                                    print(json.dumps({
-                                        "event": "illegal_action_post_check",
-                                        "actor_id": actor_id,
-                                        "error": repr(step_e),
-                                        "game_turns": game_turns,
-                                        "day": day,
-                                        "action": str(action),
-                                        "traceback": traceback.format_exc(),
-                                    }), flush=True)
-                                    skipped_actions += 1
-                                    _abnormal_exit_error = repr(step_e)
-                            else:
-                                skipped_actions += 1
-                                print(json.dumps({
-                                    "event": "action_skipped_not_legal",
-                                    "actor_id": actor_id,
-                                    "game_turns": game_turns,
-                                    "day": day,
-                                    "action": str(action),
-                                    "action_stage": env.state.action_stage.name,
-                                    "legal_count": len(legal),
-                                }), flush=True)
-
-                        # If we skipped actions or the turn didn't complete
-                        # naturally, try to force END_TURN to salvage it.
-                        if env.state is not None and env.state.winner is None and int(env.state.active_player) == acting:
-                            legal = get_legal_actions(env.state)
-                            enders = [a for a in legal if a.action_type.name == "END_TURN"]
-                            if enders:
-                                try:
-                                    env.state.step(enders[0])
-                                    applied_actions += 1
-                                    print(json.dumps({
-                                        "event": "turn_salvaged_with_end_turn",
-                                        "actor_id": actor_id,
-                                        "game_turns": game_turns,
-                                        "day": day,
-                                        "skipped": skipped_actions,
-                                        "applied": applied_actions,
-                                    }), flush=True)
-                                except IllegalActionError as salvage_e:
-                                    print(json.dumps({
-                                        "event": "salvage_failed",
-                                        "actor_id": actor_id,
-                                        "error": repr(salvage_e),
-                                        "game_turns": game_turns,
-                                    }), flush=True)
-                                    _abnormal_exit_error = repr(salvage_e)
-                            else:
-                                # No END_TURN available -- turn is stuck.
-                                print(json.dumps({
-                                    "event": "turn_irrecoverable_no_end_turn",
-                                    "actor_id": actor_id,
-                                    "game_turns": game_turns,
-                                    "day": day,
-                                    "action_stage": env.state.action_stage.name,
-                                }), flush=True)
-                                _abnormal_exit_error = "turn_irrecoverable_no_end_turn"
+                        if skipped_actions > 0:
+                            print(json.dumps({
+                                "event": "actions_skipped_during_replay",
+                                "actor_id": actor_id,
+                                "game_turns": game_turns,
+                                "day": day,
+                                "skipped": skipped_actions,
+                                "applied": applied_actions,
+                            }), flush=True)
+                            _abnormal_exit_error = _abnormal_exit_error or f"actions_skipped:{skipped_actions}"
 
                         after = env.state
                         if after is None:
@@ -1759,11 +1642,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # RHEA search.
     ap.add_argument("--rhea-autotune", action="store_true",
         help="Enable dynamic RHEA budget auto-tuning based on game state complexity")
-    ap.add_argument("--rhea-population", type=int, default=32)
-    ap.add_argument("--rhea-generations", type=int, default=5)
-    ap.add_argument("--rhea-elite", type=int, default=4)
+    ap.add_argument("--rhea-population", type=int, default=64)
+    ap.add_argument("--rhea-generations", type=int, default=10)
+    ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
-    ap.add_argument("--rhea-top-k-per-state", type=int, default=24)
+    ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.

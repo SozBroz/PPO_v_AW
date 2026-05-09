@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from rl.env import AWBWEnv, POOL_PATH
-from rl.rhea import RheaConfig, RheaPlanner
+from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions, _salvage_ender
 from rl.rhea_fitness import RheaFitness
 from rl.value_net import load_value_checkpoint
 from tools.export_awbw_replay import write_awbw_replay
@@ -59,8 +59,8 @@ def main() -> None:
     parser.add_argument("--co-p0", type=str, default="14")
     parser.add_argument("--co-p1", type=str, default="14")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--population", type=int, default=32)
-    parser.add_argument("--generations", type=int, default=6)
+    parser.add_argument("--population", type=int, default=64)
+    parser.add_argument("--generations", type=int, default=10)
     parser.add_argument("--value-weight", type=float, default=0.10)
     parser.add_argument("--reward-weight", type=float, default=0.90)
     parser.add_argument("--max-days", type=int, default=30)
@@ -149,14 +149,11 @@ def main() -> None:
         tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
     )
     # Override parameters for early game
-    config.top_k_per_state = 10  # With wrap-around fix, can be higher
+    # (default top_k_per_state = 48 from RheaConfig)
     
     # Calculate complexity metrics for dynamic budgeting if enabled
     complexity_metrics = None
-    if args.rhea_autotune and env.state is not None:
-        # For early game, use conservative defaults
-        complexity_metrics = (0, 0, 0, 0)
-    
+
     planner = RheaPlanner(
         fitness, 
         config, 
@@ -167,8 +164,27 @@ def main() -> None:
     while env.state is not None and env.state.winner is None:
         state = env.state
         active = int(state.active_player)
+
+        # Refresh complexity metrics for dynamic budgeting
+        if args.rhea_autotune:
+            try:
+                planner.complexity_metrics = RheaPlanner.compute_complexity_metrics(
+                    state, active
+                )
+            except Exception:
+                planner.complexity_metrics = None
+
         result = planner.choose_full_turn(state)
 
+        dyn = ""
+        if args.rhea_autotune:
+            dyn = f" autotune pop={result.population_used} gen={result.generations_used} combos={result.population_used * result.generations_used}"
+        init_info = ""
+        if result.initial_best_score is not None:
+            init_info = f" init={result.initial_best_score:+.4f}"
+        gain_info = ""
+        if result.evolved_gain is not None:
+            gain_info = f" gain={result.evolved_gain:+.4f}"
         print(
             f"day={getattr(state, 'turn', '?')} active={active} "
             f"score={result.score:.4f} "
@@ -176,17 +192,22 @@ def main() -> None:
             f"v={result.breakdown.value:.4f} "
             f"illegal={result.illegal_genes} "
             f"actions={len(result.actions)}"
+            f"{dyn}{init_info}{gain_info}"
         )
 
-        for action in result.actions:
-            if env.state is None or env.state.winner is not None:
+        # Replay actions on real environment.
+        applied, skipped = replay_rhea_actions(env.state, result.actions, active)
+
+        # Safety: if active player didn't change after replay, force-advance.
+        if (env.state is not None and env.state.winner is None
+                and int(env.state.active_player) == active):
+            _salvage_ender(env.state, active)
+            if int(env.state.active_player) == active:
+                print(f"[FATAL] cannot advance player {active} after salvage, game stuck!",
+                      flush=True)
                 break
-            if int(env.state.active_player) != active:
-                break
-            env.state.step(action)
-            # Add snapshot on player turn change
-            if env.state is not None and env.state.active_player != active:
-                snapshots.append(copy.deepcopy(env.state))
+        elif env.state is not None and int(env.state.active_player) != active:
+            snapshots.append(copy.deepcopy(env.state))
 
     if env.state is not None:
         # Add final snapshot

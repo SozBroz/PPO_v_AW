@@ -274,11 +274,11 @@ def dynamic_rhea_budget(
         + 0.5 * enemy_in_range_contacts
     )
 
-    pop = int(8 + 1.2 * complexity)
-    gen = int(2 + complexity / 8)
+    pop = int(12 + 1.5 * complexity)
+    gen = int(3 + complexity / 6)
 
-    pop = max(12, min(pop, 64))
-    gen = max(2, min(gen, 7))
+    pop = max(24, min(pop, 96))
+    gen = max(5, min(gen, 12))
 
     return pop, gen
 
@@ -290,13 +290,13 @@ def dynamic_rhea_budget(
 
 @dataclass(slots=True)
 class RheaConfig:
-    population: int = 32
-    generations: int = 6
-    elite: int = 4
+    population: int = 64
+    generations: int = 10
+    elite: int = 8
     mutation_rate: float = 0.20
     # max_actions_per_turn removed — genome is now self-sizing based on
     # unmoved units + factories in the before-state.
-    top_k_per_state: int = 24
+    top_k_per_state: int = 48
     reward_weight: float = 0.90
     value_weight: float = 0.10
     # Logging/eval knobs.
@@ -318,6 +318,131 @@ class RheaResult:
     generations: int
     initial_best_score: float | None = None
     evolved_gain: float | None = None
+    genome: Optional[RheaGenome] = None  # best genome for intent-group replay
+    population_used: int = 32           # actual population used (autotune override)
+    generations_used: int = 6           # actual generations used (autotune override)
+
+
+# ---------------------------------------------------------------------------
+# Shared replay helpers  (replay RHEA actions on the real env state)
+# ---------------------------------------------------------------------------
+
+
+def _salvage_ender(env_state: GameState, acting: int) -> None:
+    """Force-advance ``env_state`` for ``acting``: WAIT unmoved units then END_TURN.
+
+    Ensures SELECT stage first so ``get_legal_actions`` returns the right
+    candidates.  Steps use ``oracle_mode=True`` because the actions may not
+    match the real state's exact objects.
+    """
+    if env_state is None or env_state.winner is not None:
+        return
+    if int(env_state.active_player) != acting:
+        return
+
+    env_state.action_stage = ActionStage.SELECT
+    env_state.selected_unit = None
+    env_state.selected_move_pos = None
+
+    legal = get_legal_actions(env_state)
+    enders = [a for a in legal if a.action_type == ActionType.END_TURN]
+    if enders:
+        try:
+            env_state.step(enders[0], oracle_mode=True)
+            return
+        except Exception:
+            pass
+
+    # END_TURN not legal (unmoved units) — WAIT each unmoved unit in place.
+    for _u in list(env_state.units[acting]):
+        if not _u.is_alive or _u.moved or _u.is_stunned:
+            continue
+        legal = get_legal_actions(env_state)
+        sel = [a for a in legal
+               if a.action_type == ActionType.SELECT_UNIT and a.unit_pos == _u.pos]
+        if not sel:
+            continue
+        try:
+            env_state.step(sel[0], oracle_mode=True)
+        except Exception:
+            continue
+        legal = get_legal_actions(env_state)
+        moves = [a for a in legal
+                 if a.action_type == ActionType.SELECT_UNIT and a.move_pos == _u.pos]
+        if not moves:
+            continue
+        try:
+            env_state.step(moves[0], oracle_mode=True)
+        except Exception:
+            continue
+        if env_state.action_stage == ActionStage.ACTION:
+            legal = get_legal_actions(env_state)
+            waits = [a for a in legal if a.action_type == ActionType.WAIT]
+            if waits:
+                try:
+                    env_state.step(waits[0], oracle_mode=True)
+                except Exception:
+                    pass
+    # Try END_TURN again after WAIT salvage.
+    env_state.action_stage = ActionStage.SELECT
+    env_state.selected_unit = None
+    env_state.selected_move_pos = None
+    legal = get_legal_actions(env_state)
+    enders = [a for a in legal if a.action_type == ActionType.END_TURN]
+    if enders:
+        try:
+            env_state.step(enders[0], oracle_mode=True)
+        except Exception:
+            pass
+
+
+def replay_rhea_actions(env_state: GameState, actions: list, acting: int) -> tuple[int, int]:
+    """Replay raw engine ``actions`` one at a time, skip failures, salvage.
+
+    ``actions`` are the real ``Action`` objects produced by the RHEA simulation
+    (``result.actions`` from ``choose_full_turn``).
+
+    Each action is replayed with ``oracle_mode=True`` to bypass the step gate's
+    identity check (simulation-constructed Action objects are not the same
+    instances as those from ``get_legal_actions()`` on the real state).
+
+    If an action still fails (true state divergence), it is skipped.  After all
+    actions are processed, the function attempts to salvage: force SELECT stage,
+    WAIT any unmoved units in place, then END_TURN.  This ensures the turn
+    advances even when all genome intents failed.
+
+    Returns ``(applied, skipped)``.
+    """
+    applied = 0
+    skipped = 0
+    for action in actions:
+        if env_state is None or env_state.winner is not None:
+            break
+        if int(env_state.active_player) != acting:
+            break
+        try:
+            env_state.step(action, oracle_mode=True)
+            applied += 1
+        except Exception as _ex:
+            import traceback as _tb
+            print(f"[replay_rhea_actions] step failed: {_ex}", flush=True)
+            _tb.print_exc()
+            skipped += 1
+
+    # Force END_TURN if still acting.
+    if (env_state is not None and env_state.winner is None
+            and int(env_state.active_player) == acting):
+        _salvage_ender(env_state, acting)
+        applied += 1  # best-effort, may or may not have advanced
+
+    # Clamp to SELECT so ActionPool.build on the next turn does not crash.
+    if (env_state is not None and env_state.winner is None
+            and env_state.action_stage != ActionStage.SELECT):
+        env_state.action_stage = ActionStage.SELECT
+        env_state.selected_unit = None
+        env_state.selected_move_pos = None
+
+    return applied, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +521,21 @@ class RheaPlanner:
         population = [
             self._random_genome(action_pool) for _ in range(population_size)
         ]
+
+        # Seed a fraction of the initial population with capture-biased and
+        # attack-biased intents to give evolution a useful starting signal.
+        if action_pool.unit_options:
+            _n_seeded = max(1, population_size // 4)
+            for _i_seed in range(_n_seeded):
+                genome = self._random_genome(action_pool)
+                self._bias_genome_toward_capture_attack(genome, action_pool)
+                population[_i_seed] = genome
+
+        print(f"  [RHEA] pop={population_size} gen={generations} "
+              f"combos={population_size * generations} "
+              f"units={len(action_pool.unmoved_positions)} "
+              f"builds={len(action_pool.build_options)}", flush=True)
+
         rhea_best = None
         initial_best_score: float | None = None
 
@@ -452,6 +592,14 @@ class RheaPlanner:
             if rhea_best is None or scored[0][0] > rhea_best[0]:
                 rhea_best = scored[0]
 
+            # Per-generation logging
+            if _gen == generations - 1 or (_gen % 3 == 0 and generations > 3):
+                print(f"  RHEA gen={_gen+1}/{generations} "
+                      f"best={scored[0][0]:+.4f} "
+                      f"pop={population_size} "
+                      f"illegal={scored[0][4]} "
+                      f"elite={scored[0][0]:+.4f}", flush=True)
+
             # Selection: elites + crossover offspring.
             elites = scored[: max(1, self.cfg.elite)]
             next_pop: list[RheaGenome] = []
@@ -491,6 +639,8 @@ class RheaPlanner:
                 generations=generations,
                 initial_best_score=None,
                 evolved_gain=None,
+                population_used=population_size,
+                generations_used=generations,
             )
 
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -510,6 +660,8 @@ class RheaPlanner:
                 generations=generations,
                 initial_best_score=initial_best_score,
                 evolved_gain=gain,
+                population_used=population_size,
+                generations_used=generations,
             )
         else:
             score, _genome, actions, breakdown, illegal = candidates[0]
@@ -526,6 +678,9 @@ class RheaPlanner:
                 generations=generations,
                 initial_best_score=initial_best_score,
                 evolved_gain=gain,
+                genome=_genome,
+                population_used=population_size,
+                generations_used=generations,
             )
 
     # ------------------------------------------------------------------
@@ -617,12 +772,12 @@ class RheaPlanner:
             unit_segment.append(self.rng.choice(opts))
 
         build_segment: list[BuildIntent] = []
-        # Add about half the available builds (leaves room for evolution).
+        # Build at every factory — base-skipping is penalised and we want the
+        # initial population to demonstrate built units so evolution can learn
+        # their value.
         pool_builds = list(pool.build_options)
         self.rng.shuffle(pool_builds)
-        n_builds = max(0, len(pool_builds) // 2) if pool_builds else 0
-        n_builds = max(1, n_builds) if pool_builds else 0
-        build_segment = pool_builds[:n_builds]
+        build_segment = list(pool_builds)  # all of them
 
         return RheaGenome(
             cop_activate=cop_activate,
@@ -630,8 +785,29 @@ class RheaPlanner:
             build_segment=build_segment,
         )
 
+    def _bias_genome_toward_capture_attack(self, genome: RheaGenome, pool: ActionPool) -> None:
+        """Mutate unit intents in-place toward captures and attacks.
+
+        Scans every unit in the genome; for each, if the pool offers an
+        intent with ``action_type in (CAPTURE, ATTACK)`` for the same unit,
+        flip the intent to that option with high probability.
+        """
+        for i, intent in enumerate(genome.unit_segment):
+            opts = pool.unit_options.get(intent.unit_pos)
+            if not opts:
+                continue
+            juicy: list[UnitIntent] = [
+                o for o in opts
+                if o.action_type in (ActionType.CAPTURE, ActionType.ATTACK,
+                                     ActionType.JOIN)
+                and o.move_dest != intent.unit_pos  # not just WAIT
+            ]
+            if juicy:
+                # 50 % chance to replace with a capture or attack.
+                if self.rng.random() < 0.5:
+                    genome.unit_segment[i] = self.rng.choice(juicy)
+
     def _crossover(self, a: RheaGenome, b: RheaGenome) -> RheaGenome:
-        """Single-point crossover within each segment independently."""
         def _sp_cut(seq_a: list, seq_b: list) -> list:
             if not seq_a or not seq_b:
                 return list(seq_a or seq_b)
@@ -767,19 +943,66 @@ class RheaPlanner:
         # Phase 3: END_TURN if still acting and legal
         # ------------------------------------------------
         if sim.winner is None and int(sim.active_player) == acting:
-            feats, mask, cands = candidate_arrays(sim, max_candidates=MAX_CANDIDATES)
-            legal = [c for i, c in enumerate(cands) if i < len(mask) and bool(mask[i])]
-            enders = [
-                c for c in legal
-                if c.kind == CandidateKind.END_TURN
-                or getattr(getattr(c.terminal_action, 'action_type', None), 'name', '') == "END_TURN"
-            ]
-            if enders:
+            sim.action_stage = ActionStage.SELECT
+            sim.selected_unit = None
+            sim.selected_move_pos = None
+
+            _p3_legal = get_legal_actions(sim)
+            _p3_enders = [a for a in _p3_legal if a.action_type == ActionType.END_TURN]
+            if _p3_enders:
                 try:
-                    sim.step(enders[0].first)
-                    actions.append(enders[0].terminal_action)
+                    sim.step(_p3_enders[0])
+                    actions.append(_p3_enders[0])
                 except Exception:
                     illegal += 1
+            else:
+                # END_TURN not legal (unmoved units the genome's intents
+                # failed to handle).  WAIT each unmoved unit in place.
+                for _u in list(sim.units[acting]):
+                    if not _u.is_alive or _u.moved or _u.is_stunned:
+                        continue
+                    _p3_legal = get_legal_actions(sim)
+                    _p3_sel = [a for a in _p3_legal
+                               if a.action_type == ActionType.SELECT_UNIT and a.unit_pos == _u.pos]
+                    if not _p3_sel:
+                        continue
+                    try:
+                        sim.step(_p3_sel[0])
+                        actions.append(_p3_sel[0])
+                    except Exception:
+                        continue
+                    _p3_legal = get_legal_actions(sim)
+                    _p3_moves = [a for a in _p3_legal
+                                 if a.action_type == ActionType.SELECT_UNIT and a.move_pos == _u.pos]
+                    if not _p3_moves:
+                        continue
+                    try:
+                        sim.step(_p3_moves[0])
+                        actions.append(_p3_moves[0])
+                    except Exception:
+                        continue
+                    if sim.action_stage == ActionStage.ACTION:
+                        _p3_legal = get_legal_actions(sim)
+                        _p3_waits = [a for a in _p3_legal if a.action_type == ActionType.WAIT]
+                        if _p3_waits:
+                            try:
+                                sim.step(_p3_waits[0])
+                                actions.append(_p3_waits[0])
+                            except Exception:
+                                pass
+                sim.action_stage = ActionStage.SELECT
+                sim.selected_unit = None
+                sim.selected_move_pos = None
+                _p3_legal = get_legal_actions(sim)
+                _p3_enders = [a for a in _p3_legal if a.action_type == ActionType.END_TURN]
+                if _p3_enders:
+                    try:
+                        sim.step(_p3_enders[0])
+                        actions.append(_p3_enders[0])
+                    except Exception:
+                        illegal += 1
+                else:
+                    illegal += 10  # can't even END_TURN after salvage — genome is junk
 
         return sim, actions, illegal
 
@@ -791,7 +1014,8 @@ class RheaPlanner:
     ) -> tuple[bool, int]:
         """Try to execute one UnitIntent against the simulation state.
 
-        Returns (success, illegal_increment).
+        Returns (success, illegal_increment).  Actions are always sourced from
+        ``get_legal_actions(sim)`` so the step gate never rejects them.
         """
         # 1. Verify unit exists at the encoded position and is unmoved.
         unit = sim.get_unit_at(*intent.unit_pos)
@@ -802,11 +1026,15 @@ class RheaPlanner:
         if sim.action_stage != ActionStage.SELECT:
             return False, 1
 
-        # 3. Select the unit.
-        select_action = Action(ActionType.SELECT_UNIT, unit_pos=intent.unit_pos)
+        # 3. Select the unit — look up from legal actions.
+        legal = get_legal_actions(sim)
+        sel_cands = [a for a in legal
+                     if a.action_type == ActionType.SELECT_UNIT and a.unit_pos == intent.unit_pos]
+        if not sel_cands:
+            return False, 1
         try:
-            sim.step(select_action)
-            actions.append(select_action)
+            sim.step(sel_cands[0])
+            actions.append(sel_cands[0])
         except Exception:
             return False, 1
 
@@ -814,34 +1042,35 @@ class RheaPlanner:
         if sim.action_stage != ActionStage.MOVE:
             return False, 1
 
-        # Move must use SELECT_UNIT with move_pos = intent.move_dest.
-        move_action = Action(ActionType.SELECT_UNIT, move_pos=intent.move_dest)
+        legal = get_legal_actions(sim)
+        move_cands = [a for a in legal
+                      if a.action_type == ActionType.SELECT_UNIT and a.move_pos == intent.move_dest]
+        if not move_cands:
+            return False, 1
         try:
-            sim.step(move_action)
-            actions.append(move_action)
+            sim.step(move_cands[0])
+            actions.append(move_cands[0])
         except Exception:
             return False, 1
 
         # 5. Now at ACTION stage. Execute the terminal action.
         if sim.action_stage != ActionStage.ACTION:
-            # If the unit cannot perform the intended action (e.g. MOVE_WAIT
-            # with no WAIT legal), the MOVE stage action still consumed the
-            # unit's turn (it moved and waited).  This is not an illegal gene
-            # in the genome — the unit's turn was used productively.
             return True, 0
 
-        term_action = Action(
-            intent.action_type,
-            unit_pos=intent.unit_pos,
-            target_pos=intent.target_pos,
-        )
-        try:
-            sim.step(term_action)
-            actions.append(term_action)
-        except Exception:
-            # The move succeeded; the terminal action failed.  The unit has
-            # already moved, so we don't mark this as illegal per se.
-            pass
+        legal = get_legal_actions(sim)
+        term_cands = [a for a in legal
+                      if a.action_type == intent.action_type
+                      and a.unit_pos == intent.unit_pos
+                      and (intent.target_pos is None or a.target_pos == intent.target_pos)]
+        # Fallback: match on action_type only if unit_pos/target_pos are None
+        if not term_cands:
+            term_cands = [a for a in legal if a.action_type == intent.action_type]
+        if term_cands:
+            try:
+                sim.step(term_cands[0])
+                actions.append(term_cands[0])
+            except Exception:
+                pass
 
         return True, 0
 
@@ -853,19 +1082,22 @@ class RheaPlanner:
     ) -> tuple[bool, int]:
         """Try to execute one BuildIntent against the simulation state.
 
-        Returns (success, illegal_increment).
+        Returns (success, illegal_increment).  Action is sourced from
+        ``get_legal_actions(sim)`` to pass the step gate.
         """
         if sim.action_stage != ActionStage.SELECT:
             return False, 1
 
-        build_action = Action(
-            ActionType.BUILD,
-            move_pos=intent.factory_pos,
-            unit_type=intent.unit_type,
-        )
+        legal = get_legal_actions(sim)
+        build_cands = [a for a in legal
+                       if a.action_type == ActionType.BUILD
+                       and a.move_pos == intent.factory_pos
+                       and a.unit_type == intent.unit_type]
+        if not build_cands:
+            return False, 1
         try:
-            sim.step(build_action)
-            actions.append(build_action)
+            sim.step(build_cands[0])
+            actions.append(build_cands[0])
             return True, 0
         except Exception:
             return False, 1

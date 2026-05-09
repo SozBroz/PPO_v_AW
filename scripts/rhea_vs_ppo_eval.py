@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.env import AWBWEnv, POOL_PATH
-from rl.rhea import RheaConfig, RheaPlanner
+from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.value_net import load_value_checkpoint
 
@@ -108,8 +108,8 @@ def run_one_game(
     
     # RHEA setup - disable tactical beam to avoid Cython issues
     rhea_config = RheaConfig(
-        population=32,
-        generations=6,
+        population=64,
+        generations=10,
         reward_weight=0.90,
         value_weight=0.10,
         seed=int(np_rng.integers(0, 1 << 30)),
@@ -143,14 +143,8 @@ def run_one_game(
         if active == rhea_seat:
             # RHEA plays full turn
             result = rhea_planner.choose_full_turn(state)
-            actions = result.actions
-            start_active = active
-            for action in actions:
-                if env.state is None or env.state.winner is not None:
-                    break
-                if int(env.state.active_player) != start_active:
-                    break
-                env.state.step(action)
+            # Replay actions on real environment.
+            _applied, _skipped = replay_rhea_actions(env.state, result.actions, active)
         else:
             # PPO plays one action at a time
             start_active = active

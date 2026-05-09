@@ -47,7 +47,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
 from rl.env import AWBWEnv
-from rl.rhea import RheaConfig, RheaPlanner
+from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaTransition
 from rl.value_net import AWBWValueNet, load_value_checkpoint
@@ -121,7 +121,6 @@ _maybe_recompile_cython()
 
 from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
 from rl.env import AWBWEnv
-from rl.rhea import RheaConfig, RheaPlanner
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaTransition
 from rl.value_net import AWBWValueNet, load_value_checkpoint
@@ -446,11 +445,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # RHEA search
     ap.add_argument("--rhea-autotune", action="store_true")
-    ap.add_argument("--rhea-population", type=int, default=32)
-    ap.add_argument("--rhea-generations", type=int, default=5)
-    ap.add_argument("--rhea-elite", type=int, default=4)
+    ap.add_argument("--rhea-population", type=int, default=64)
+    ap.add_argument("--rhea-generations", type=int, default=10)
+    ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
-    ap.add_argument("--rhea-top-k-per-state", type=int, default=24)
+    ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
 
@@ -697,54 +696,11 @@ def main() -> None:
                 # Plan and execute full turn
                 result = planner.choose_full_turn(state)
 
-                # Track abnormal termination in this game
+                # Replay actions on real environment.
                 _game_abnormal_error = None
-
-                for action in result.actions:
-                    if env.state is None or env.state.winner is not None:
-                        break
-                    if int(env.state.active_player) != acting:
-                        break
-                    try:
-                        env.state.step(action)
-                    except IllegalActionError as illegal_e:
-                        import traceback
-                        print(json.dumps({
-                            "event": "illegal_action",
-                            "machine_id": machine_id,
-                            "error": repr(illegal_e),
-                            "game_turns": game_turns,
-                            "day": day,
-                            "action": str(action),
-                            "traceback": traceback.format_exc(),
-                        }), flush=True)
-                        import traceback
-                        
-                        print(json.dumps({
-                            "event": "illegal_action",
-                            "machine_id": machine_id,
-                            "error": repr(illegal_e),
-                            "game_turns": game_turns,
-                            "day": day,
-                            "action": str(action),
-                            "traceback": traceback.format_exc(),
-                        }), flush=True)
-                        _game_abnormal_error = repr(illegal_e)
-                        
-                        # Try to find a legal action for the CURRENT state
-                        try:
-                            from engine.action import get_legal_actions, ActionType
-                            legal = get_legal_actions(env.state)
-                            if legal:
-                                env.state.step(legal[0])
-                            else:
-                                env.state.step(ActionType.END_TURN)
-                        except Exception:
-                            try:
-                                env.state.step(ActionType.END_TURN)
-                            except:
-                                pass
-                        break  # stop executing remaining actions
+                _applied, _skipped = replay_rhea_actions(env.state, result.actions, acting)
+                if _skipped > 0:
+                    _game_abnormal_error = f"actions_skipped:{_skipped}"
 
                 after = env.state
                 if after is None:
