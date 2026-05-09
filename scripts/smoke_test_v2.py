@@ -40,11 +40,12 @@ except Exception as e:
 print("\n--- 2. RHEA DYNAMIC BUDGET ---")
 try:
     from rl.rhea import dynamic_rhea_budget
-    pop, gen, max_acts = dynamic_rhea_budget(10, 3, 2, 5)
-    print(f"  [OK] Rhea budget: pop={pop}, gen={gen}, max_acts={max_acts}")
+    pop, gen = dynamic_rhea_budget(10, 3, 2, 5)
+    max_acts = 0  # removed — genome is self-sizing
+    print(f"  [OK] Rhea budget: pop={pop}, gen={gen} (max_acts removed)")
     assert 12 <= pop <= 64, f"pop out of range: {pop}"
     assert 2 <= gen <= 7, f"gen out of range: {gen}"
-    assert 48 <= max_acts <= 240, f"max_acts out of range: {max_acts}"
+    assert 2 <= gen <= 7, f"gen out of range: {gen}"
 except Exception as e:
     print(f"  [FAIL] Rhea budget: {e}")
     errors.append("Rhea dynamic budget")

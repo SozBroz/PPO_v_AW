@@ -56,8 +56,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--map-id", type=int, default=171596)
-    parser.add_argument("--co-p0", type=int, default=14)
-    parser.add_argument("--co-p1", type=int, default=14)
+    parser.add_argument("--co-p0", type=str, default="14")
+    parser.add_argument("--co-p1", type=str, default="14")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--population", type=int, default=32)
     parser.add_argument("--generations", type=int, default=6)
@@ -93,6 +93,8 @@ def main() -> None:
     # Dual-gradient self-play
     parser.add_argument("--dual-gradient-self-play", action="store_true")
     parser.add_argument("--dual-gradient-hist-prob", type=float, default=0.0)
+    parser.add_argument("--opening-book-path", type=str, default=None)
+    parser.add_argument("--opening-book-prob", type=float, default=1.0)
     
     args = parser.parse_args()
     
@@ -148,7 +150,6 @@ def main() -> None:
     )
     # Override parameters for early game
     config.top_k_per_state = 10  # With wrap-around fix, can be higher
-    config.max_actions_per_turn = 10
     
     # Calculate complexity metrics for dynamic budgeting if enabled
     complexity_metrics = None

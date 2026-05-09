@@ -20,7 +20,6 @@ python scripts/train_rhea_value.py ^
   --rhea-elite 4 ^
   --rhea-mutation-rate 0.20 ^
   --rhea-top-k-per-state 16 ^
-  --rhea-max-actions-per-turn 96 ^
   --reward-weight 0.90 ^
   --value-weight 0.10 ^
   --value-lr 1e-4 ^
@@ -174,7 +173,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-elite", type=int, default=4)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=16)
-    ap.add_argument("--rhea-max-actions-per-turn", type=int, default=96)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.
@@ -259,7 +257,6 @@ def main() -> None:
             elite=args.rhea_elite,
             mutation_rate=args.rhea_mutation_rate,
             top_k_per_state=args.rhea_top_k_per_state,
-            max_actions_per_turn=args.rhea_max_actions_per_turn,
             reward_weight=args.reward_weight,
             value_weight=args.value_weight,
             seed=args.seed,
