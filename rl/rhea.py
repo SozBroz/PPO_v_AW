@@ -299,6 +299,7 @@ class RheaConfig:
     top_k_per_state: int = 48
     reward_weight: float = 0.90
     value_weight: float = 0.10
+    build_value_weight: float = 5.0   # independent bonus for army value from builds
     # Logging/eval knobs.
     log_initial_best: bool = True
     seed: Optional[int] = None
@@ -377,10 +378,19 @@ def _salvage_ender(env_state: GameState, acting: int) -> None:
             continue
         if env_state.action_stage == ActionStage.ACTION:
             legal = get_legal_actions(env_state)
+            # Try WAIT first (cheapest), then any legal action.
             waits = [a for a in legal if a.action_type == ActionType.WAIT]
             if waits:
                 try:
                     env_state.step(waits[0], oracle_mode=True)
+                except Exception:
+                    pass
+            else:
+                # WAIT not legal — e.g. CAPTURE dominates on enemy property,
+                # or LOAD is the only terminator (unit on friendly transport).
+                # Execute any legal action to unstick the unit.
+                try:
+                    env_state.step(legal[0], oracle_mode=True)
                 except Exception:
                     pass
     # Try END_TURN again after WAIT salvage.
@@ -529,6 +539,7 @@ class RheaPlanner:
             for _i_seed in range(_n_seeded):
                 genome = self._random_genome(action_pool)
                 self._bias_genome_toward_capture_attack(genome, action_pool)
+                self._bias_genome_toward_expensive_builds(genome, action_pool)
                 population[_i_seed] = genome
 
         print(f"  [RHEA] pop={population_size} gen={generations} "
@@ -562,9 +573,15 @@ class RheaPlanner:
                 win_advantage = (v_after - before_value) * 2.0
                 illegal_penalty = -self.fitness.illegal_gene_penalty * float(illegal)
 
-                # Build penalty computation (unchanged logic).
+                # Build penalty computation.
                 build_punishment, unused_funds_penalty = self._compute_build_penalties(
                     before, actions, acting_seat
+                )
+
+                # Build army value reward (independent of phi_alpha so RHEA can
+                # directly see the value of spending money on expensive units).
+                build_value_reward = self._compute_build_value_reward(
+                    actions, self.cfg.build_value_weight
                 )
 
                 total = (
@@ -573,6 +590,7 @@ class RheaPlanner:
                     + illegal_penalty
                     + build_punishment
                     + unused_funds_penalty
+                    + build_value_reward
                 )
 
                 breakdown = RheaFitnessBreakdown(
@@ -687,6 +705,37 @@ class RheaPlanner:
     # Build penalty helper (extracted, unchanged logic)
     # ------------------------------------------------------------------
 
+    def _player_has_base_factories(self, state: GameState, seat: int) -> bool:
+        """Check if player has any build-capable properties (bases/airports/ports)."""
+        for prop in state.properties:
+            if prop.owner == seat and (
+                bool(getattr(prop, "is_base", False))
+                or bool(getattr(prop, "is_airport", False))
+                or bool(getattr(prop, "is_port", False))
+            ):
+                return True
+        return False
+
+    def _count_available_factories(self, state: GameState, seat: int) -> int:
+        """Count build-capable properties (bases, airports, ports) owned by seat.
+
+        Only counts tiles that are either empty or occupied by an unmoved
+        friendly unit (which Phase 1 may vacate before Phase 2 builds).
+        """
+        count = 0
+        for prop in state.properties:
+            if prop.owner == seat and (
+                bool(getattr(prop, "is_base", False))
+                or bool(getattr(prop, "is_airport", False))
+                or bool(getattr(prop, "is_port", False))
+            ):
+                occupant = state.get_unit_at(prop.row, prop.col)
+                if occupant is None or (
+                    occupant.player == seat and not occupant.moved
+                ):
+                    count += 1
+        return count
+
     def _compute_build_penalties(
         self,
         before: GameState,
@@ -721,22 +770,14 @@ class RheaPlanner:
         unused_funds_penalty = 0.0
 
         if end_turn_index is not None and not build_happened:
-            if self.fitness.env_template._player_has_bases(before, acting_seat):
+            if self._player_has_base_factories(before, acting_seat):
                 bp = self.fitness.env_template._build_punishment
                 if bp > 0.0:
                     build_punishment = -30000.0 * self.fitness.env_template._phi_alpha
 
         if build_happened and end_turn_index is not None:
-            if self.fitness.env_template._player_has_bases(before, acting_seat):
-                base_count = 0
-                for prop in before.properties:
-                    if prop.owner == acting_seat and (
-                        getattr(prop, "is_base", False)
-                        or getattr(prop, "is_airport", False)
-                        or getattr(prop, "is_port", False)
-                    ):
-                        base_count += 1
-                if base_count > 0:
+            base_count = self._count_available_factories(before, acting_seat)
+            if base_count > 0:
                     available_funds = before.funds[acting_seat]
                     funds_needed = base_count * 1000
                     if available_funds >= funds_needed:
@@ -749,7 +790,43 @@ class RheaPlanner:
                             missing = max_affordable - units_built
                             unused_funds_penalty = -0.05 * missing
 
+                    # Value-awareness: penalize spending only a tiny fraction
+                    # of available funds.  Building 5 infantry for 5k when you
+                    # have 50k in the bank should hurt.
+                    value_spent = float(total_build_cost)
+                    value_available = float(available_funds)
+                    if value_available > 0 and units_built > 0:
+                        spend_ratio = value_spent / value_available
+                        if spend_ratio < 0.5:
+                            value_gap_penalty = -0.05 * (1.0 - spend_ratio) * float(base_count)
+                            if value_gap_penalty < unused_funds_penalty:
+                                unused_funds_penalty = value_gap_penalty
+
         return build_punishment, unused_funds_penalty
+
+    @staticmethod
+    def _compute_build_value_reward(
+        actions: list | None,
+        weight: float,
+    ) -> float:
+        """Independent reward for army value created by builds.
+
+        This is separate from phi_delta so RHEA can directly see the value
+        of spending money on expensive units, independent of the tiny
+        phi_alpha coefficient that drowns the build signal in combat noise.
+        """
+        if actions is None or weight <= 0.0:
+            return 0.0
+        total_value = 0.0
+        for action in actions:
+            atype = getattr(action, 'action_type', None)
+            if atype is not None and atype.name == "BUILD":
+                ut = getattr(action, 'unit_type', None)
+                if ut is not None:
+                    total_value += float(UNIT_STATS[ut].cost)
+        # Normalise to ~0.01 per infantry, ~0.28 per mega tank.
+        # weight=1.0 → infantry gives +0.01, mech +0.03, tank +0.07, etc.
+        return weight * (total_value / 100000.0)
 
     # ------------------------------------------------------------------
     # Genome operations
@@ -772,12 +849,15 @@ class RheaPlanner:
             unit_segment.append(self.rng.choice(opts))
 
         build_segment: list[BuildIntent] = []
-        # Build at every factory — base-skipping is penalised and we want the
-        # initial population to demonstrate built units so evolution can learn
-        # their value.
-        pool_builds = list(pool.build_options)
-        self.rng.shuffle(pool_builds)
-        build_segment = list(pool_builds)  # all of them
+        # One build per factory — pick a random unit type for each.
+        # pool.build_options has one entry per (factory, unit_type) pair;
+        # grouping by factory avoids flooding the genome with intents that
+        # will all-but-one fail as illegal.
+        by_factory: dict[tuple[int, int], list[BuildIntent]] = {}
+        for bi in pool.build_options:
+            by_factory.setdefault(bi.factory_pos, []).append(bi)
+        for factory_pos, opts in by_factory.items():
+            build_segment.append(self.rng.choice(opts))
 
         return RheaGenome(
             cop_activate=cop_activate,
@@ -807,6 +887,23 @@ class RheaPlanner:
                 if self.rng.random() < 0.5:
                     genome.unit_segment[i] = self.rng.choice(juicy)
 
+    def _bias_genome_toward_expensive_builds(self, genome: RheaGenome, pool: ActionPool) -> None:
+        """Mutate build segment in-place toward higher-value units.
+
+        For each build intent, if the pool offers a unit with higher value
+        at the same factory, flip the intent toward that option with high
+        probability.  This gives evolution a better starting signal than
+        random infantry spam.
+        """
+        for i, intent in enumerate(genome.build_segment):
+            opts = [bi for bi in pool.build_options if bi.factory_pos == intent.factory_pos]
+            if len(opts) <= 1:
+                continue
+            current_cost = UNIT_STATS[intent.unit_type].cost
+            better = [bi for bi in opts if UNIT_STATS[bi.unit_type].cost > current_cost]
+            if better and self.rng.random() < 0.5:
+                genome.build_segment[i] = self.rng.choice(better)
+
     def _crossover(self, a: RheaGenome, b: RheaGenome) -> RheaGenome:
         def _sp_cut(seq_a: list, seq_b: list) -> list:
             if not seq_a or not seq_b:
@@ -817,9 +914,29 @@ class RheaPlanner:
         child = RheaGenome(
             cop_activate=a.cop_activate if self.rng.random() < 0.5 else b.cop_activate,
             unit_segment=_sp_cut(a.unit_segment, b.unit_segment),
-            build_segment=_sp_cut(a.build_segment, b.build_segment),
+            build_segment=self._crossover_builds(a.build_segment, b.build_segment),
         )
         return child
+
+    @staticmethod
+    def _crossover_builds(
+        a: list[BuildIntent], b: list[BuildIntent]
+    ) -> list[BuildIntent]:
+        """Crossover build segments preserving one-build-per-factory.
+
+        Merges build intents from both parents by factory, keeping only one
+        intent per factory tile.  The first parent's choice is kept by default
+        (tie-breaking toward the first chromosome's unit type for each factory).
+        This avoids duplicate-factory intents that would otherwise waste
+        evaluations on illegal genes.
+        """
+        merged: dict[tuple[int, int], BuildIntent] = {}
+        for bi in a:
+            merged[bi.factory_pos] = bi
+        for bi in b:
+            if bi.factory_pos not in merged:
+                merged[bi.factory_pos] = bi
+        return list(merged.values())
 
     def _mutate(self, genome: RheaGenome, pool: ActionPool) -> None:
         """In-place mutation of all segments using the action pool.
@@ -863,16 +980,20 @@ class RheaPlanner:
         # --- Build segment ---
         for intent in genome.build_segment:
             if self.rng.random() < mr and pool.build_options:
-                new_intent = self.rng.choice(pool.build_options)
-                intent.factory_pos = new_intent.factory_pos
-                intent.unit_type = new_intent.unit_type
+                # Pick a different unit type for the same factory.
+                same_factory = [bi for bi in pool.build_options if bi.factory_pos == intent.factory_pos]
+                if same_factory:
+                    intent.unit_type = self.rng.choice(same_factory).unit_type
 
-        # Add a random build gene.
+        # Add a random build gene for a factory not already in the genome.
         if pool.build_options and self.rng.random() < mr * 0.3:
-            genome.build_segment.append(self.rng.choice(pool.build_options))
+            existing_factories = {bi.factory_pos for bi in genome.build_segment}
+            missing = [bi for bi in pool.build_options if bi.factory_pos not in existing_factories]
+            if missing:
+                genome.build_segment.append(self.rng.choice(missing))
 
-        # Remove a random build gene.
-        if len(genome.build_segment) > 0 and self.rng.random() < mr * 0.2:
+        # Remove a random build gene (factory will be skip-built in salvage).
+        if len(genome.build_segment) > 1 and self.rng.random() < mr * 0.2:
             idx = self.rng.randrange(len(genome.build_segment))
             genome.build_segment.pop(idx)
 
@@ -929,8 +1050,15 @@ class RheaPlanner:
 
         # ------------------------------------------------
         # Phase 2: Build actions (soft fail per gene)
+        # Execute expensive builds first so they get the
+        # remaining budget; cheap fills at the end.
         # ------------------------------------------------
-        for intent in genome.build_segment:
+        sorted_builds = sorted(
+            genome.build_segment,
+            key=lambda bi: UNIT_STATS[bi.unit_type].cost,
+            reverse=True,
+        )
+        for intent in sorted_builds:
             if sim.winner is not None:
                 break
             if int(sim.active_player) != acting:
@@ -938,6 +1066,52 @@ class RheaPlanner:
 
             ok, il = self._execute_build_intent(sim, intent, actions)
             illegal += il
+
+        # ------------------------------------------------
+        # Phase 2a: Build salvage sweep — fill factories that
+        # were occupied at SELECT stage but vacated by Phase 1
+        # movement.  The genome couldn't encode these builds
+        # because ActionPool.build_options only captured
+        # factories that were already empty.
+        # ------------------------------------------------
+        if sim.winner is None and int(sim.active_player) == acting:
+            sim.action_stage = ActionStage.SELECT
+            sim.selected_unit = None
+            sim.selected_move_pos = None
+
+            # Factory positions already built at by the genome.
+            built_factories: set[tuple[int, int]] = set()
+            for a in actions:
+                if getattr(a, 'action_type', None) == ActionType.BUILD and a.move_pos is not None:
+                    built_factories.add(a.move_pos)
+
+            # Re-query for BUILD actions — Phase 1 may have vacated some factories.
+            extra_legal = get_legal_actions(sim)
+            # Pick cheapest unit per newly-vacated factory so salvage is a
+            # fallback, not a superior alternative to encoding builds.
+            salvage_builds_by_factory: dict[tuple[int, int], Action] = {}
+            for a in extra_legal:
+                if (a.action_type == ActionType.BUILD
+                    and a.move_pos is not None
+                    and a.move_pos not in built_factories
+                ):
+                    existing = salvage_builds_by_factory.get(a.move_pos)
+                    if (existing is None
+                        or UNIT_STATS[a.unit_type].cost < UNIT_STATS[existing.unit_type].cost
+                    ):
+                        salvage_builds_by_factory[a.move_pos] = a
+
+            # Sort by cost ascending to fill more factories before funds deplete.
+            salvage_builds = sorted(
+                salvage_builds_by_factory.values(),
+                key=lambda a: UNIT_STATS[a.unit_type].cost,
+            )
+            for a in salvage_builds:
+                try:
+                    sim.step(a)
+                    actions.append(a)
+                except Exception:
+                    pass  # soft fail — funds consumed by earlier salvage build
 
         # ------------------------------------------------
         # Phase 3: END_TURN if still acting and legal
@@ -988,6 +1162,14 @@ class RheaPlanner:
                             try:
                                 sim.step(_p3_waits[0])
                                 actions.append(_p3_waits[0])
+                            except Exception:
+                                pass
+                        elif _p3_legal:
+                            # WAIT not legal (CAPTURE dominates on enemy property,
+                            # or LOAD is the only terminator). Try any legal action.
+                            try:
+                                sim.step(_p3_legal[0])
+                                actions.append(_p3_legal[0])
                             except Exception:
                                 pass
                 sim.action_stage = ActionStage.SELECT
@@ -1072,6 +1254,15 @@ class RheaPlanner:
             except Exception:
                 pass
 
+        # CRITICAL: The terminal action may have failed silently, leaving the sim
+        # in ACTION stage with selected_unit still set.  Phase 2 (builds) requires
+        # SELECT stage, so force-reset here.  The unit's movement was already
+        # consumed by step 4; the failed terminal does not leave the unit movable.
+        if sim.action_stage != ActionStage.SELECT:
+            sim.action_stage = ActionStage.SELECT
+            sim.selected_unit = None
+            sim.selected_move_pos = None
+
         return True, 0
 
     def _execute_build_intent(
@@ -1082,25 +1273,49 @@ class RheaPlanner:
     ) -> tuple[bool, int]:
         """Try to execute one BuildIntent against the simulation state.
 
-        Returns (success, illegal_increment).  Action is sourced from
-        ``get_legal_actions(sim)`` to pass the step gate.
+        If the exact unit type is not affordable (funds exhausted by earlier
+        builds or availability changed), falls back to the most expensive
+        still-affordable unit at the same factory.  This prevents RHEA from
+        learning that expensive builds cause illegal penalties — the genome
+        always gets the best build the budget allows.
+
+        Returns (success, illegal_increment).
         """
         if sim.action_stage != ActionStage.SELECT:
             return False, 1
 
         legal = get_legal_actions(sim)
+
+        # Try the exact intent first.
         build_cands = [a for a in legal
                        if a.action_type == ActionType.BUILD
                        and a.move_pos == intent.factory_pos
                        and a.unit_type == intent.unit_type]
-        if not build_cands:
-            return False, 1
+        if build_cands:
+            try:
+                sim.step(build_cands[0])
+                actions.append(build_cands[0])
+                return True, 0
+            except Exception:
+                pass  # fall through to best-affordable fallback
+
+        # Exact intent failed (budget exhausted, tile occupied, etc.).
+        # Fall back to the most-expensive still-affordable unit at this
+        # factory.  This is NOT an illegal gene — the intent was sound,
+        # just over-budget after earlier builds consumed funds.
+        same_factory = [a for a in legal
+                        if a.action_type == ActionType.BUILD
+                        and a.move_pos == intent.factory_pos]
+        if not same_factory:
+            return False, 0  # no fallback available, not penalised
+        # Pick the most expensive affordable unit as the fallback.
+        best = max(same_factory, key=lambda a: UNIT_STATS[a.unit_type].cost)
         try:
-            sim.step(build_cands[0])
-            actions.append(build_cands[0])
+            sim.step(best)
+            actions.append(best)
             return True, 0
         except Exception:
-            return False, 1
+            return False, 0  # truly stuck, not penalised
 
     # ------------------------------------------------------------------
     # Surviving helpers (unchanged)

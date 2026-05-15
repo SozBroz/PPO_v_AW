@@ -1240,6 +1240,7 @@ def _actor_loop(
                     top_k_per_state=args.rhea_top_k_per_state,
                     reward_weight=args.reward_weight,
                     value_weight=args.value_weight,
+                    build_value_weight=args.build_value_weight,
                     seed=seed,
                     use_tactical_beam=args.rhea_use_tactical_beam,
                     tactial_beam_max_width=args.rhea_tactical_beam_max_width,
@@ -1655,6 +1656,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
     ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
 
+    # Build punishment.
+    ap.add_argument("--build-punishment", type=float, default=0.0,
+                      help="AWBW_BUILD_PUNISHMENT: non-zero penalises ending turn with owned bases but no build")
+    ap.add_argument("--build-value-weight", type=float, default=1.0,
+                      help="Independent reward weight for build army value (extruded from phi)")
+
     # Value learner.
     ap.add_argument("--value-lr", type=float, default=1.0e-4)
     ap.add_argument("--value-batch-size", type=int, default=128)
@@ -1870,6 +1877,12 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
         os.environ["AWBW_PAIRWISE_ZERO_SUM_REWARD"] = "1"
     else:
         os.environ.pop("AWBW_PAIRWISE_ZERO_SUM_REWARD", None)
+
+    bp = getattr(args, "build_punishment", None)
+    if bp is not None and float(bp) > 0.0:
+        os.environ["AWBW_BUILD_PUNISHMENT"] = str(bp)
+    else:
+        os.environ.pop("AWBW_BUILD_PUNISHMENT", None)
 
 
 def main() -> None:
