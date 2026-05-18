@@ -854,6 +854,30 @@ def sample_training_matchup(
 
 
 class AWBWEnv(gym.Env):
+    
+    def _count_owned_bases(self, player_index: int) -> int:
+        """Count bases owned by player that are not currently being captured."""
+        count = 0
+        for prop in self.state.properties.values():
+            if prop.owner == player_index and prop.type == PropertyType.BASE:
+                # Check if base is being captured by any enemy unit
+                being_captured = False
+                for unit in self.state.units.values():
+                    if (unit.x, unit.y) == (prop.position.x, prop.position.y) \
+                       and unit.player != player_index:
+                        being_captured = True
+                        break
+                if not being_captured:
+                    count += 1
+        return count
+        for prop in self.state.properties.values():
+            if prop.owner == player_index and prop.type == PropertyType.BASE \
+                    and not any(u for u in self.state.units.values() 
+                              if (u.x, u.y) == (prop.position.x, prop.position.y) 
+                              and u.player != player_index and u.capture_hp > 0):
+                count += 1
+        return count
+        
     """
     AWBW Gymnasium environment for single-agent (vs opponent) training.
 
@@ -1113,27 +1137,20 @@ class AWBWEnv(gym.Env):
         self._phi_enemy_property_capture_penalty = 0.0
 
         # Hoarding penalty: END_TURN with unspent funds above threshold (read once at spawn).
-        try:
-            self._hoard_funds_threshold = int(
-                float(os.environ.get(HOARD_FUNDS_THRESHOLD_ENV, "25000") or 25000)
-            )
-        except ValueError:
-            self._hoard_funds_threshold = 25_000
-        try:
-            self._hoard_penalty = float(os.environ.get(HOARD_PENALTY_ENV, "0") or 0.0)
-        except ValueError:
-            self._hoard_penalty = 0.0
-        if self._hoard_penalty < 0.0:
-            self._hoard_penalty = 0.0
 
-        # Building punishment: END_TURN with owned bases but no build (read once at spawn).
-        try:
-            self._build_punishment = float(os.environ.get(BUILD_PUNISHMENT_ENV, "0") or 0.0)
-        except ValueError:
-            self._build_punishment = 0.0
-        if self._build_punishment < 0.0:
-            self._build_punishment = 0.0
+        self._hoard_funds_threshold = 25000
+        self._hoard_penalty = 0.3
 
+
+        # New BRUTAL punishment for units on friendly bases
+        self._unit_on_base_punishment = -0.8
+        
+        # New punishment for low funds per base
+        self._min_funds_per_base = 1000
+        
+        # Infantry building bonus to encourage smaller units
+        self._infantry_build_bonus = 0.0125  # Per infantry
+        
         # Reward shaping mode + Φ coefficients — read once per env instance
         # so SubprocVecEnv workers inherit a stable value at spawn. Restart
         # the run to change. See plan rl_capture-combat_recalibration.
@@ -2156,8 +2173,149 @@ class AWBWEnv(gym.Env):
             build_punish_v = punishment
             reward += punishment
         rc["end_turn_build_punishment"] = build_punish_v
+        # Log base skip penalty details
+        print(f"Player {acting}: {owned_base_count} owned bases - skip penalty: {base_skip_penalty:.2f}") if base_skip_penalty != 0 else None
+        # Log infantry/mech bonuses
+        print(f"Player {acting}: Built {infantry_built} infantry - bonus: {infantry_bonus:.2f}") if infantry_bonus != 0 else None
+        print(f"Player {acting}: Built {mechs_built} mechs - penalty: {mech_penalty:.2f}") if mech_penalty != 0 else None
         if build_punish_v != 0.0 and hasattr(self, "_episode_reward_build_punishment_cumulative"):
             self._episode_reward_build_punishment_cumulative[acting] += float(build_punish_v)
+            
+        # Apply new reward signals
+        turn = getattr(self.state, "turn", 1)
+        
+        # Detailed BUILD ACTION logging
+        if action.action_type == ActionType.BUILD:
+            # Capture build decision details
+            try:
+                # Get property details
+                tile = self.state.terrain[action.target.y][action.target.x]
+                prop_name = " "
+                if tile.is_base:
+                    prop_name = "Base"
+                elif tile.is_airport:
+                    prop_name = "Airport"
+                elif tile.is_port:
+                    prop_name = "Port"
+                
+                # IMPORTANT CHANGE: Apply punishment immediately during build
+                # Calculate base skip punishment for this build
+                usable_base_count = self._count_usable_bases(acting)
+                base_skip_punishment = (usable_base_count - 1) * self._base_skip_penalty
+                reward += base_skip_punishment
+                
+                # Print detailed analysis
+                print(f"Player {acting}: BUILD DECISION ANALYSIS (Turn {self.state.turn})")
+                print(f"   - Unit built: {action.unit_type.name}")
+                print(f"   - Property type: {prop_name}")
+                print(f"   - Cost: ${action.unit_type.cost}")
+                print(f"   - Current funds: ${self.state.funds[acting]}")
+                print(f"   - Bases available: {usable_base_count}")
+                print(f"   - Bases skipped: {usable_base_count - 1}")
+                print(f"   - Base-skipping punishment: {base_skip_punishment:.4f}")
+                print(f"   - Infantry bonus: {infantry_bonus:.4f if 'infantry_bonus' in locals() else '0.0000'}")
+                print(f"   - Mech penalty: {mech_penalty:.4f if 'mech_penalty' in locals() else '0.0000'}")
+                print(f"   - Funds deficiency punishment: {funds_deficit_punishment:.4f if 'funds_deficit_punishment' in locals() else '0.0000'}")
+                print(f"   - Total reward: {reward:.4f}")
+            except Exception as e:
+                print(f"Error logging build analysis: {str(e)}")
+                
+            # Record the base skip punishment in components
+            rc["immediate_base_skip_punishment"] = base_skip_punishment
+        
+        # 1. Pre-emptive punishment calculation for base occupation
+        if action.action_type in [ActionType.BUILD, ActionType.LAUNCH_SILO, ActionType.EXECUTE_POWER]:
+            # Estimate base occupation punishment that would occur if no unit moves
+            future_unit_on_base_count = 0
+            
+            # Count existing units currently on bases
+            for unit in self.state.units[acting]:
+                if unit.is_alive:
+                    tile = self.state.terrain[unit.y][unit.x]
+                    if tile.is_property and tile.owner == acting:
+                        # Exemptions: freshly built units and infantry that captured this turn
+                        is_fresh_build = unit.build_turn == self.state.turn
+                        is_capture_infantry = (unit.unit_type == UnitType.INFANTRY and 
+                                              self._was_capture_action(unit, unit.x, unit.y))
+                        
+                        if not is_fresh_build and not is_capture_infantry:
+                            future_unit_on_base_count += 1
+            
+            # Add new unit if we're building
+            if action.action_type == ActionType.BUILD:
+                future_unit_on_base_count += 1  # New unit will be placed on a base
+                
+            # Calculate potential punishment
+            unit_on_base_punishment = future_unit_on_base_count * self._unit_on_base_punishment
+            
+            # Apply triple punishment if this action isn't part of solving the problem
+            if not build_action_taken and unit_on_base_punishment < 0:
+                unit_on_base_punishment *= 3
+            
+            rc["preemptive_unit_on_base_punishment"] = unit_on_base_punishment
+            reward += unit_on_base_punishment
+            
+            # Log punishment details
+            if future_unit_on_base_count > 0:
+                print(f"Player {acting}: PREEMPTIVE PUNISHMENT (buy phase): Estimated {future_unit_on_base_count} units on friendly bases: {unit_on_base_punishment:.2f}")
+        
+        # 2. Punishment for low funds relative to remaining bases
+        funds_deficit_punishment = 0.0
+        
+        # Track this on any spending action, not just END_TURN
+        if action.action_type in (ActionType.BUILD, ActionType.LAUNCH_SILO, ActionType.EXECUTE_POWER, ActionType.END_TURN):
+            # Get actual unused base count (bases that could have been used this turn)
+            unused_base_count = self._count_usable_bases(acting)
+            
+            # Calculate required funds (1k per unused base)
+            required_funds = unused_base_count * 1000
+            current_funds = self.state.funds[acting]
+            
+            if current_funds < required_funds:
+                # Fixed punishment: 0.03 per unused base
+                funds_deficit_punishment = -0.03 * unused_base_count
+                
+            rc["funds_to_unused_base_ratio_punishment"] = funds_deficit_punishment
+            reward += funds_deficit_punishment
+            
+            # Log punishment details
+            if funds_deficit_punishment < 0:
+                print(f"Player {acting}: UNUSED BASES PUNISHMENT - Bases: {unused_base_count}, Current funds: {current_funds}, Required: {required_funds}, Punishment: {funds_deficit_punishment:.4f}")
+        
+        # 3. New immediate punishment applied during BUILD actions
+        if action.action_type == ActionType.BUILD:
+            # Calculate base skip punishment immediately during build decision
+            usable_base_count = self._count_usable_bases(acting)
+            bases_skipped = max(0, usable_base_count - 1)
+            base_skip_punishment = bases_skipped * self._base_skip_penalty * -1  # Negative punishment
+            
+            # Apply additional punishment based on unit type
+            mech_penalty = 0.0
+            infantry_bonus = 0.0
+            
+            if action.unit_type == UnitType.MECH:
+                mech_penalty = self._mech_penalty
+            elif action.unit_type == UnitType.INFANTRY:
+                infantry_bonus = self._infantry_build_bonus
+            
+            # Apply penalties to reward
+            reward += base_skip_punishment + mech_penalty + infantry_bonus
+            
+            # Detailed logging
+            print(f"Player {acting}: BUILD DECISION REPORT (Turn {self.state.turn})")
+            print(f"   - Unit built: {action.unit_type.name}")
+            print(f"   - Bases used: {min(1, usable_base_count)}")
+            print(f"   - Bases skipped: {bases_skipped}")
+            print(f"   - Base-skip punishment: {base_skip_punishment:.4f}")
+            print(f"   - Mech penalty: {mech_penalty:.4f}")
+            print(f"   - Infantry bonus: {infantry_bonus:.4f}")
+            print(f"   - Total punishment applied: {base_skip_punishment + mech_penalty + infantry_bonus:.4f}")
+            print("------------------------")
+            
+            # Add to reward components for tracking
+            rc["base_skip_punishment"] = base_skip_punishment
+            rc["mech_penalty"] = mech_penalty
+            rc["infantry_bonus"] = infantry_bonus
 
         # Partial win at the P0 step cap: engine never emits ±1 without a terminal, so
         # credit half a win (+0.5 vs +1.0) when we hit max_env_steps with a
@@ -2729,8 +2887,21 @@ class AWBWEnv(gym.Env):
             build_punish_v = punishment
             reward += punishment
         rc["end_turn_build_punishment"] = build_punish_v
+        # Log base skip penalty details
+        print(f"Player {acting}: {owned_base_count} owned bases - skip penalty: {base_skip_penalty:.2f}") if base_skip_penalty != 0 else None
+        # Log infantry/mech bonuses
+        print(f"Player {acting}: Built {infantry_built} infantry - bonus: {infantry_bonus:.2f}") if infantry_bonus != 0 else None
+        print(f"Player {acting}: Built {mechs_built} mechs - penalty: {mech_penalty:.2f}") if mech_penalty != 0 else None
         if build_punish_v != 0.0 and hasattr(self, "_episode_reward_build_punishment_cumulative"):
             self._episode_reward_build_punishment_cumulative[acting] += float(build_punish_v)
+            
+        # Apply new reward signals
+        turn = getattr(self.state, "turn", 1)
+        if owned_base_count > 0:
+            base_skip_penalty = self._base_skip_penalty * owned_base_count
+            rc["end_turn_base_skip_penalty"] = base_skip_penalty
+            phi_delta += base_skip_penalty
+            reward += base_skip_penalty  # Ensure penalty affects the reward
 
         _rc_sum = sum(rc.values())
         rc["_component_sum_gap"] = float(reward - _rc_sum)
@@ -3458,6 +3629,22 @@ class AWBWEnv(gym.Env):
             ):
                 return True
         return False
+        
+    def _count_usable_bases(self, acting: int) -> int:
+        """Count bases that could have been used for building this turn.
+        Only counts bases without a unit blocking them."""
+        count = 0
+        for prop in self.state.properties:
+            if prop.owner == acting and (
+                bool(getattr(prop, "is_base", False)) or
+                bool(getattr(prop, "is_airport", False)) or
+                bool(getattr(prop, "is_port", False))
+            ):
+                # Base is usable if there's no unit on it
+                unit_here = self.state.unit_at(prop.x, prop.y)
+                if unit_here is None:
+                    count += 1
+        return count
 
     def _phi_enemy_kill_one_time_bonus(
         self, pre_enemy_alive: dict[int, tuple[UnitType, int]]

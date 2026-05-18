@@ -8,11 +8,132 @@ import random
 import time
 from pathlib import Path
 
-from rl.env import AWBWEnv, POOL_PATH
+from rl.env import AWBWEnv, POOL_PATH, _flat_to_action, _BUILD_OFFSET, _ENC_W
+from engine.unit import UnitType as _eng_unit_type_fix
+from engine.action import ActionStage
 from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions, _salvage_ender
+from engine.action import Action, ActionType, get_legal_actions
 from rl.rhea_fitness import RheaFitness
 from rl.value_net import load_value_checkpoint
 from tools.export_awbw_replay import write_awbw_replay
+
+_N_UNIT_TYPES_BOOK = len(_eng_unit_type_fix)
+
+
+def _advance_to_select_for_book(state: object) -> None:
+    """Step through MOVE/ACTION until SELECT so opening-book flats can decode."""
+
+    guard = 0
+    while (
+        state is not None
+        and getattr(state, "winner", None) is None
+        and state.action_stage != ActionStage.SELECT
+        and guard < 500
+    ):
+        legal = get_legal_actions(state)
+        if not legal:
+            break
+        try:
+            state.step(legal[0], oracle_mode=True)
+        except Exception:
+            break
+        guard += 1
+
+
+def _drain_opening_book(env: AWBWEnv, mgr: object) -> int:
+    """Replay both seats' book lines in calendar order until exhausted or stale."""
+
+    n_applied = 0
+    stale_loops = 0
+    while env.state is not None and env.state.winner is None and stale_loops < 16:
+        c0 = mgr.controllers.get(0)
+        c1 = mgr.controllers.get(1)
+        b0_ex = (
+            c0 is None
+            or not getattr(c0, "episode_enabled", False)
+            or c0._book is None
+            or c0._cursor >= len(c0._book.action_indices)
+        )
+        b1_ex = (
+            c1 is None
+            or not getattr(c1, "episode_enabled", False)
+            or c1._book is None
+            or c1._cursor >= len(c1._book.action_indices)
+        )
+        if b0_ex and b1_ex:
+            break
+
+        active = int(env.state.active_player)
+        ctl = mgr.controllers.get(active)
+
+        if (
+            ctl is None
+            or not getattr(ctl, "episode_enabled", False)
+            or ctl._book is None
+            or ctl._cursor >= len(ctl._book.action_indices)
+        ):
+            stale_loops += 1
+            continue
+
+        stale_loops = 0
+        cursor = ctl._cursor
+        flat_idx = int(ctl._book.action_indices[cursor])
+        st = env.state
+        _advance_to_select_for_book(st)
+        if st.winner is not None:
+            break
+
+        legal = get_legal_actions(st)
+        if flat_idx == 0:
+            action = Action(ActionType.END_TURN)
+        else:
+            action = _flat_to_action(flat_idx, st, legal=legal)
+
+        # BUILD flat when decoder misses (wrong stage): SELECT factory tile, then BUILD.
+        if action is None and flat_idx >= _BUILD_OFFSET:
+            flat_off = flat_idx - _BUILD_OFFSET
+            br = flat_off // (_ENC_W * _N_UNIT_TYPES_BOOK)
+            rem = flat_off % (_ENC_W * _N_UNIT_TYPES_BOOK)
+            bc = rem // _N_UNIT_TYPES_BOOK
+            sel_flat = 3 + br * _ENC_W + bc
+            sel_a = _flat_to_action(sel_flat, st)
+            if sel_a is not None:
+                try:
+                    st.step(sel_a, oracle_mode=True)
+                except Exception:
+                    pass
+            _advance_to_select_for_book(st)
+            legal_b = get_legal_actions(st)
+            action = _flat_to_action(flat_idx, st, legal=legal_b)
+            if action is None:
+                ut_idx = int(flat_idx - _BUILD_OFFSET) % _N_UNIT_TYPES_BOOK
+                try:
+                    ut = _eng_unit_type_fix(ut_idx)
+                except ValueError:
+                    ut = _eng_unit_type_fix.INFANTRY
+                action = Action(ActionType.BUILD, move_pos=(br, bc), unit_type=ut)
+
+        if action is None:
+            print(
+                f"  [BOOK] seat={active} flat={flat_idx} cursor={cursor} "
+                f"not decodable; stage={st.action_stage!r}",
+                flush=True,
+            )
+            break
+        try:
+            st.step(action, oracle_mode=True)
+            ctl._cursor = cursor + 1
+            n_applied += 1
+            # Post-build micromanagement stays in MOVE/ACTION; next iter advances.
+            _advance_to_select_for_book(st)
+        except Exception as e:
+            print(
+                f"  [BOOK] seat={active} flat={flat_idx} FAILED: {e}",
+                flush=True,
+            )
+            break
+
+    return n_applied
 
 
 def _setup_env_vars(args: argparse.Namespace) -> None:
@@ -67,8 +188,14 @@ def main() -> None:
     parser.add_argument("--output-dir", type=str, default="replays")
     parser.add_argument("--game-id", type=int, default=None)
     parser.add_argument("--open-viewer", action="store_true", default=True)
-    parser.add_argument("--rhea-autotune", action="store_true", help="Use dynamic budgeting for RHEA")
-    
+    parser.add_argument("--rhea-monolithic-buy", action="store_true",
+                        help="Use legacy single-phase RHEA (moves+builds in one genome)")
+    parser.add_argument(
+        "--rhea-autotune",
+        action="store_true",
+        help="Scale move-phase RHEA pop/gen from per-turn game-state complexity",
+    )
+
     # Tactical beam.
     parser.add_argument("--rhea-use-tactical-beam", action="store_true")
     parser.add_argument("--rhea-tactical-beam-max-width", type=int, default=48)
@@ -101,8 +228,22 @@ def main() -> None:
     # Setup environment variables for phi and dual-gradient features
     _setup_env_vars(args)
     
-    # Enable build punishment for base skipping
+    # Enable build punishment for base skipping but segment move/buy phases
     os.environ["AWBW_BUILD_PUNISHMENT"] = "1"
+    os.environ["AWBW_SEGMENT_PHASES"] = "1"  # Separate move and buy phases
+    
+    # Set punishment weights for base skipping - much stronger penalty for debugging
+    os.environ["AWBW_BASE_SKIP_PENALTY"] = "-1.0"  # Strong penalty
+    os.environ["AWBW_BASE_CAPTURE_EXEMPT"] = "1"  # Exempt punishment during capture
+    
+    # Extreme incentives for infantry in opener turns
+    os.environ["AWBW_INFANTRY_BUILD_BONUS"] = "0.5"  # Very high bonus for infantry
+    os.environ["AWBW_INFANTRY_OPENER_MULT"] = "3.0"  # Higher bonus multiplier
+    os.environ["AWBW_MECH_BUILD_PENALTY"] = "-0.5"  # Strong penalty for building mechs early
+    os.environ["AWBW_MECH_PENALTY_EARLY_MULT"] = "4.0"  # Very strong multiplier for turns 1-3
+    
+    # Progressive turn-based reduction of infantry boost
+    os.environ["AWBW_INFANTRY_BOOST_TURNS"] = "7"  # How many turns the infantry bonus applies
 
     # Load map pool and filter to specific map ID
     with open(POOL_PATH) as f:
@@ -120,8 +261,17 @@ def main() -> None:
         co_p0=args.co_p0,
         co_p1=args.co_p1,
         max_turns=args.max_days,
+        opening_book_path=args.opening_book_path,
+        opening_book_prob=args.opening_book_prob,
     )
     env.reset()
+
+    # Drain joint opening book before RHEA (both seats alternate by calendar clock).
+    mgr = getattr(env, '_opening_book_manager', None)
+    if mgr is not None:
+        n_book = _drain_opening_book(env, mgr)
+        if n_book:
+            print(f"  [BOOK] drained {n_book} opening indices", flush=True)
 
     # Collect snapshots for replay export
     snapshots = [copy.deepcopy(env.state)]
@@ -147,6 +297,7 @@ def main() -> None:
         tactial_beam_max_width=args.rhea_tactical_beam_max_width,
         tactial_beam_max_depth=args.rhea_tactical_beam_max_depth,
         tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
+        two_phase_buy_rhea=not bool(getattr(args, "rhea_monolithic_buy", False)),
     )
     # Override parameters for early game
     # (default top_k_per_state = 48 from RheaConfig)
