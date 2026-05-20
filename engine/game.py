@@ -1325,9 +1325,10 @@ class GameState:
             )
         if dmg is not None and dmg > 0:
             # AWBW: 9000 funds damage = 1 star = 9000 power_bar units
-            # dmg is display HP lost (1-10) from oracle (pre/post are internal_HP/10)
-            # Convert to internal HP (1-100) for engine unit state
-            internal_dmg = min(dmg * 10, defender.hp)
+            # ``calculate_damage`` / oracle override both return internal HP lost
+            # (0–100). Do not multiply by 10 — that was a display-bar misread and
+            # turned ~55% strikes into instant kills (eval replays one-shotting).
+            internal_dmg = min(int(dmg), defender.hp)
             defender.hp = max(0, defender.hp - internal_dmg)
             self.losses_hp[defender.player] += internal_dmg  # Track HP lost
             if defender.hp == 0:
@@ -1347,7 +1348,7 @@ class GameState:
                 luck_rng=self.luck_rng,
             )
             if counter_dmg is not None and counter_dmg > 0:
-                internal_counter = min(counter_dmg * 10, attacker.hp)
+                internal_counter = min(int(counter_dmg), attacker.hp)
                 attacker.hp = max(0, attacker.hp - internal_counter)
                 self.losses_hp[attacker.player] += internal_counter
                 if attacker.hp == 0:
