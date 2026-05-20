@@ -1331,7 +1331,13 @@ class AWBWEnv(gym.Env):
         phi_after: float,
         terminal_done: bool = False,
     ) -> None:
-        """Update episode accumulators after one RHEA full-turn replay (no :meth:`step`)."""
+        """Update episode accumulators after one RHEA full-turn replay (no :meth:`step`).
+
+        ``state_before`` must be a **pre-replay** snapshot (``copy.deepcopy(env.state)``
+        before ``replay_rhea_actions``). Passing a live alias of ``env.state`` leaves
+        army/property/capture/income breakdown at zero while ``phi_potential_delta``
+        still updates (``phi_before``/``phi_after`` are passed explicitly).
+        """
         if self.state is None:
             return
 
@@ -1357,6 +1363,13 @@ class AWBWEnv(gym.Env):
             self._episode_reward_phi_potential_delta_cumulative[other] -= pd
 
         if hasattr(self, "_episode_reward_army_cumulative"):
+            if state_before is self.state:
+                import warnings
+                warnings.warn(
+                    "record_rhea_turn: state_before is env.state (post-replay); "
+                    "pass copy.deepcopy(env.state) taken before replay_rhea_actions",
+                    stacklevel=2,
+                )
             comp_before = self._compute_phi_components_for_seat(state_before, acting)
             comp_after = self._compute_phi_components_for_seat(self.state, acting)
             d_a = float(comp_after["army"] - comp_before["army"])

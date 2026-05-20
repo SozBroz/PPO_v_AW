@@ -1636,7 +1636,10 @@ def _actor_loop(
                         _encode_into(state, acting, spatial_buf, scalars_buf)
                         before_spatial = spatial_buf.copy()
                         before_scalars = scalars_buf.copy()
-                        state_before = env.state
+                        # Snapshot before replay — ``record_rhea_turn`` needs
+                        # pre-turn Φ components; aliasing ``env.state`` makes
+                        # army/property/capture/income breakdown stay at 0.
+                        state_before = copy.deepcopy(env.state)
                         phi_before = fitness.phi(state, acting)
 
                         # Compute complexity metrics for dynamic budgeting if enabled
