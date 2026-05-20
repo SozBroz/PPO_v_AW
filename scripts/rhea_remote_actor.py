@@ -49,7 +49,7 @@ from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
 from rl.env import AWBWEnv
 from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
-from rl.rhea_replay import RheaTransition
+from rl.rhea_replay import RheaTransition, transition_to_payload
 from rl.value_net import AWBWValueNet, load_value_checkpoint
 
 
@@ -122,7 +122,7 @@ _maybe_recompile_cython()
 from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
 from rl.env import AWBWEnv
 from rl.rhea_fitness import RheaFitness
-from rl.rhea_replay import RheaTransition
+from rl.rhea_replay import RheaTransition, transition_to_payload
 from rl.value_net import AWBWValueNet, load_value_checkpoint
 
 
@@ -192,21 +192,7 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
 
 
 def _transition_to_payload(t: RheaTransition) -> dict[str, Any]:
-    """Convert a RheaTransition to a JSON-serializable dict."""
-    return {
-        "spatial_before": t.spatial_before.tolist() if isinstance(t.spatial_before, np.ndarray) else t.spatial_before,
-        "scalars_before": t.scalars_before.tolist() if isinstance(t.scalars_before, np.ndarray) else t.scalars_before,
-        "reward_turn": float(t.reward_turn),
-        "spatial_after": t.spatial_after.tolist() if isinstance(t.spatial_after, np.ndarray) else t.spatial_after,
-        "scalars_after": t.scalars_after.tolist() if isinstance(t.scalars_after, np.ndarray) else t.scalars_after,
-        "done": bool(t.done),
-        "winner": t.winner,
-        "acting_seat": int(t.acting_seat),
-        "day": int(t.day),
-        "phi_delta": float(t.phi_delta),
-        "value_after_at_search_time": float(t.value_after_at_search_time),
-        "search_score": float(t.search_score),
-    }
+    return transition_to_payload(t, json_safe=True)
 
 
 def _maybe_disable_cop_for_seat(co_state, disable_prob: float = 0.10) -> bool:
@@ -450,6 +436,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
+    ap.add_argument(
+        "--buy-mode",
+        choices=("rhea", "exhaustive"),
+        default="rhea",
+        help="Two-phase buy planner mode; legacy RHEA remains default until promotion.",
+    )
+    ap.add_argument(
+        "--buy-exhaustive-max-candidates",
+        type=int,
+        default=8192,
+        help="Candidate cap for opt-in --buy-mode exhaustive.",
+    )
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
 
@@ -607,11 +605,13 @@ def main() -> None:
             top_k_per_state=args.rhea_top_k_per_state,
             reward_weight=args.reward_weight,
             value_weight=args.value_weight,
+            buy_mode=args.buy_mode,
+            buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
             seed=seed,
             use_tactical_beam=args.rhea_use_tactical_beam,
-            tactical_beam_max_width=args.rhea_tactical_beam_max_width,
-            tactical_beam_max_depth=args.rhea_tactical_beam_max_depth,
-            tactical_beam_max_expand=args.rhea_tactical_beam_max_expand,
+            tactial_beam_max_width=args.rhea_tactical_beam_max_width,
+            tactial_beam_max_depth=args.rhea_tactical_beam_max_depth,
+            tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
         ),
         dynamic_budget=args.rhea_autotune,
         complexity_metrics=None,

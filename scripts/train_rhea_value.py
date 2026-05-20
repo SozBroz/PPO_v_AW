@@ -171,6 +171,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
+    ap.add_argument(
+        "--buy-mode",
+        choices=("rhea", "exhaustive"),
+        default="rhea",
+        help="Two-phase buy planner mode; legacy RHEA remains default until promotion.",
+    )
+    ap.add_argument(
+        "--buy-exhaustive-max-candidates",
+        type=int,
+        default=8192,
+        help="Candidate cap for opt-in --buy-mode exhaustive.",
+    )
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.
@@ -257,6 +269,8 @@ def main() -> None:
             top_k_per_state=args.rhea_top_k_per_state,
             reward_weight=args.reward_weight,
             value_weight=args.value_weight,
+            buy_mode=args.buy_mode,
+            buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
             seed=args.seed,
             use_tactical_beam=args.rhea_use_tactical_beam,
             tactial_beam_max_width=args.rhea_tactical_beam_max_width,

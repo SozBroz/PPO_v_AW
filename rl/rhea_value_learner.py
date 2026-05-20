@@ -10,10 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rl.rhea_replay import RheaReplayBuffer
+from rl.rhea_replay import RheaReplayBuffer, RheaTransition
 from rl.value_net import AWBWValueNet
 
 
@@ -25,6 +26,12 @@ class RheaValueLearnerConfig:
     min_replay_before_train: int = 1_000
     updates_per_real_turn: int = 1
     gamma_turn: float = 0.99
+    gamma_step: float = 0.99
+    use_phi_step_targets: bool = False
+    phi_scale: float = 0.05
+    phi_loss_weight: float = 0.05
+    use_dual_value_head: bool = False
+    blend_win_on_turn_done: float = 0.0
     gradient_clip_norm: float = 1.0
     weight_decay: float = 0.0
     target_update_interval: int = 1_000
@@ -32,6 +39,176 @@ class RheaValueLearnerConfig:
     target_clip: float | None = 5.0
     freeze_encoder: bool = True
     unfreeze_last_resblocks: int = 0
+
+
+def bootstrap_gamma(cfg: RheaValueLearnerConfig) -> float:
+    """Discount for TD bootstrap; step gamma only when phi-step targets are enabled."""
+    if cfg.use_phi_step_targets:
+        return float(cfg.gamma_step)
+    return float(cfg.gamma_turn)
+
+
+def compute_win_td_targets(
+    *,
+    next_logits: torch.Tensor,
+    done: torch.Tensor,
+    winner: torch.Tensor,
+    acting_seat: torch.Tensor,
+    gamma: float,
+    target_clip: float | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Win-probability TD targets (same formula as legacy train_one_batch)."""
+    win_target = torch.where(
+        winner == -1,
+        torch.tensor(0.5, device=device).expand_as(winner),
+        (winner == acting_seat).float(),
+    )
+    next_win_prob = torch.sigmoid(next_logits)
+    immediate_win = win_target * done
+    td_target_win = immediate_win + float(gamma) * next_win_prob * (1.0 - done)
+    if target_clip is not None:
+        td_target_win = torch.clamp(td_target_win, 0.0, 1.0)
+    return td_target_win
+
+
+def compute_rhea_value_loss(
+    pred_logits: torch.Tensor,
+    td_target_win: torch.Tensor,
+    cfg: RheaValueLearnerConfig,
+    *,
+    phi_delta: torch.Tensor | None = None,
+    turn_done: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Primary win-TD BCE; optional bounded phi auxiliary when enabled in cfg."""
+    loss = F.binary_cross_entropy_with_logits(pred_logits, td_target_win)
+    if not cfg.use_phi_step_targets or cfg.use_dual_value_head:
+        return loss
+    if phi_delta is None:
+        return loss
+
+    scale = max(float(cfg.phi_scale), 1e-8)
+    aux_target = torch.clamp(0.5 + phi_delta / (2.0 * scale), 0.05, 0.95)
+    blend = float(cfg.blend_win_on_turn_done)
+    if blend > 0.0 and turn_done is not None:
+        aux_target = torch.where(
+            turn_done > 0,
+            (1.0 - blend) * aux_target + blend * td_target_win,
+            aux_target,
+        )
+    phi_loss = F.binary_cross_entropy_with_logits(pred_logits, aux_target)
+    return loss + float(cfg.phi_loss_weight) * phi_loss
+
+
+def transitions_to_batch_tensors(
+    transitions: list[RheaTransition],
+    device: torch.device | str,
+) -> dict[str, torch.Tensor]:
+    """Stack turn transitions for value loss / gradient push (mirrors replay sample keys)."""
+    if not transitions:
+        raise ValueError("transitions must be non-empty")
+    dev = torch.device(device)
+    return {
+        "spatial_before": torch.as_tensor(
+            np.stack([t.spatial_before for t in transitions]),
+            dtype=torch.float32,
+            device=dev,
+        ),
+        "scalars_before": torch.as_tensor(
+            np.stack([t.scalars_before for t in transitions]),
+            dtype=torch.float32,
+            device=dev,
+        ),
+        "spatial_after": torch.as_tensor(
+            np.stack([t.spatial_after for t in transitions]),
+            dtype=torch.float32,
+            device=dev,
+        ),
+        "scalars_after": torch.as_tensor(
+            np.stack([t.scalars_after for t in transitions]),
+            dtype=torch.float32,
+            device=dev,
+        ),
+        "done": torch.as_tensor(
+            [bool(t.done) for t in transitions],
+            dtype=torch.float32,
+            device=dev,
+        ),
+        "winner": torch.as_tensor(
+            [int(t.winner) if t.winner is not None else -1 for t in transitions],
+            dtype=torch.int64,
+            device=dev,
+        ),
+        "acting_seat": torch.as_tensor(
+            [int(t.acting_seat) for t in transitions],
+            dtype=torch.int64,
+            device=dev,
+        ),
+        "phi_delta": torch.as_tensor(
+            [float(t.phi_delta) for t in transitions],
+            dtype=torch.float32,
+            device=dev,
+        ),
+    }
+
+
+def compute_value_loss_from_batch(
+    model: AWBWValueNet,
+    batch: dict[str, torch.Tensor],
+    cfg: RheaValueLearnerConfig,
+    *,
+    target_model: AWBWValueNet | None = None,
+    detach_next: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Shared win-TD (+ optional phi aux) loss for learner and push-gradient actors."""
+    device = batch["spatial_before"].device
+    pred_logits = model(batch["spatial_before"], batch["scalars_before"])
+    next_model = target_model if target_model is not None else model
+    with torch.no_grad():
+        next_logits = next_model(batch["spatial_after"], batch["scalars_after"])
+        if detach_next:
+            next_logits = next_logits.detach()
+        td_target_win = compute_win_td_targets(
+            next_logits=next_logits,
+            done=batch["done"],
+            winner=batch["winner"],
+            acting_seat=batch["acting_seat"],
+            gamma=bootstrap_gamma(cfg),
+            target_clip=cfg.target_clip,
+            device=device,
+        )
+    turn_done = torch.ones_like(batch["done"]) if not cfg.use_phi_step_targets else batch.get("turn_done")
+    loss = compute_rhea_value_loss(
+        pred_logits,
+        td_target_win,
+        cfg,
+        phi_delta=batch.get("phi_delta"),
+        turn_done=turn_done,
+    )
+    return loss, pred_logits, td_target_win
+
+
+def aggregate_weighted_gradients(
+    contributions: list[tuple[dict[str, torch.Tensor], float]],
+) -> dict[str, torch.Tensor] | None:
+    """Sum gradient dicts weighted by num_transitions; return None if empty."""
+    if not contributions:
+        return None
+    total_weight = sum(float(w) for _, w in contributions)
+    if total_weight <= 0.0:
+        return None
+    aggregated: dict[str, torch.Tensor] = {}
+    for grads_dict, weight in contributions:
+        w = float(weight)
+        for name, grad_tensor in grads_dict.items():
+            scaled = grad_tensor * w
+            if name not in aggregated:
+                aggregated[name] = scaled.clone()
+            else:
+                aggregated[name] += scaled
+    for name in aggregated:
+        aggregated[name] /= total_weight
+    return aggregated
 
 
 def configure_trainable_params(model: AWBWValueNet, cfg: RheaValueLearnerConfig) -> None:
@@ -104,41 +281,24 @@ class RheaValueLearner:
     def train_one_batch(self) -> dict[str, float]:
         batch = self.replay.sample(self.cfg.value_batch_size)
 
-        spatial_before = torch.as_tensor(batch["spatial_before"], dtype=torch.float32, device=self.device)
-        scalars_before = torch.as_tensor(batch["scalars_before"], dtype=torch.float32, device=self.device)
-        spatial_after = torch.as_tensor(batch["spatial_after"], dtype=torch.float32, device=self.device)
-        scalars_after = torch.as_tensor(batch["scalars_after"], dtype=torch.float32, device=self.device)
-        done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device)
-        winner = torch.as_tensor(batch["winner"], dtype=torch.int64, device=self.device)
-        acting_seat = torch.as_tensor(batch["acting_seat"], dtype=torch.int64, device=self.device)
+        tensor_batch = {
+            "spatial_before": torch.as_tensor(batch["spatial_before"], dtype=torch.float32, device=self.device),
+            "scalars_before": torch.as_tensor(batch["scalars_before"], dtype=torch.float32, device=self.device),
+            "spatial_after": torch.as_tensor(batch["spatial_after"], dtype=torch.float32, device=self.device),
+            "scalars_after": torch.as_tensor(batch["scalars_after"], dtype=torch.float32, device=self.device),
+            "done": torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device),
+            "winner": torch.as_tensor(batch["winner"], dtype=torch.int64, device=self.device),
+            "acting_seat": torch.as_tensor(batch["acting_seat"], dtype=torch.int64, device=self.device),
+            "phi_delta": torch.as_tensor(batch["phi_delta"], dtype=torch.float32, device=self.device),
+        }
 
-        # Win prediction: predict P(win | state, acting_seat)
-        # The value network outputs logits; use BCE with logits for numerical stability.
-        pred_logits = self.online(spatial_before, scalars_before)
-
-        with torch.no_grad():
-            next_logits = self.target(spatial_after, scalars_after)
-
-            # Game outcome: winner == acting_seat → 1.0 (win), else 0.0 (loss)
-            # winner == -1 means draw → 0.5
-            win_target = torch.where(
-                winner == -1,
-                torch.tensor(0.5, device=self.device).expand_as(winner),
-                (winner == acting_seat).float(),
-            )
-
-            # For non-terminal states, blend with TD target
-            # td_target_win = immediate_win + gamma * next_win_prob
-            next_win_prob = torch.sigmoid(next_logits)
-            immediate_win = win_target * done
-            td_target_win = immediate_win + self.cfg.gamma_turn * next_win_prob * (1.0 - done)
-
-            if self.cfg.target_clip is not None:
-                c = float(self.cfg.target_clip)
-                td_target_win = torch.clamp(td_target_win, 0.0, 1.0)
-
-        # Binary cross-entropy with logits for numerical stability
-        loss = F.binary_cross_entropy_with_logits(pred_logits, td_target_win)
+        loss, pred_logits, td_target_win = compute_value_loss_from_batch(
+            self.online,
+            tensor_batch,
+            self.cfg,
+            target_model=self.target,
+            detach_next=True,
+        )
 
         self.opt.zero_grad(set_to_none=True)
         loss.backward()

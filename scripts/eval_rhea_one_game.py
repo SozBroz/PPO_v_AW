@@ -62,6 +62,18 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--population", type=int, default=64)
     parser.add_argument("--generations", type=int, default=10)
+    parser.add_argument(
+        "--buy-mode",
+        choices=("rhea", "exhaustive"),
+        default="rhea",
+        help="Two-phase buy planner mode; legacy RHEA remains default until promotion.",
+    )
+    parser.add_argument(
+        "--buy-exhaustive-max-candidates",
+        type=int,
+        default=8192,
+        help="Candidate cap for opt-in --buy-mode exhaustive.",
+    )
     parser.add_argument("--value-weight", type=float, default=0.10)
     parser.add_argument("--reward-weight", type=float, default=0.90)
     parser.add_argument("--max-days", type=int, default=30)
@@ -194,6 +206,8 @@ def main() -> None:
         tactial_beam_max_depth=args.rhea_tactical_beam_max_depth,
         tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
         two_phase_buy_rhea=not bool(getattr(args, "rhea_monolithic_buy", False)),
+        buy_mode=args.buy_mode,
+        buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
     )
     # Override parameters for early game
     # (default top_k_per_state = 48 from RheaConfig)

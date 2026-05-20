@@ -36,7 +36,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 import random
-from typing import Optional
+from typing import Callable, Optional
 
 from engine.action import (
     Action,
@@ -55,6 +55,7 @@ from rl.candidate_actions import (
     candidate_arrays,
     enumerate_candidates,
 )
+from rl.buy_exhaustive import pick_best_exhaustive_buy
 from rl.rhea_fitness import RheaFitness, RheaFitnessBreakdown
 from rl.tactical_beam import TacticalBeamConfig, TacticalBeamPlanner
 
@@ -498,6 +499,8 @@ class RheaConfig:
     # cheap builds. Per-1k credit rate is added to rew_shaped.
     buy_bank_credit_cap: float = 10000.0
     buy_bank_credit_per_1k: float = 0.01
+    buy_mode: str = "rhea"  # "rhea" | "exhaustive" (opt-in)
+    buy_exhaustive_max_candidates: int = 8192
     log_initial_best: bool = True
     seed: Optional[int] = None
     # Tactical beam config (unchanged)
@@ -519,6 +522,19 @@ class RheaResult:
     genome: Optional[RheaGenome] = None  # best genome for intent-group replay
     population_used: int = 32           # actual population used (autotune override)
     generations_used: int = 6           # actual generations used (autotune override)
+    n_move_actions: int = 0             # two-phase: len(move_actions) for phase tagging
+    n_buy_actions: int = 0              # two-phase: len(exec_buy_act) for phase tagging
+    buy_candidates_enumerated: int = 0
+    buy_candidates_scored: int = 0
+    buy_exhaustive_truncated: bool = False
+    buy_mode_used: str = "rhea"
+    buy_exhaustive_frontier_depth_at_cap: int | None = None
+
+
+ReplayStepCallback = Callable[
+    [GameState, Action, GameState, int, str],
+    None,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -526,17 +542,66 @@ class RheaResult:
 # ---------------------------------------------------------------------------
 
 
-def _salvage_ender(env_state: GameState, acting: int) -> None:
+def _replay_oracle_step(
+    env_state: GameState,
+    action: Action,
+    acting: int,
+    *,
+    on_step: ReplayStepCallback | None,
+    step_idx: int,
+    source: str,
+) -> bool:
+    """Apply one oracle replay step; invoke ``on_step`` only on success."""
+    if env_state is None or env_state.winner is not None:
+        return False
+    if int(env_state.active_player) != acting:
+        return False
+    before = copy.deepcopy(env_state) if on_step is not None else env_state
+    try:
+        env_state.step(action, oracle_mode=True)
+    except Exception:
+        return False
+    if on_step is not None:
+        on_step(before, action, env_state, step_idx, source)
+    return True
+
+
+def _salvage_ender(
+    env_state: GameState,
+    acting: int,
+    *,
+    on_step: ReplayStepCallback | None = None,
+    step_base: int = 0,
+) -> int:
     """Force-advance ``env_state`` for ``acting``: WAIT unmoved units then END_TURN.
 
-    Ensures SELECT stage first so ``get_legal_actions`` returns the right
-    candidates.  Steps use ``oracle_mode=True`` because the actions may not
-    match the real state's exact objects.
+    Returns the number of successful oracle steps applied.  When ``on_step`` is
+    set, each successful WAIT/SELECT/MOVE/END (etc.) emits an individual callback
+    with ``source="salvage"`` — step mode must use this path, not the legacy
+    ``replay_rhea_actions`` salvage bump of +1.
     """
     if env_state is None or env_state.winner is not None:
-        return
+        return 0
     if int(env_state.active_player) != acting:
-        return
+        return 0
+
+    applied = 0
+    step_idx = int(step_base)
+
+    def _step(action: Action) -> bool:
+        nonlocal step_idx, applied
+        if _replay_oracle_step(
+            env_state,
+            action,
+            acting,
+            on_step=on_step,
+            step_idx=step_idx,
+            source="salvage",
+        ):
+            applied += 1
+            step_idx += 1
+            return True
+        return False
 
     env_state.action_stage = ActionStage.SELECT
     env_state.selected_unit = None
@@ -544,12 +609,8 @@ def _salvage_ender(env_state: GameState, acting: int) -> None:
 
     legal = get_legal_actions(env_state)
     enders = [a for a in legal if a.action_type == ActionType.END_TURN]
-    if enders:
-        try:
-            env_state.step(enders[0], oracle_mode=True)
-            return
-        except Exception:
-            pass
+    if enders and _step(enders[0]):
+        return applied
 
     # END_TURN not legal (unmoved units) — WAIT each unmoved unit in place.
     for _u in list(env_state.units[acting]):
@@ -560,47 +621,93 @@ def _salvage_ender(env_state: GameState, acting: int) -> None:
                if a.action_type == ActionType.SELECT_UNIT and a.unit_pos == _u.pos]
         if not sel:
             continue
-        try:
-            env_state.step(sel[0], oracle_mode=True)
-        except Exception:
+        if not _step(sel[0]):
             continue
         legal = get_legal_actions(env_state)
         moves = [a for a in legal
                  if a.action_type == ActionType.SELECT_UNIT and a.move_pos == _u.pos]
         if not moves:
             continue
-        try:
-            env_state.step(moves[0], oracle_mode=True)
-        except Exception:
+        if not _step(moves[0]):
             continue
         if env_state.action_stage == ActionStage.ACTION:
             legal = get_legal_actions(env_state)
-            # Try WAIT first (cheapest), then any legal action.
             waits = [a for a in legal if a.action_type == ActionType.WAIT]
             if waits:
-                try:
-                    env_state.step(waits[0], oracle_mode=True)
-                except Exception:
-                    pass
-            else:
-                # WAIT not legal — e.g. CAPTURE dominates on enemy property,
-                # or LOAD is the only terminator (unit on friendly transport).
-                # Execute any legal action to unstick the unit.
-                try:
-                    env_state.step(legal[0], oracle_mode=True)
-                except Exception:
-                    pass
-    # Try END_TURN again after WAIT salvage.
+                _step(waits[0])
+            elif legal:
+                _step(legal[0])
+
     env_state.action_stage = ActionStage.SELECT
     env_state.selected_unit = None
     env_state.selected_move_pos = None
     legal = get_legal_actions(env_state)
     enders = [a for a in legal if a.action_type == ActionType.END_TURN]
     if enders:
-        try:
-            env_state.step(enders[0], oracle_mode=True)
-        except Exception:
-            pass
+        _step(enders[0])
+
+    return applied
+
+
+def _clamp_replay_select_stage(env_state: GameState | None) -> None:
+    if (env_state is not None and env_state.winner is None
+            and env_state.action_stage != ActionStage.SELECT):
+        env_state.action_stage = ActionStage.SELECT
+        env_state.selected_unit = None
+        env_state.selected_move_pos = None
+
+
+def replay_rhea_actions_with_steps(
+    env_state: GameState,
+    actions: list,
+    acting: int,
+    *,
+    on_step: ReplayStepCallback | None = None,
+) -> tuple[int, int, int]:
+    """Replay planner actions with exact per-step accounting.
+
+    Returns ``(applied_planned, skipped, salvage_steps)``.  ``salvage_steps`` is
+    the count of successful engine steps from forced end-turn salvage (each WAIT,
+    SELECT, MOVE, END, etc.), not the legacy +1 approximation used by
+    ``replay_rhea_actions``.
+    """
+    applied_planned = 0
+    skipped = 0
+    step_idx = 0
+
+    for action in actions:
+        if env_state is None or env_state.winner is not None:
+            break
+        if int(env_state.active_player) != acting:
+            break
+        if _replay_oracle_step(
+            env_state,
+            action,
+            acting,
+            on_step=on_step,
+            step_idx=step_idx,
+            source="planned",
+        ):
+            applied_planned += 1
+            step_idx += 1
+        else:
+            import traceback as _tb
+            print(f"[replay_rhea_actions] step failed: {action!r}", flush=True)
+            _tb.print_exc()
+            skipped += 1
+
+    salvage_steps = 0
+    if (env_state is not None and env_state.winner is None
+            and int(env_state.active_player) == acting):
+        salvage_steps = _salvage_ender(
+            env_state,
+            acting,
+            on_step=on_step,
+            step_base=step_idx,
+        )
+
+    _clamp_replay_select_stage(env_state)
+    return applied_planned, skipped, salvage_steps
 
 
 def replay_rhea_actions(env_state: GameState, actions: list, acting: int) -> tuple[int, int]:
@@ -618,37 +725,26 @@ def replay_rhea_actions(env_state: GameState, actions: list, acting: int) -> tup
     WAIT any unmoved units in place, then END_TURN.  This ensures the turn
     advances even when all genome intents failed.
 
-    Returns ``(applied, skipped)``.
+    Returns ``(applied, skipped)``.  Salvage still uses the historical +1 bump
+    when still acting after the planned loop (see ``replay_rhea_actions_with_steps``
+    for exact per-step salvage accounting).
     """
-    applied = 0
-    skipped = 0
-    for action in actions:
-        if env_state is None or env_state.winner is not None:
-            break
-        if int(env_state.active_player) != acting:
-            break
-        try:
-            env_state.step(action, oracle_mode=True)
-            applied += 1
-        except Exception as _ex:
-            import traceback as _tb
-            print(f"[replay_rhea_actions] step failed: {_ex}", flush=True)
-            _tb.print_exc()
-            skipped += 1
-
-    # Force END_TURN if still acting.
-    if (env_state is not None and env_state.winner is None
-            and int(env_state.active_player) == acting):
-        _salvage_ender(env_state, acting)
-        applied += 1  # best-effort, may or may not have advanced
-
-    # Clamp to SELECT so ActionPool.build on the next turn does not crash.
-    if (env_state is not None and env_state.winner is None
-            and env_state.action_stage != ActionStage.SELECT):
-        env_state.action_stage = ActionStage.SELECT
-        env_state.selected_unit = None
-        env_state.selected_move_pos = None
-
+    applied_planned, skipped, salvage_steps = replay_rhea_actions_with_steps(
+        env_state, actions, acting, on_step=None,
+    )
+    applied = applied_planned
+    # Legacy +1 when end-of-turn salvage was needed (still acting after planned loop),
+    # even if salvage applied multiple engine steps or failed to advance the seat.
+    salvage_needed = (
+        salvage_steps > 0
+        or (
+            env_state is not None
+            and env_state.winner is None
+            and int(env_state.active_player) == acting
+        )
+    )
+    if salvage_needed:
+        applied += 1
     return applied, skipped
 
 
@@ -1100,158 +1196,216 @@ class RheaPlanner:
                 genome=mv_genome_best,
                 population_used=population_size,
                 generations_used=generations + buy_gen_sz,
+                buy_mode_used=str(self.cfg.buy_mode),
+                n_move_actions=len(move_actions),
+                n_buy_actions=0,
             )
 
-        try:
-            print(
-                f"  [RHEA/2phi] BUY pop={buy_pop_sz} gen={buy_gen_sz} "
-                f"slots={len(fo)}{' autotune' if self.cfg.buy_autotune else ''}",
-                flush=True,
-            )
-        except UnicodeEncodeError:
-            # Fallback to ASCII representation
-            print(
-                f"  [RHEA/2phi] BUY pop={buy_pop_sz} gen={buy_gen_sz} "
-                f"slots={len(fo)}{' autotune' if self.cfg.buy_autotune else ''}",
-                flush=True,
-            )
+        buy_mode_used = str(self.cfg.buy_mode)
+        buy_candidates_enumerated = 0
+        buy_candidates_scored = 0
+        buy_exhaustive_truncated = False
+        buy_exhaustive_frontier_depth_at_cap: int | None = None
+        buy_generations_used = int(buy_gen_sz)
 
-        buy_track_best: tuple[float, BuySpendGenome, float] | None = None
-        buy_population: list[BuySpendGenome] = []
-
-        seed_buy_build_bias_n = max(1, buy_pop_sz // 4)
-        for _bp in range(buy_pop_sz):
-            ch_rand: list[Optional[UnitType]] = []
-            for p_fac in fo:
-                units_only = list(catalog[p_fac])
-                if _bp < seed_buy_build_bias_n and units_only:
-                    ch_rand.append(self.rng.choice(units_only))
-                else:
-                    pick_pool = units_only + [None]
-                    ch_rand.append(self.rng.choice(pick_pool))
-            buy_population.append(
-                self._canonical_buy_genome_after_exec(
-                    s_after_moves,
-                    BuySpendGenome(fo, ch_rand),
+        if buy_mode_used == "exhaustive":
+            try:
+                print(
+                    f"  [RHEA/2phi] BUY exhaustive cap="
+                    f"{self.cfg.buy_exhaustive_max_candidates} slots={len(fo)}",
+                    flush=True,
                 )
+            except UnicodeEncodeError:
+                print(
+                    f"  [RHEA/2phi] BUY exhaustive cap="
+                    f"{self.cfg.buy_exhaustive_max_candidates} slots={len(fo)}",
+                    flush=True,
+                )
+
+            greedy_seed = self._greedy_cheapest_buy_genome(
+                s_after_moves, acting_seat, fo, catalog,
             )
+            ex_pick = pick_best_exhaustive_buy(
+                self,
+                self.fitness,
+                s_after_moves,
+                acting_seat,
+                fo,
+                catalog,
+                max_candidates=int(self.cfg.buy_exhaustive_max_candidates),
+                reward_weight=rw,
+                value_weight=vw,
+                buy_value_scale=float(self.cfg.buy_value_scale),
+                buy_shaping_weight=float(self.cfg.buy_shaping_weight),
+                illegal_gene_penalty=igen_pen,
+                greedy_seed=greedy_seed,
+            )
+            best_buy_g = ex_pick.genome
+            exec_buy_act = list(ex_pick.build_actions)
+            sim_after_buy = ex_pick.sim_after
+            sim_terminal = clone_for_search(s_after_moves)
+            ileg_buy = int(ex_pick.illegal)
+            buy_candidates_enumerated = int(ex_pick.candidates_enumerated)
+            buy_candidates_scored = int(ex_pick.candidates_scored)
+            buy_exhaustive_truncated = bool(ex_pick.truncated)
+            buy_exhaustive_frontier_depth_at_cap = ex_pick.frontier_depth_at_cap
+            buy_generations_used = 0
+        else:
+            try:
+                print(
+                    f"  [RHEA/2phi] BUY pop={buy_pop_sz} gen={buy_gen_sz} "
+                    f"slots={len(fo)}{' autotune' if self.cfg.buy_autotune else ''}",
+                    flush=True,
+                )
+            except UnicodeEncodeError:
+                print(
+                    f"  [RHEA/2phi] BUY pop={buy_pop_sz} gen={buy_gen_sz} "
+                    f"slots={len(fo)}{' autotune' if self.cfg.buy_autotune else ''}",
+                    flush=True,
+                )
 
-        greedy_seed = self._greedy_cheapest_buy_genome(
-            s_after_moves, acting_seat, fo, catalog,
-        )
-        if greedy_seed is not None:
-            buy_population[0] = greedy_seed
+            buy_track_best: tuple[float, BuySpendGenome, float] | None = None
+            buy_population: list[BuySpendGenome] = []
 
-        g0_buy = int(s_after_moves.funds[acting_seat])
-        buy_sw = float(self.cfg.buy_shaping_weight)
-        buy_vs = float(self.cfg.buy_value_scale)
-        v_ref_buy = float(self.fitness.value(s_after_moves, acting_seat))
-        phi_ref_buy = float(self.fitness.phi(s_after_moves, acting_seat))
-
-        for by_gen in range(buy_gen_sz):
-            scored_b: list = []
-            for bg in buy_population:
-                sc = clone_for_search(s_after_moves)
-                acts_b, _ef, sf, igb, rk, rex = (
-                    self._execute_buy_spend_allocation(
-                        s_after_moves, bg, mutate_sim=sc,
+            seed_buy_build_bias_n = max(1, buy_pop_sz // 4)
+            for _bp in range(buy_pop_sz):
+                ch_rand: list[Optional[UnitType]] = []
+                for p_fac in fo:
+                    units_only = list(catalog[p_fac])
+                    if _bp < seed_buy_build_bias_n and units_only:
+                        ch_rand.append(self.rng.choice(units_only))
+                    else:
+                        pick_pool = units_only + [None]
+                        ch_rand.append(self.rng.choice(pick_pool))
+                buy_population.append(
+                    self._canonical_buy_genome_after_exec(
+                        s_after_moves,
+                        BuySpendGenome(fo, ch_rand),
                     )
                 )
-                v_terminal = float(self.fitness.value(sf, acting_seat))
-                phi_sf = float(self.fitness.phi(sf, acting_seat))
-                rew_shaped = float(rk) + float(rex)
-                v_adv_b = (v_terminal - v_ref_buy) * 2.0
-                phi_d_b = phi_sf - phi_ref_buy
-                ileg_b = -igen_pen * float(igb)
-                tot_b = (
-                    rw * phi_d_b
-                    + vw * v_adv_b * buy_vs
-                    + buy_sw * rew_shaped
-                    + ileg_b
-                )
-                spent = max(0, g0_buy - int(sf.funds[acting_seat]))
-                scored_b.append((tot_b, spent, bg, igb))
 
-                # Log first-gen candidates for diagnosis
-                if by_gen == 0 and len(acts_b) > 0:
-                    names = [a.unit_type.name for a in acts_b if a.action_type == ActionType.BUILD]
-                    print(f"  [RHEA/BUY] cand: builds={names} "
-                          f"phi_d={phi_d_b:+.4f} rk={rk:+.4f} rex={rex:+.4f} "
-                          f"tot={tot_b:+.4f}", flush=True)
-
-            scored_b.sort(
-                key=lambda row: (row[0], row[1]),
-                reverse=True,
+            greedy_seed = self._greedy_cheapest_buy_genome(
+                s_after_moves, acting_seat, fo, catalog,
             )
+            if greedy_seed is not None:
+                buy_population[0] = greedy_seed
 
-            cand_key = (float(scored_b[0][0]), float(scored_b[0][1]))
-            if buy_track_best is None:
-                buy_track_best = (
-                    cand_key[0],
-                    copy.deepcopy(scored_b[0][2]),
-                    cand_key[1],
+            g0_buy = int(s_after_moves.funds[acting_seat])
+            buy_sw = float(self.cfg.buy_shaping_weight)
+            buy_vs = float(self.cfg.buy_value_scale)
+            v_ref_buy = float(self.fitness.value(s_after_moves, acting_seat))
+            phi_ref_buy = float(self.fitness.phi(s_after_moves, acting_seat))
+
+            for by_gen in range(buy_gen_sz):
+                scored_b: list = []
+                for bg in buy_population:
+                    sc = clone_for_search(s_after_moves)
+                    acts_b, _ef, sf, igb, rk, rex = (
+                        self._execute_buy_spend_allocation(
+                            s_after_moves, bg, mutate_sim=sc,
+                        )
+                    )
+                    v_terminal = float(self.fitness.value(sf, acting_seat))
+                    phi_sf = float(self.fitness.phi(sf, acting_seat))
+                    rew_shaped = float(rk) + float(rex)
+                    v_adv_b = (v_terminal - v_ref_buy) * 2.0
+                    phi_d_b = phi_sf - phi_ref_buy
+                    ileg_b = -igen_pen * float(igb)
+                    tot_b = (
+                        rw * phi_d_b
+                        + vw * v_adv_b * buy_vs
+                        + buy_sw * rew_shaped
+                        + ileg_b
+                    )
+                    spent = max(0, g0_buy - int(sf.funds[acting_seat]))
+                    scored_b.append((tot_b, spent, bg, igb))
+
+                    if by_gen == 0 and len(acts_b) > 0:
+                        names = [
+                            a.unit_type.name
+                            for a in acts_b
+                            if a.action_type == ActionType.BUILD
+                        ]
+                        print(
+                            f"  [RHEA/BUY] cand: builds={names} "
+                            f"phi_d={phi_d_b:+.4f} rk={rk:+.4f} rex={rex:+.4f} "
+                            f"tot={tot_b:+.4f}",
+                            flush=True,
+                        )
+
+                scored_b.sort(
+                    key=lambda row: (row[0], row[1]),
+                    reverse=True,
                 )
-            else:
-                prev_key = (buy_track_best[0], buy_track_best[2])
-                if cand_key > prev_key:
+
+                cand_key = (float(scored_b[0][0]), float(scored_b[0][1]))
+                if buy_track_best is None:
                     buy_track_best = (
                         cand_key[0],
                         copy.deepcopy(scored_b[0][2]),
                         cand_key[1],
                     )
+                else:
+                    prev_key = (buy_track_best[0], buy_track_best[2])
+                    if cand_key > prev_key:
+                        buy_track_best = (
+                            cand_key[0],
+                            copy.deepcopy(scored_b[0][2]),
+                            cand_key[1],
+                        )
 
-            if (
-                by_gen == buy_gen_sz - 1
-                or (by_gen % max(1, buy_gen_sz // 3) == 0)
-            ):
-                try:
-                    print(
-                        f"  [RHEA/2phi] BUY gen={by_gen + 1}/{buy_gen_sz} "
-                        f"best={scored_b[0][0]:+.4f}",
-                        flush=True,
+                if (
+                    by_gen == buy_gen_sz - 1
+                    or (by_gen % max(1, buy_gen_sz // 3) == 0)
+                ):
+                    try:
+                        print(
+                            f"  [RHEA/2phi] BUY gen={by_gen + 1}/{buy_gen_sz} "
+                            f"best={scored_b[0][0]:+.4f}",
+                            flush=True,
+                        )
+                    except UnicodeEncodeError:
+                        print(
+                            f"  [RHEA/2phi] BUY gen={by_gen + 1}/{buy_gen_sz} "
+                            f"best={scored_b[0][0]:+.4f}",
+                            flush=True,
+                        )
+
+                elites_b = scored_b[: max(2, buy_elite_n)]
+                next_buy: list[BuySpendGenome] = []
+                for _tot, _spent, bg_e, _ in elites_b:
+                    next_buy.append(copy.deepcopy(bg_e))
+
+                while len(next_buy) < buy_pop_sz:
+                    bx = self._crossover_buy_spend(
+                        fo,
+                        self.rng.choice(elites_b)[2],
+                        self.rng.choice(elites_b)[2],
+                        s_after_moves,
                     )
-                except UnicodeEncodeError:
-                    # Fallback to ASCII representation
-                    print(
-                        f"  [RHEA/2phi] BUY gen={by_gen + 1}/{buy_gen_sz} "
-                        f"best={scored_b[0][0]:+.4f}",
-                        flush=True,
-                    )
+                    if self.rng.random() < 0.65:
+                        bx = self._mutate_buy_spend_genome(
+                            fo, catalog, bx, s_after_moves,
+                        )
+                    next_buy.append(bx)
 
-            elites_b = scored_b[: max(2, buy_elite_n)]
-            next_buy: list[BuySpendGenome] = []
-            for _tot, _spent, bg_e, _ in elites_b:
-                next_buy.append(copy.deepcopy(bg_e))
+                buy_population = next_buy
 
-            while len(next_buy) < buy_pop_sz:
-                bx = self._crossover_buy_spend(
-                    fo,
-                    self.rng.choice(elites_b)[2],
-                    self.rng.choice(elites_b)[2],
-                    s_after_moves,
-                )
-                if self.rng.random() < 0.65:
-                    bx = self._mutate_buy_spend_genome(
-                        fo, catalog, bx, s_after_moves,
-                    )
-                next_buy.append(bx)
-
-            buy_population = next_buy
-
-        best_buy_g = (
-            buy_population[0]
-            if buy_track_best is None
-            else buy_track_best[1]
-        )
-
-        sim_terminal = clone_for_search(s_after_moves)
-        exec_buy_act, _, sim_after_buy, ileg_buy, *_ = (
-            self._execute_buy_spend_allocation(
-                s_after_moves,
-                best_buy_g,
-                mutate_sim=sim_terminal,
+            best_buy_g = (
+                buy_population[0]
+                if buy_track_best is None
+                else buy_track_best[1]
             )
-        )
+
+            sim_terminal = clone_for_search(s_after_moves)
+            exec_buy_act, _, sim_after_buy, ileg_buy, *_ = (
+                self._execute_buy_spend_allocation(
+                    s_after_moves,
+                    best_buy_g,
+                    mutate_sim=sim_terminal,
+                )
+            )
+
         if not exec_buy_act and fo:
             fb = self._greedy_cheapest_buy_genome(
                 s_after_moves, acting_seat, fo, catalog,
@@ -1303,7 +1457,7 @@ class RheaPlanner:
             score=float(score_total),
             breakdown=bd,
             illegal_genes=int(ig_tot),
-            generations=generations + buy_gen_sz,
+            generations=generations + buy_generations_used,
             initial_best_score=init_move_best,
             evolved_gain=(
                 float(score_total) - float(init_move_best)
@@ -1312,7 +1466,14 @@ class RheaPlanner:
             ),
             genome=mv_genome_best,
             population_used=population_size,
-            generations_used=generations + buy_gen_sz,
+            generations_used=generations + buy_generations_used,
+            buy_candidates_enumerated=buy_candidates_enumerated,
+            buy_candidates_scored=buy_candidates_scored,
+            buy_exhaustive_truncated=buy_exhaustive_truncated,
+            buy_mode_used=buy_mode_used,
+            buy_exhaustive_frontier_depth_at_cap=buy_exhaustive_frontier_depth_at_cap,
+            n_move_actions=len(move_actions),
+            n_buy_actions=len(exec_buy_act),
         )
 
     # ------------------------------------------------------------------

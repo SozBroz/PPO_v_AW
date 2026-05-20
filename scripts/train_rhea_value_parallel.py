@@ -121,8 +121,19 @@ from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv, SESSION_GAME_COUNTER_DB_ENV
 from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
-from rl.rhea_replay import RheaReplayBuffer, RheaTransition
-from rl.rhea_value_learner import RheaValueLearner, RheaValueLearnerConfig
+from rl.rhea_replay import (
+    RheaReplayBuffer,
+    RheaTransition,
+    payload_to_transition,
+    transition_to_payload,
+)
+from rl.rhea_value_learner import (
+    RheaValueLearner,
+    RheaValueLearnerConfig,
+    aggregate_weighted_gradients,
+    compute_value_loss_from_batch,
+    transitions_to_batch_tensors,
+)
 from rl.value_net import AWBWValueNet, load_value_checkpoint
 
 # ── Helper functions for gradient file naming and SSH transfer ──────────
@@ -475,22 +486,32 @@ def _load_value_pt_into_model(path: Path, model: AWBWValueNet, device: str, verb
 
 
 def _transition_to_payload(t: RheaTransition) -> dict[str, Any]:
-    # Numpy arrays are picklable; using a dict avoids class-version issues across
-    # long-running actor processes during rapid iteration.
-    return {
-        "spatial_before": t.spatial_before,
-        "scalars_before": t.scalars_before,
-        "reward_turn": float(t.reward_turn),
-        "spatial_after": t.spatial_after,
-        "scalars_after": t.scalars_after,
-        "done": bool(t.done),
-        "winner": t.winner,
-        "acting_seat": int(t.acting_seat),
-        "day": int(t.day),
-        "phi_delta": float(t.phi_delta),
-        "value_after_at_search_time": float(t.value_after_at_search_time),
-        "search_score": float(t.search_score),
-    }
+    return transition_to_payload(t, json_safe=False)
+
+
+def _learner_cfg_from_args(args: argparse.Namespace) -> RheaValueLearnerConfig:
+    """Build learner config from CLI; defaults preserve legacy win-TD behavior."""
+    return RheaValueLearnerConfig(
+        value_lr=args.value_lr,
+        value_batch_size=args.value_batch_size,
+        replay_buffer_size=args.replay_size,
+        min_replay_before_train=args.min_replay_before_train,
+        updates_per_real_turn=args.updates_per_turn,
+        gamma_turn=args.gamma_turn,
+        gamma_step=float(getattr(args, "gamma_step", 0.99)),
+        use_phi_step_targets=bool(getattr(args, "use_phi_step_targets", False)),
+        phi_scale=float(getattr(args, "phi_scale", 0.05)),
+        phi_loss_weight=float(getattr(args, "phi_loss_weight", 0.05)),
+        use_dual_value_head=bool(getattr(args, "use_dual_value_head", False)),
+        blend_win_on_turn_done=float(getattr(args, "blend_win_on_turn_done", 0.0)),
+        gradient_clip_norm=args.grad_clip,
+        weight_decay=args.weight_decay,
+        target_update_interval=args.target_update_interval,
+        target_tau=args.target_tau,
+        target_clip=args.target_clip,
+        freeze_encoder=args.freeze_encoder,
+        unfreeze_last_resblocks=args.unfreeze_last_resblocks,
+    )
 
 
 def _compute_gradients_for_transitions(
@@ -506,87 +527,74 @@ def _compute_gradients_for_transitions(
     """
     if not transitions:
         return None
-    
+
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if not trainable_params:
         return None
-    
-    # Convert transitions to batch tensors
-    spatial_before = torch.as_tensor(
-        np.stack([t.spatial_before for t in transitions]),
-        dtype=torch.float32,
-        device=device
+
+    batch = transitions_to_batch_tensors(transitions, device)
+    loss, _, _ = compute_value_loss_from_batch(
+        model,
+        batch,
+        cfg,
+        target_model=model,
+        detach_next=True,
     )
-    scalars_before = torch.as_tensor(
-        np.stack([t.scalars_before for t in transitions]),
-        dtype=torch.float32,
-        device=device
-    )
-    spatial_after = torch.as_tensor(
-        np.stack([t.spatial_after for t in transitions]),
-        dtype=torch.float32,
-        device=device
-    )
-    scalars_after = torch.as_tensor(
-        np.stack([t.scalars_after for t in transitions]),
-        dtype=torch.float32,
-        device=device
-    )
-    done = torch.as_tensor(
-        [bool(t.done) for t in transitions],
-        dtype=torch.float32,
-        device=device
-    )
-    winner = torch.as_tensor(
-        [int(t.winner) if t.winner is not None else -1 for t in transitions],
-        dtype=torch.int64,
-        device=device
-    )
-    acting_seat = torch.as_tensor(
-        [int(t.acting_seat) for t in transitions],
-        dtype=torch.int64,
-        device=device
-    )
-    
-    # Compute loss (same as RheaValueLearner.train_one_batch)
-    from torch.nn import functional as F
-    
-    pred_logits = model(spatial_before, scalars_before)
-    
-    with torch.no_grad():
-        next_logits = model(spatial_after, scalars_after)
-        # Detach to avoid computing gradients through target
-        next_logits = next_logits.detach()
-        
-        win_target = torch.where(
-            winner == -1,
-            torch.tensor(0.5, device=device).expand_as(winner),
-            (winner == acting_seat).float(),
-        )
-        
-        next_win_prob = torch.sigmoid(next_logits)
-        immediate_win = win_target * done
-        gamma = cfg.gamma_turn if cfg.gamma_turn is not None else 0.99
-        td_target_win = immediate_win + gamma * next_win_prob * (1.0 - done)
-        
-        if cfg.target_clip is not None:
-            c = float(cfg.target_clip)
-            td_target_win = torch.clamp(td_target_win, 0.0, 1.0)
-    
-    loss = F.binary_cross_entropy_with_logits(pred_logits, td_target_win)
-    
-    # Compute gradients
+
     model.zero_grad(set_to_none=True)
     loss.backward()
-    
-    # Collect gradients (only trainable parameters)
-    # Preserve shape — flattening breaks assignment to conv weights later
+
     grads = {}
     for name, p in model.named_parameters():
         if p.requires_grad and p.grad is not None:
             grads[name] = p.grad.detach().cpu().tolist()
-    
+
     return grads
+
+
+def _push_local_gradient_batch(
+    *,
+    value_model: AWBWValueNet,
+    local_transitions: list[RheaTransition],
+    actor_device: str,
+    learner_cfg_for_grads: RheaValueLearnerConfig,
+    local_grad_dir: str | None,
+    actor_id: int,
+    machine_id: str,
+    gradient_step: int,
+    event: str = "gradients_pushed",
+) -> tuple[int, bool]:
+    """Compute, write, and log one gradient JSON batch. Returns (new_step, pushed)."""
+    grads = _compute_gradients_for_transitions(
+        value_model,
+        local_transitions,
+        actor_device,
+        learner_cfg_for_grads,
+    )
+    if not grads:
+        return gradient_step, False
+
+    gradient_step += 1
+    num_transitions = len(local_transitions)
+    grad_path = None
+    if local_grad_dir:
+        grad_path = _write_gradients_locally(
+            actor_id,
+            grads,
+            gradient_step,
+            local_grad_dir,
+            machine_id=machine_id,
+            num_transitions=num_transitions,
+        )
+    if grad_path:
+        print(json.dumps({
+            "event": event,
+            "actor_id": actor_id,
+            "step": gradient_step,
+            "path": grad_path,
+            "num_transitions": num_transitions,
+        }), flush=True)
+    return gradient_step, True
 
 
 def _write_gradients_to_shared(
@@ -594,6 +602,8 @@ def _write_gradients_to_shared(
     grads: dict[str, list[float]],
     step_num: int,
     shared_root: str = "Z:",
+    *,
+    num_transitions: int | None = None,
 ) -> str | None:
     """Write gradient deltas to shared filesystem for main to aggregate.
     
@@ -613,6 +623,8 @@ def _write_gradients_to_shared(
             "timestamp": time.time(),
             "gradients": grads,
         }
+        if num_transitions is not None:
+            grad_data["num_transitions"] = int(num_transitions)
         
         tmp_path = grad_dir / f"grad_{step_num}_{int(time.time())}.tmp"
         final_path = grad_dir / f"grad_{step_num}_{int(time.time())}.json"
@@ -1022,7 +1034,8 @@ def _poll_gradients_for_learner(
             for name, grad_list in grad_data["gradients"].items():
                 grads_dict[name] = torch.tensor(grad_list)
             
-            results.append((fpath, machine_id, actor_id, grads_dict, timestamp))
+            num_transitions = float(grad_data.get("num_transitions", 1.0))
+            results.append((fpath, machine_id, actor_id, grads_dict, timestamp, num_transitions))
             last_poll_mtime[fpath] = mtime
             
         except Exception as e:
@@ -1041,6 +1054,8 @@ def _write_gradients_locally(
     step_num: int,
     local_dir: str,
     machine_id: str = "actor",
+    *,
+    num_transitions: int | None = None,
 ) -> str | None:
     """Write gradient deltas to local filesystem.
     
@@ -1059,6 +1074,8 @@ def _write_gradients_locally(
             "timestamp": time.time(),
             "gradients": grads,
         }
+        if num_transitions is not None:
+            grad_data["num_transitions"] = int(num_transitions)
 
         filename = _gradient_filename(machine_id, actor_id)
         final_path = grad_dir / filename
@@ -1098,20 +1115,10 @@ def _maybe_disable_cop_for_seat(co_state, disable_prob: float = 0.10) -> bool:
 
 
 def _payload_to_transition(p: dict[str, Any]) -> RheaTransition:
-    return RheaTransition(
-        spatial_before=p["spatial_before"],
-        scalars_before=p["scalars_before"],
-        reward_turn=float(p["reward_turn"]),
-        spatial_after=p["spatial_after"],
-        scalars_after=p["scalars_after"],
-        done=bool(p["done"]),
-        winner=p.get("winner"),
-        acting_seat=int(p["acting_seat"]),
-        day=int(p["day"]),
-        phi_delta=float(p["phi_delta"]),
-        value_after_at_search_time=float(p["value_after_at_search_time"]),
-        search_score=float(p["search_score"]),
-    )
+    t = payload_to_transition(p)
+    if not isinstance(t, RheaTransition):
+        raise TypeError("step transitions are not supported in turn replay buffer ingest")
+    return t
 
 
 def _poll_remote_transitions(
@@ -1441,6 +1448,8 @@ def _actor_loop(
                     reward_weight=args.reward_weight,
                     value_weight=args.value_weight,
                     build_value_weight=args.build_value_weight,
+                    buy_mode=args.buy_mode,
+                    buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
                     seed=seed,
                     use_tactical_beam=args.rhea_use_tactical_beam,
                     tactial_beam_max_width=args.rhea_tactical_beam_max_width,
@@ -1477,10 +1486,7 @@ def _actor_loop(
         # Gradient pushing accumulators (paths configured above).
         local_transitions: list[RheaTransition] = []
         gradient_step = 0
-        learner_cfg_for_grads = RheaValueLearnerConfig(
-            gamma_turn=args.gamma_turn,
-            target_clip=args.target_clip,
-        )
+        learner_cfg_for_grads = _learner_cfg_from_args(args)
 
         sync_stop_event = mp.Event()
 
@@ -1728,31 +1734,16 @@ def _actor_loop(
                             local_transitions.append(t)
                             # Compute and push gradients when batch is ready
                             if len(local_transitions) >= args.gradient_batch_size:
-                                grads = _compute_gradients_for_transitions(
-                                    value_model,
-                                    local_transitions,
-                                    actor_device,
-                                    learner_cfg_for_grads,
+                                gradient_step, _ = _push_local_gradient_batch(
+                                    value_model=value_model,
+                                    local_transitions=local_transitions,
+                                    actor_device=actor_device,
+                                    learner_cfg_for_grads=learner_cfg_for_grads,
+                                    local_grad_dir=local_grad_dir,
+                                    actor_id=actor_id,
+                                    machine_id=args.machine_id,
+                                    gradient_step=gradient_step,
                                 )
-                                if grads:
-                                    gradient_step += 1
-                                    # Write gradients locally (background thread SCPs to workhorse1)
-                                    if local_grad_dir:
-                                        grad_path = _write_gradients_locally(
-                                            actor_id,
-                                            grads,
-                                            gradient_step,
-                                            local_grad_dir,
-                                            machine_id=args.machine_id,
-                                        )
-                                    if grad_path:
-                                        print(json.dumps({
-                                            "event": "gradients_pushed",
-                                            "actor_id": actor_id,
-                                            "step": gradient_step,
-                                            "path": grad_path,
-                                            "num_transitions": len(local_transitions),
-                                        }), flush=True)
                                 local_transitions = []
                         else:
                             # Original behavior: send transition to main process
@@ -1801,6 +1792,24 @@ def _actor_loop(
                         }), flush=True)
                         _abnormal_exit_error = repr(e)
                         break  # Exit the inner while loop for this game
+
+                if (
+                    push_gradients
+                    and getattr(args, "flush_gradients_on_game_done", False)
+                    and local_transitions
+                ):
+                    gradient_step, _ = _push_local_gradient_batch(
+                        value_model=value_model,
+                        local_transitions=local_transitions,
+                        actor_device=actor_device,
+                        learner_cfg_for_grads=learner_cfg_for_grads,
+                        local_grad_dir=local_grad_dir,
+                        actor_id=actor_id,
+                        machine_id=args.machine_id,
+                        gradient_step=gradient_step,
+                        event="gradient_partial_flush",
+                    )
+                    local_transitions = []
 
                 games_done += 1
                 truncated = bool(
@@ -1927,6 +1936,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
+    ap.add_argument(
+        "--buy-mode",
+        choices=("rhea", "exhaustive"),
+        default="rhea",
+        help="Two-phase buy planner mode; legacy RHEA remains default until promotion.",
+    )
+    ap.add_argument(
+        "--buy-exhaustive-max-candidates",
+        type=int,
+        default=8192,
+        help="Candidate cap for opt-in --buy-mode exhaustive.",
+    )
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.
@@ -1948,6 +1969,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-replay-before-train", type=int, default=1_000)
     ap.add_argument("--updates-per-turn", type=int, default=1)
     ap.add_argument("--gamma-turn", type=float, default=0.99)
+    ap.add_argument(
+        "--gamma-step",
+        type=float,
+        default=0.99,
+        help="Within-turn bootstrap gamma when --use-phi-step-targets is enabled (default 0.99).",
+    )
+    ap.add_argument(
+        "--use-phi-step-targets",
+        action="store_true",
+        help="Enable bounded phi auxiliary on the win head (off by default; requires step replay later).",
+    )
+    ap.add_argument(
+        "--phi-scale",
+        type=float,
+        default=0.05,
+        help="Phi delta scale for optional step targets (default 0.05).",
+    )
+    ap.add_argument(
+        "--phi-loss-weight",
+        type=float,
+        default=0.05,
+        help="Weight for optional phi auxiliary loss (default 0.05).",
+    )
+    ap.add_argument(
+        "--use-dual-value-head",
+        action="store_true",
+        help="Reserved for dual-head value_phi; not wired yet — win TD only.",
+    )
+    ap.add_argument(
+        "--blend-win-on-turn-done",
+        type=float,
+        default=0.0,
+        help="Experimental single-head phi blend at turn_done (default 0).",
+    )
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--target-update-interval", type=int, default=1_000)
@@ -2093,6 +2148,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                            "--learner-host; learner (--machine-id learner) polls --learner-gradient-dir.")
     ap.add_argument("--gradient-batch-size", type=int, default=32,
                       help="Number of transitions to accumulate before computing and pushing gradients (default: 32)")
+    ap.add_argument(
+        "--flush-gradients-on-game-done",
+        action="store_true",
+        help="Push a partial local_transitions batch at game end (off by default).",
+    )
     ap.add_argument("--gradient-poll-interval", type=float, default=30.0,
                       help="Seconds between learner polling for gradient files (default: 30)")
 
@@ -2238,21 +2298,7 @@ def main() -> None:
         replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
 
         if not args.no_learner:
-            learner_cfg = RheaValueLearnerConfig(
-                value_lr=args.value_lr,
-                value_batch_size=args.value_batch_size,
-                replay_buffer_size=args.replay_size,
-                min_replay_before_train=args.min_replay_before_train,
-                updates_per_real_turn=args.updates_per_turn,
-                gamma_turn=args.gamma_turn,
-                gradient_clip_norm=args.grad_clip,
-                weight_decay=args.weight_decay,
-                target_update_interval=args.target_update_interval,
-                target_tau=args.target_tau,
-                target_clip=args.target_clip,
-                freeze_encoder=args.freeze_encoder,
-                unfreeze_last_resblocks=args.unfreeze_last_resblocks,
-            )
+            learner_cfg = _learner_cfg_from_args(args)
             learner = RheaValueLearner(online, target, replay, learner_cfg, device=args.device)
 
     # Save an initial refresh checkpoint so actors can load learner-format .pt.
@@ -2451,38 +2497,43 @@ def main() -> None:
                             )
                             
                             if gradient_results:
-                                # Aggregate gradients from all actors
-                                aggregated_grads: dict[str, torch.Tensor] = {}
-                                total_actors = 0
                                 file_paths_to_delete = []
                                 machine_gradient_counts: dict[str, int] = {}
                                 gradient_contributors: list[dict[str, Any]] = []
+                                weighted_contributions: list[tuple[dict[str, torch.Tensor], float]] = []
+                                total_actors = 0
+                                total_transitions_weight = 0.0
 
                                 for item in gradient_results:
-                                    if len(item) == 3:  # (actor_id, grads_dict, timestamp)
+                                    num_transitions = 1.0
+                                    if len(item) == 3:
                                         actor_id, grads_dict, timestamp = item
                                         machine_id = "unknown"
-                                    else:  # (file_path, machine_id, actor_id, grads_dict, timestamp)
-                                        file_path, machine_id, actor_id, grads_dict, timestamp = item
+                                    elif len(item) >= 6:
+                                        file_path, machine_id, actor_id, grads_dict, timestamp, num_transitions = item[:6]
                                         file_paths_to_delete.append(file_path)
+                                    else:
+                                        file_path, machine_id, actor_id, grads_dict, timestamp = item[:5]
+                                        file_paths_to_delete.append(file_path)
+
+                                    weight = float(num_transitions)
+                                    if weight <= 0.0:
+                                        weight = 1.0
+                                    weighted_contributions.append((grads_dict, weight))
+                                    total_transitions_weight += weight
 
                                     mid = str(machine_id)
                                     machine_gradient_counts[mid] = machine_gradient_counts.get(mid, 0) + 1
-                                    gradient_contributors.append(
-                                        {"machine_id": mid, "actor_id": int(actor_id)},
-                                    )
-
+                                    gradient_contributors.append({
+                                        "machine_id": mid,
+                                        "actor_id": int(actor_id),
+                                        "num_transitions": weight,
+                                    })
                                     total_actors += 1
-                                    for name, grad_tensor in grads_dict.items():
-                                        if name not in aggregated_grads:
-                                            aggregated_grads[name] = grad_tensor.clone()
-                                        else:
-                                            aggregated_grads[name] += grad_tensor
-                                
-                                # Average the gradients
-                                if total_actors > 0:
-                                    for name in aggregated_grads:
-                                        aggregated_grads[name] /= total_actors
+
+                                aggregated_grads = aggregate_weighted_gradients(weighted_contributions)
+
+                                if aggregated_grads is not None:
                                 
                                     # Adaptive learning rate: higher LR when more gradients
                                     adaptive_lr = learner_cfg.value_lr * min(2.0, 1.0 + (total_actors / 100.0))
@@ -2501,7 +2552,7 @@ def main() -> None:
                                         # Delete ALL gradient files to prevent re-processing
                                         all_files_to_delete = set()
                                         for item in gradient_results:
-                                            if len(item) == 5:
+                                            if len(item) >= 5:
                                                 all_files_to_delete.add(item[0])  # file_path
                                         if _is_learner_host(args.machine_id):
                                             for fp in all_files_to_delete:
@@ -2546,6 +2597,7 @@ def main() -> None:
                                         "machines_in_batch": machine_gradient_counts,
                                         "contributors": gradient_contributors,
                                         "non_learner_files_in_batch": non_learner_in_batch,
+                                        "total_transitions_weight": total_transitions_weight,
                                     }), flush=True)
                                     
                                     # Delete gradient files after training (learner only)
