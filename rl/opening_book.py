@@ -387,6 +387,140 @@ class TwoSidedOpeningBookManager:
         return out
 
 
+def _decode_build_flat_with_select(
+    flat_idx: int,
+    state: object,
+    legal: list,
+) -> object | None:
+    """Decode a BUILD flat at SELECT; optionally step factory SELECT first."""
+    from engine.action import Action, ActionType, get_legal_actions
+    from engine.unit import UnitType
+    from rl.env import _BUILD_OFFSET, _ENC_W, _flat_to_action
+
+    action = _flat_to_action(flat_idx, state, legal=legal)
+    if action is not None:
+        return action
+    if flat_idx < _BUILD_OFFSET:
+        return None
+
+    n_unit_types = len(UnitType)
+    flat_off = flat_idx - _BUILD_OFFSET
+    br = flat_off // (_ENC_W * n_unit_types)
+    rem = flat_off % (_ENC_W * n_unit_types)
+    bc = rem // n_unit_types
+    sel_flat = 3 + br * _ENC_W + bc
+    sel_a = _flat_to_action(sel_flat, state)
+    if sel_a is not None:
+        try:
+            state.step(sel_a, oracle_mode=True)
+        except Exception:
+            pass
+    legal_b = get_legal_actions(state)
+    action = _flat_to_action(flat_idx, state, legal=legal_b)
+    if action is not None:
+        return action
+    ut_idx = int(flat_idx - _BUILD_OFFSET) % n_unit_types
+    try:
+        ut = UnitType(ut_idx)
+    except ValueError:
+        ut = UnitType.INFANTRY
+    return Action(ActionType.BUILD, move_pos=(br, bc), unit_type=ut)
+
+
+def drain_joint_opening_book(
+    env: object,
+    mgr: "TwoSidedOpeningBookManager",
+    *,
+    max_steps: int = 10_000,
+    verbose: bool = False,
+) -> tuple[int, str | None]:
+    """Replay both seats' book lines in calendar order until exhausted or desync.
+
+    Uses ``peek_flat`` + engine step + ``commit_flat`` so micro-actions (SELECT,
+    MOVE, WAIT, BUILD, END_TURN) replay at the stage the book recorded them.
+    """
+    from engine.action import get_legal_actions
+    from rl.env import _flat_to_action, _get_action_mask, _BUILD_OFFSET
+
+    def _ctl_exhausted(ctl: OpeningBookController | None) -> bool:
+        return (
+            ctl is None
+            or not ctl.episode_enabled
+            or ctl._book is None
+            or ctl._cursor >= len(ctl._book.action_indices)
+        )
+
+    n_applied = 0
+    steps = 0
+    while (
+        getattr(env, "state", None) is not None
+        and getattr(env.state, "winner", None) is None
+        and steps < int(max_steps)
+    ):
+        steps += 1
+        if _ctl_exhausted(mgr.controllers.get(0)) and _ctl_exhausted(mgr.controllers.get(1)):
+            break
+
+        active = int(env.state.active_player)
+        ctl = mgr.controllers.get(active)
+        if _ctl_exhausted(ctl):
+            return n_applied, "book_exhausted_for_active_seat"
+
+        cal = int(getattr(env.state, "turn", 0) or 0)
+        legal = get_legal_actions(env.state)
+        mask = _get_action_mask(env.state, legal=legal)
+        flat_idx = ctl.peek_flat(calendar_turn=cal, action_mask=mask)
+        if flat_idx is None:
+            if ctl.check_strike_release(env.state):
+                continue
+            reason = ctl.desync_reason or "book_peek_none"
+            if verbose:
+                print(
+                    f"  [BOOK] seat={active} peek failed reason={reason!r} "
+                    f"cursor={ctl._cursor} day={cal}",
+                    flush=True,
+                )
+            return n_applied, str(reason)
+
+        action = _flat_to_action(flat_idx, env.state, legal=legal)
+        if action is None and flat_idx >= _BUILD_OFFSET:
+            action = _decode_build_flat_with_select(flat_idx, env.state, legal)
+
+        if action is None:
+            ctl._mark_desync("decode_none")
+            if verbose:
+                print(
+                    f"  [BOOK] seat={active} flat={flat_idx} not decodable; "
+                    f"stage={env.state.action_stage!r}",
+                    flush=True,
+                )
+            return n_applied, "decode_none"
+
+        try:
+            env.state.step(action, oracle_mode=True)
+            mgr.commit_flat(seat=active, action_idx=int(flat_idx))
+            n_applied += 1
+            if verbose:
+                print(
+                    f"  [BOOK] seat={active} flat={flat_idx} "
+                    f"type={action.action_type.name} day={cal}",
+                    flush=True,
+                )
+        except Exception as exc:
+            ctl._mark_desync("step_failed")
+            if verbose:
+                print(
+                    f"  [BOOK] seat={active} flat={flat_idx} FAILED: {exc}",
+                    flush=True,
+                )
+            return n_applied, f"step_failed:{exc!r}"
+
+    log = getattr(env, "_opening_book_log", None)
+    if isinstance(log, dict):
+        log.update(mgr.log_fields())
+    return n_applied, None
+
+
 def _parse_seats(seats: str | Iterable[int]) -> set[int]:
     if isinstance(seats, str):
         raw = seats.strip().lower()

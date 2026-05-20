@@ -25,3 +25,5 @@ sb3-contrib>=2.3.0
 tensorboard>=2.14
 psutil>=5.9
 cython>=3.0
+paramiko>=3.4
+scp>=0.14

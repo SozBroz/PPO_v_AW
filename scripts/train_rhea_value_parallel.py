@@ -16,12 +16,16 @@ They periodically refresh their value net from the learner checkpoint if it
 exists, but stale actor values are acceptable for the first parallel collector.
 
 Gradient flow (--push-gradients):
-    Actors write gradients to local dir (or SSH to workhorse1:D:/awbw/data/gradients/)
-    Learner (if machine-id == "learner") polls workhorse1:D:/awbw/data/gradients/
-    After training, learner deletes the gradient files.
+    Remote workers (--machine-id != learner): actors write gradients locally; a background
+    thread SCPs them to the learner host (--learner-gradient-dir). Another thread SCPs
+    value_rhea_latest.pt (and a historical archive) down into --local-checkpoint-dir.
+    Learner (--machine-id learner): main process polls --learner-gradient-dir on local disk,
+    aggregates gradients, saves value_rhea_latest.pt plus timestamped backups. Local actors
+    write gradients directly into the inbox and read checkpoints locally — no SCP.
 """
 
 import argparse
+import atexit
 import copy
 import dataclasses
 import json
@@ -29,6 +33,7 @@ import multiprocessing as mp
 import os
 import queue
 import random
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -113,7 +118,7 @@ import numpy as np
 import torch
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
-from rl.env import AWBWEnv
+from rl.env import AWBWEnv, SESSION_GAME_COUNTER_DB_ENV
 from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaReplayBuffer, RheaTransition
@@ -121,6 +126,16 @@ from rl.rhea_value_learner import RheaValueLearner, RheaValueLearnerConfig
 from rl.value_net import AWBWValueNet, load_value_checkpoint
 
 # ── Helper functions for gradient file naming and SSH transfer ──────────
+
+def _is_learner_host(machine_id: str) -> bool:
+    """True when this process is the central gradient aggregator."""
+    return str(machine_id).strip().lower() == "learner"
+
+
+def _is_remote_worker(machine_id: str, push_gradients: bool) -> bool:
+    """True for --push-gradients actors on a non-learner machine."""
+    return bool(push_gradients) and not _is_learner_host(machine_id)
+
 
 def _est_timestamp() -> str:
     """Return human-readable timestamp in EST timezone."""
@@ -182,38 +197,47 @@ def _ssh_scp_get(remote_path: str, local_path: str, hostname: str = "192.168.0.1
     if not _HAVE_PARAMIKO:
         print(json.dumps({"event": "ssh_scp_error", "error": "paramiko or scp not installed"}), flush=True)
         return False
+    import uuid
+    local = Path(local_path)
+    local.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = str(local.parent / f".{local.name}.{uuid.uuid4().hex}.download")
     try:
         import paramiko
         import scp
-        import tempfile
-        # Normalize remote path
         remote_path = remote_path.replace("\\", "/")
         client = paramiko.SSHClient()
         client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(hostname, username=username)
-        # Atomic write: download to tmp, then rename
-        local = Path(local_path)
-        tmp_path = str(local.parent / (local.stem + ".tmp.tmp"))
         with scp.SCPClient(client.get_transport()) as scp_client:
             scp_client.get(remote_path, tmp_path)
         client.close()
-        # Retry on Windows file-lock (WinError 32) since actors may be reading the checkpoint
-        for attempt in range(10):
+        for attempt in range(20):
             try:
                 os.replace(tmp_path, str(local))
                 return True
             except OSError as e:
-                if getattr(e, "winerror", None) == 32 and attempt < 9:
-                    import time
-                    print(json.dumps({"event": "ssh_scp_get_retry", "error": str(e), "remote": remote_path, "attempt": attempt + 1}), flush=True)
-                    time.sleep(0.5)
+                if getattr(e, "winerror", None) == 32 and attempt < 19:
+                    print(json.dumps({
+                        "event": "ssh_scp_get_retry",
+                        "error": str(e),
+                        "remote": remote_path,
+                        "local": local_path,
+                        "attempt": attempt + 1,
+                    }), flush=True)
+                    time.sleep(0.25 * (attempt + 1))
                 else:
                     raise
         return False
     except Exception as e:
         print(json.dumps({"event": "ssh_scp_get_error", "error": str(e), "remote": remote_path, "local": local_path}), flush=True)
         return False
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def _ssh_list_files(remote_dir: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> list[str]:
@@ -226,7 +250,8 @@ def _ssh_list_files(remote_dir: str, hostname: str = "192.168.0.160", username: 
         client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(hostname, username=username)
-        stdin, stdout, stderr = client.exec_command(f'dir /b "{remote_dir}" 2>NUL')
+        remote_dir_win = remote_dir.replace("/", "\\")
+        stdin, stdout, stderr = client.exec_command(f'dir /b "{remote_dir_win}" 2>NUL')
         files = [line.strip() for line in stdout.readlines() if line.strip()]
         client.close()
         return files
@@ -335,18 +360,46 @@ def _make_env(args: argparse.Namespace) -> AWBWEnv:
         )
 
 
-def _save_checkpoint(path: Path, model: AWBWValueNet, learner_cfg: RheaValueLearnerConfig, step: int) -> None:
+def _save_checkpoint(path: Path, model: AWBWValueNet, learner_cfg: RheaValueLearnerConfig | None, step: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "learner_cfg": dataclasses.asdict(learner_cfg),
-            "step": step,
-        },
-        tmp,
-    )
+    payload: dict[str, Any] = {
+        "model_state_dict": model.state_dict(),
+        "step": step,
+    }
+    if learner_cfg is not None:
+        payload["learner_cfg"] = dataclasses.asdict(learner_cfg)
+    torch.save(payload, tmp)
     os.replace(tmp, path)
+
+
+def _maybe_save_learner_checkpoints(
+    *,
+    latest_path: Path,
+    output_dir: Path,
+    model: AWBWValueNet,
+    learner_cfg: RheaValueLearnerConfig | None,
+    step: int,
+    save_every: int,
+    grad_norm: float | None,
+) -> None:
+    """Persist latest (every 10 steps) and timestamped archive on save-every boundary."""
+    if grad_norm is None:
+        return
+    if isinstance(grad_norm, float) and torch.isnan(torch.tensor(grad_norm)):
+        return
+    if step % 10 == 0:
+        _save_checkpoint(latest_path, model, learner_cfg, step)
+    if save_every > 0 and step % save_every == 0:
+        _save_checkpoint(latest_path, model, learner_cfg, step)
+        archive = output_dir / f"value_rhea_{_timestamp_str()}.pt"
+        _save_checkpoint(archive, model, learner_cfg, step)
+        print(json.dumps({
+            "event": "checkpoint_archive_saved",
+            "step": step,
+            "path": str(archive),
+        }), flush=True)
+
 
 def _timestamp_str() -> str:
     """Return a compact timestamp string for checkpoint naming."""
@@ -752,43 +805,137 @@ def _sync_checkpoint_from_shared_worker(
     username: str = "sshuser",
     remote_checkpoint_dir: str = "D:/awbw/checkpoints",
 ) -> None:
-    """Background thread that SCPs value_rhea_latest.pt from 192.168.0.160 to local dir."""
+    """Single machine-level thread: SCP value_rhea_latest.pt from learner into local_dir."""
     local_path = Path(local_dir)
     local_path.mkdir(parents=True, exist_ok=True)
     local_checkpoint = local_path / "value_rhea_latest.pt"
-    # Normalize remote path
+    local_new = local_path / "value_rhea_latest.pt.new"
     remote_checkpoint = remote_checkpoint_dir.replace("\\", "/") + "/value_rhea_latest.pt"
-    # Use .new suffix to avoid clobbering the running checkpoint
-    local_new = local_checkpoint.with_suffix(".pt.new")
-
-    last_synced_mtime = 0.0
+    last_applied_remote_mtime = 0.0
 
     while not stop_event.is_set():
         try:
-            # List remote files to check if newer checkpoint exists
             remote_files = _ssh_list_files(remote_checkpoint_dir, hostname, username)
             if "value_rhea_latest.pt" not in remote_files:
-                # No checkpoint yet from learner — sleep and retry
                 for _ in range(int(sync_interval * 10)):
                     if stop_event.is_set():
                         break
                     time.sleep(0.1)
                 continue
 
-            # Download to .new (don't touch the running .pt)
-            if _ssh_scp_get(remote_checkpoint, str(local_new), hostname, username):
-                # Signal the actor to swap checkpoints by writing a flag file
-                flag = local_checkpoint.with_suffix(".pt.flag")
-                flag.write_text("new")
-                print(json.dumps({
-                    "event": "checkpoint_synced_from_learner",
-                    "machine_id": machine_id,
-                    "remote": remote_checkpoint,
-                    "local": str(local_new),
-                }), flush=True)
+            if not _ssh_scp_get(remote_checkpoint, str(local_new), hostname, username):
+                for _ in range(int(sync_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
+                continue
+
+            new_mtime = local_new.stat().st_mtime
+            if new_mtime <= last_applied_remote_mtime and local_checkpoint.exists():
+                local_new.unlink(missing_ok=True)
+                for _ in range(int(sync_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
+                continue
+
+            for attempt in range(20):
+                try:
+                    os.replace(str(local_new), str(local_checkpoint))
+                    last_applied_remote_mtime = new_mtime
+                    print(json.dumps({
+                        "event": "checkpoint_synced_from_learner",
+                        "machine_id": machine_id,
+                        "remote": remote_checkpoint,
+                        "local": str(local_checkpoint),
+                    }), flush=True)
+                    break
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 32 and attempt < 19:
+                        time.sleep(0.25 * (attempt + 1))
+                    else:
+                        raise
         except Exception as e:
             print(json.dumps({
                 "event": "checkpoint_sync_worker_error",
+                "machine_id": machine_id,
+                "error": str(e),
+            }), flush=True)
+
+        for _ in range(int(sync_interval * 10)):
+            if stop_event.is_set():
+                break
+            time.sleep(0.1)
+
+
+def _sync_hist_checkpoint_from_learner_worker(
+    machine_id: str,
+    local_dir: str,
+    stop_event: mp.synchronize.Event,
+    sync_interval: float = 120.0,
+    hostname: str = "192.168.0.160",
+    username: str = "sshuser",
+    remote_checkpoint_dir: str = "D:/awbw/checkpoints",
+) -> None:
+    """SCP the oldest timestamped value_rhea_*.pt archive from learner for hist self-play."""
+    local_path = Path(local_dir)
+    local_path.mkdir(parents=True, exist_ok=True)
+    local_hist = local_path / "value_rhea_hist.pt"
+    remote_dir_norm = remote_checkpoint_dir.replace("\\", "/")
+    last_synced_name = ""
+
+    while not stop_event.is_set():
+        try:
+            remote_files = _ssh_list_files(remote_checkpoint_dir, hostname, username)
+            hist_names = sorted(
+                f for f in remote_files
+                if f.startswith("value_rhea_")
+                and f.endswith(".pt")
+                and "latest" not in f.lower()
+            )
+            if not hist_names:
+                for _ in range(int(sync_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
+                continue
+
+            oldest_name = hist_names[0]
+            if oldest_name == last_synced_name and local_hist.exists():
+                for _ in range(int(sync_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
+                continue
+
+            remote_hist = f"{remote_dir_norm}/{oldest_name}"
+            local_new = local_path / "value_rhea_hist.pt.new"
+            if not _ssh_scp_get(remote_hist, str(local_new), hostname, username):
+                for _ in range(int(sync_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
+                continue
+
+            for attempt in range(20):
+                try:
+                    os.replace(str(local_new), str(local_hist))
+                    last_synced_name = oldest_name
+                    print(json.dumps({
+                        "event": "hist_checkpoint_synced_from_learner",
+                        "machine_id": machine_id,
+                        "remote": remote_hist,
+                        "local": str(local_hist),
+                    }), flush=True)
+                    break
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 32 and attempt < 19:
+                        time.sleep(0.25 * (attempt + 1))
+                    else:
+                        raise
+        except Exception as e:
+            print(json.dumps({
+                "event": "hist_checkpoint_sync_worker_error",
                 "machine_id": machine_id,
                 "error": str(e),
             }), flush=True)
@@ -1177,21 +1324,74 @@ def _actor_loop(
         
         last_refresh = 0.0
 
-        # Load historical checkpoint for hist-prob games
+        # Gradient pushing state (A3C-style) — set paths before hist discovery / sync threads.
+        push_gradients = bool(getattr(args, "push_gradients", False))
+        on_learner = _is_learner_host(getattr(args, "machine_id", "actor"))
+        learner_grad_dir = getattr(args, "learner_gradient_dir", "D:/awbw/data/gradients")
+        learner_ckpt_dir = getattr(args, "learner_checkpoint_dir", "D:/awbw/checkpoints")
+        learner_host = getattr(args, "learner_host", "192.168.0.160")
+        learner_user = getattr(args, "learner_user", "sshuser")
+
+        local_grad_dir = args.local_gradient_dir
+        local_ckpt_dir = args.local_checkpoint_dir
+
+        if push_gradients:
+            if on_learner:
+                local_grad_dir = local_grad_dir or f"{learner_grad_dir}/actor-{actor_id}"
+                latest_path = Path(learner_ckpt_dir) / "value_rhea_latest.pt"
+                local_ckpt_dir = None
+                print(json.dumps({
+                    "event": "actor_learner_local_paths",
+                    "actor_id": actor_id,
+                    "grad_dir": local_grad_dir,
+                    "latest_path": str(latest_path),
+                }), flush=True)
+            else:
+                local_grad_dir = local_grad_dir or f"D:/awbw/data/gradients/actor-{actor_id}"
+                local_ckpt_dir = local_ckpt_dir or "D:/awbw/checkpoints/local_checkpoints"
+                latest_path = Path(local_ckpt_dir) / "value_rhea_latest.pt"
+                print(json.dumps({
+                    "event": "actor_using_local_checkpoint_dir",
+                    "actor_id": actor_id,
+                    "local_ckpt_dir": local_ckpt_dir,
+                    "latest_path": str(latest_path),
+                }), flush=True)
+
+        # Load historical checkpoint for hist-prob games (after local_ckpt_dir is known).
         hist_checkpoint_path = args.hist_checkpoint_path
         if args.dual_gradient_self_play and args.dual_gradient_hist_prob > 0:
             if not hist_checkpoint_path:
-                # Auto-discover: use the oldest saved timestamped checkpoint as historical
                 try:
-                    ckpt_dir = Path("checkpoints")
-                    hist_candidates = sorted(
-                        [p for p in ckpt_dir.glob("value_rhea_*.pt")
-                         if p.name not in ("value_rhea_latest.pt", "value_rhea_latest_backup.pt")],
-                        key=lambda p: p.stat().st_mtime
+                    hist_search_dirs: list[Path] = []
+                    if push_gradients and local_ckpt_dir:
+                        hist_search_dirs.append(Path(local_ckpt_dir))
+                    hist_search_dirs.append(_actor_project_root / "checkpoints")
+                    hist_fixed = (
+                        Path(local_ckpt_dir) / "value_rhea_hist.pt"
+                        if push_gradients and local_ckpt_dir
+                        else None
                     )
-                    if len(hist_candidates) >= 1:
-                        # Use the oldest checkpoint as historical opponent
-                        hist_checkpoint_path = str(hist_candidates[0])  # Oldest
+                    if hist_fixed is not None and hist_fixed.exists():
+                        hist_checkpoint_path = str(hist_fixed)
+                    else:
+                        for ckpt_dir in hist_search_dirs:
+                            if not ckpt_dir.exists():
+                                continue
+                            hist_candidates = sorted(
+                                [
+                                    p for p in ckpt_dir.glob("value_rhea_*.pt")
+                                    if p.name not in (
+                                        "value_rhea_latest.pt",
+                                        "value_rhea_latest_backup.pt",
+                                        "value_rhea_hist.pt",
+                                    )
+                                ],
+                                key=lambda p: p.stat().st_mtime,
+                            )
+                            if hist_candidates:
+                                hist_checkpoint_path = str(hist_candidates[0])
+                                break
+                    if hist_checkpoint_path:
                         print(json.dumps({
                             "event": "hist_checkpoint_auto_discovered",
                             "actor_id": actor_id,
@@ -1199,7 +1399,7 @@ def _actor_loop(
                         }), flush=True)
                 except Exception:
                     pass
-            
+
             if hist_checkpoint_path and Path(hist_checkpoint_path).exists():
                 try:
                     hist_value_model = load_value_checkpoint(hist_checkpoint_path, device=actor_device)
@@ -1274,8 +1474,7 @@ def _actor_loop(
                     "message": "dual_gradient_hist_prob > 0 but hist checkpoint not loaded; disabling hist mode",
                 }), flush=True)
 
-        # Gradient pushing state (A3C-style)
-        push_gradients = bool(getattr(args, "push_gradients", False))
+        # Gradient pushing accumulators (paths configured above).
         local_transitions: list[RheaTransition] = []
         gradient_step = 0
         learner_cfg_for_grads = RheaValueLearnerConfig(
@@ -1283,34 +1482,22 @@ def _actor_loop(
             target_clip=args.target_clip,
         )
 
-        # Background sync threads for local gradient/checkpoint optimization
         sync_stop_event = mp.Event()
-        local_grad_dir = args.local_gradient_dir
-        local_ckpt_dir = args.local_checkpoint_dir
-        
-        # If local dirs not specified but push-gradients is set, use sensible defaults
-        # Gradients go under D:/awbw/data/ (project-local), checkpoints stay under D:/awbw/checkpoints/
-        if push_gradients and local_grad_dir is None:
-            local_grad_dir = f"D:/awbw/data/gradients/actor-{actor_id}"
-        
-        if push_gradients and local_ckpt_dir is None:
-            local_ckpt_dir = "D:/awbw/checkpoints/local_checkpoints"
-        
-        # Update latest_path to use local checkpoint dir if available
-        if local_ckpt_dir:
-            latest_path = Path(local_ckpt_dir) / "value_rhea_latest.pt"
-            print(json.dumps({
-                "event": "actor_using_local_checkpoint_dir",
-                "actor_id": actor_id,
-                "local_ckpt_dir": local_ckpt_dir,
-                "latest_path": str(latest_path),
-            }), flush=True)
-        
-        # Start background threads for syncing
-        if push_gradients and local_grad_dir:
+
+        # Remote workers: per-actor gradient SCP only (checkpoint/hist sync runs in main).
+        if push_gradients and local_grad_dir and not on_learner:
             grad_sync_thread = threading.Thread(
                 target=_sync_local_gradients_to_shared_worker,
-                args=(local_grad_dir, args.machine_id, actor_id, sync_stop_event, args.gradient_sync_interval),
+                args=(
+                    local_grad_dir,
+                    args.machine_id,
+                    actor_id,
+                    sync_stop_event,
+                    args.gradient_sync_interval,
+                    learner_host,
+                    learner_user,
+                    learner_grad_dir,
+                ),
                 daemon=True,
                 name=f"grad-sync-{actor_id}",
             )
@@ -1320,39 +1507,87 @@ def _actor_loop(
                 "actor_id": actor_id,
                 "machine_id": args.machine_id,
                 "local_dir": local_grad_dir,
+                "learner_host": learner_host,
             }), flush=True)
-        
-        # Checkpoint sync disabled: no learner running yet to push checkpoints.
-        # Re-enable when a learner is pushing value_rhea_latest.pt to 192.168.0.160.
-        # if push_gradients and local_ckpt_dir:
-        #     ckpt_sync_thread = threading.Thread(
-        #         target=_sync_checkpoint_from_shared_worker,
-        #         args=(args.machine_id, local_ckpt_dir, sync_stop_event, args.checkpoint_sync_interval),
-        #         daemon=True,
-        #         name=f"ckpt-sync-{actor_id}",
-        #     )
-        #     ckpt_sync_thread.start()
-        #     print(json.dumps({
-        #         "event": "checkpoint_sync_thread_started",
-        #         "actor_id": actor_id,
-        #         "machine_id": args.machine_id,
-        #         "local_dir": local_ckpt_dir,
-        #     }), flush=True)
+
+        last_hist_mtime = 0.0
+        last_ckpt_mtime = 0.0
+        if hist_value_model is not None and hist_checkpoint_path:
+            try:
+                last_hist_mtime = Path(hist_checkpoint_path).stat().st_mtime
+            except OSError:
+                last_hist_mtime = 0.0
+        if push_gradients and local_ckpt_dir and latest_path.exists():
+            try:
+                last_ckpt_mtime = latest_path.stat().st_mtime
+            except OSError:
+                last_ckpt_mtime = 0.0
 
         while not stop_event.is_set():
             try:
-                # Checkpoint reload disabled: no sync thread running.
-                # Re-enable when checkpoint sync is re-enabled.
-                # flag = Path(local_ckpt_dir) / "value_rhea_latest.pt.flag"
-                # if flag.exists():
-                #     ... (reload logic)
+                # Shared checkpoint updated by main-process sync thread; reload on mtime change.
+                if push_gradients and local_ckpt_dir and not on_learner:
+                    shared_latest = Path(local_ckpt_dir) / "value_rhea_latest.pt"
+                    if shared_latest.exists():
+                        try:
+                            ckpt_mtime = shared_latest.stat().st_mtime
+                            if ckpt_mtime > last_ckpt_mtime:
+                                if _load_value_pt_into_model(
+                                    shared_latest, value_model, actor_device, verbose=True,
+                                ):
+                                    last_ckpt_mtime = ckpt_mtime
+                                    last_refresh = time.time()
+                                    print(json.dumps({
+                                        "event": "actor_checkpoint_reloaded",
+                                        "actor_id": actor_id,
+                                        "path": str(shared_latest),
+                                    }), flush=True)
+                        except OSError as ckpt_exc:
+                            print(json.dumps({
+                                "event": "actor_checkpoint_reload_error",
+                                "actor_id": actor_id,
+                                "error": repr(ckpt_exc),
+                            }), flush=True)
+
+                # Reload historical opponent when main-process sync delivers a new archive.
+                if (
+                    push_gradients
+                    and local_ckpt_dir
+                    and args.dual_gradient_self_play
+                    and args.dual_gradient_hist_prob > 0
+                ):
+                    hist_path = Path(local_ckpt_dir) / "value_rhea_hist.pt"
+                    if hist_path.exists():
+                        try:
+                            hist_mtime = hist_path.stat().st_mtime
+                            if hist_mtime > last_hist_mtime:
+                                hist_value_model = load_value_checkpoint(
+                                    str(hist_path), device=actor_device,
+                                )
+                                last_hist_mtime = hist_mtime
+                                local_hist_prob = args.dual_gradient_hist_prob
+                                print(json.dumps({
+                                    "event": "hist_checkpoint_reloaded",
+                                    "actor_id": actor_id,
+                                    "path": str(hist_path),
+                                }), flush=True)
+                        except Exception as hist_exc:
+                            print(json.dumps({
+                                "event": "hist_checkpoint_reload_error",
+                                "actor_id": actor_id,
+                                "error": repr(hist_exc),
+                            }), flush=True)
 
                 # Decide if this game uses historical checkpoint opponent
                 use_hist_checkpoint = random.random() < local_hist_prob
                 
-                # Periodically refresh the actor's value model from the learner
+                # Timer-based refresh for learner-local actors; remote workers use mtime above.
                 now = time.time()
-                if args.actor_refresh_seconds > 0 and now - last_refresh >= args.actor_refresh_seconds:
+                if (
+                    args.actor_refresh_seconds > 0
+                    and now - last_refresh >= args.actor_refresh_seconds
+                    and not (push_gradients and local_ckpt_dir and not on_learner)
+                ):
                     if _load_value_pt_into_model(latest_path, value_model, actor_device, verbose=True):
                         last_refresh = now
 
@@ -1395,6 +1630,7 @@ def _actor_loop(
                         _encode_into(state, acting, spatial_buf, scalars_buf)
                         before_spatial = spatial_buf.copy()
                         before_scalars = scalars_buf.copy()
+                        state_before = env.state
                         phi_before = fitness.phi(state, acting)
 
                         # Compute complexity metrics for dynamic budgeting if enabled
@@ -1456,6 +1692,21 @@ def _actor_loop(
                         phi_after = fitness.phi(after, acting)
                         reward_turn = float(phi_after - phi_before)
                         done = bool(after.winner is not None)
+
+                        try:
+                            env.record_rhea_turn(
+                                acting,
+                                state_before=state_before,
+                                phi_before=phi_before,
+                                phi_after=phi_after,
+                                terminal_done=done,
+                            )
+                        except Exception as log_turn_exc:
+                            print(json.dumps({
+                                "event": "rhea_turn_log_error",
+                                "actor_id": actor_id,
+                                "error": repr(log_turn_exc),
+                            }), flush=True)
 
                         t = RheaTransition(
                             spatial_before=before_spatial,
@@ -1552,6 +1803,27 @@ def _actor_loop(
                         break  # Exit the inner while loop for this game
 
                 games_done += 1
+                truncated = bool(
+                    env.state is not None
+                    and env.state.winner is None
+                )
+                truncation_reason = "max_env_steps" if truncated else None
+                async_mode = None
+                if args.dual_gradient_self_play:
+                    async_mode = "hist" if use_hist_checkpoint else "mirror"
+                try:
+                    env.finalize_rhea_episode(
+                        truncated=truncated,
+                        truncation_reason=truncation_reason,
+                        async_rollout_mode=async_mode,
+                    )
+                except Exception as log_game_exc:
+                    print(json.dumps({
+                        "event": "rhea_game_log_error",
+                        "actor_id": actor_id,
+                        "error": repr(log_game_exc),
+                    }), flush=True)
+
                 out_q.put(
                     {
                         "type": "game_done",
@@ -1607,9 +1879,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Machine identity
     ap.add_argument("--machine-id", type=str, default="actor",
-                      help="Machine identifier (e.g. 'pc-b', 'workhorse1', 'learner'). "
-                           "If 'learner', this machine trains on gradients from all machines. "
-                           "Gradients are written to sshuser@workhorse1:D:\\data\\gradients\\")
+                      help="Machine identifier (e.g. 'pc-b', 'workstation', 'learner'). "
+                           "Use 'learner' on the central training host; all other ids are remote workers.")
+    ap.add_argument("--learner-host", type=str, default="192.168.0.160",
+                      help="Learner SSH host for remote worker SCP (default: workhorse1)")
+    ap.add_argument("--learner-user", type=str, default="sshuser",
+                      help="Learner SSH username for remote worker SCP")
+    ap.add_argument("--learner-gradient-dir", type=str, default="D:/awbw/data/gradients",
+                      help="Directory on learner where gradient JSON files are collected")
+    ap.add_argument("--learner-checkpoint-dir", type=str, default="D:/awbw/checkpoints",
+                      help="Directory on learner where value_rhea_latest.pt is published")
 
     # Env / checkpoint.
     ap.add_argument("--checkpoint", type=str, required=True)
@@ -1810,7 +2089,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Distributed gradient pushing (A3C-style)
     ap.add_argument("--push-gradients", action="store_true",
-                      help="Enable actors to compute gradients locally and push to workhorse1:D:\\data\\gradients\\")
+                      help="Enable actors to compute gradients locally. Remote workers SCP to "
+                           "--learner-host; learner (--machine-id learner) polls --learner-gradient-dir.")
     ap.add_argument("--gradient-batch-size", type=int, default=32,
                       help="Number of transitions to accumulate before computing and pushing gradients (default: 32)")
     ap.add_argument("--gradient-poll-interval", type=float, default=30.0,
@@ -1835,8 +2115,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                       help="Directory to poll for remote transition files (default: <shared-root>/fleet/*/transitions/)")
     ap.add_argument("--poll-remote-transitions-interval", type=float, default=60.0,
                       help="Seconds between polling remote transition directories (default: 60)")
-    # Output directory is hardcoded to checkpoints/
-    # Game logs will be written to logs/games_log.jsonl
+    # Game logs: full schema rows go to logs/game_log.jsonl via env.finalize_rhea_episode.
+    # Training heartbeats still go to logs/games_log.jsonl.
 
     return ap
 
@@ -1878,6 +2158,12 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
     else:
         os.environ.pop("AWBW_PAIRWISE_ZERO_SUM_REWARD", None)
 
+    mid = getattr(args, "machine_id", None)
+    if mid is not None and str(mid).strip() and str(mid).strip().lower() != "actor":
+        os.environ["AWBW_MACHINE_ID"] = str(mid).strip()
+    else:
+        os.environ.pop("AWBW_MACHINE_ID", None)
+
     bp = getattr(args, "build_punishment", None)
     if bp is not None and float(bp) > 0.0:
         os.environ["AWBW_BUILD_PUNISHMENT"] = str(bp)
@@ -1892,6 +2178,16 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    if args.push_gradients and not _is_learner_host(args.machine_id) and not args.no_learner:
+        print(json.dumps({
+            "event": "auto_no_learner",
+            "machine_id": args.machine_id,
+            "message": "Remote worker with --push-gradients: main process will not train (actors only).",
+        }), flush=True)
+        args.no_learner = True
+
+    is_remote_worker = _is_remote_worker(args.machine_id, args.push_gradients) and args.no_learner
+
     if int(args.gpu_actors) < 0:
         raise ValueError("--gpu-actors must be >= 0")
     if int(args.gpu_actors) > int(args.n_envs):
@@ -1903,11 +2199,12 @@ def main() -> None:
     # Resolve project root: scripts/../ = D:/awbw/
     _project_root = Path(__file__).resolve().parents[1]
 
-    # Checkpoints always land under D:/awbw/checkpoints/ (project root).
-    # Gradients remain on D:/data/ (separate disk, see below).
-    output_dir = _project_root / "checkpoints"
+    # Checkpoints always land under project checkpoints/ unless this is the learner host.
+    output_dir = Path(args.learner_checkpoint_dir) if _is_learner_host(args.machine_id) else (_project_root / "checkpoints")
     latest_path = output_dir / "value_rhea_latest.pt"
     output_dir.mkdir(parents=True, exist_ok=True)
+    if _is_learner_host(args.machine_id):
+        Path(args.learner_gradient_dir).mkdir(parents=True, exist_ok=True)
     # Convert args to JSON-serializable dict (handle Path objects)
     hparams = vars(args).copy()
     for k, v in hparams.items():
@@ -1920,58 +2217,69 @@ def main() -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     game_log_path = logs_dir / "games_log.jsonl"
 
-    online = load_value_checkpoint(args.checkpoint, device=args.device)
-    target = copy.deepcopy(online)
-    replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
-
+    online: AWBWValueNet | None
+    target: AWBWValueNet | None
+    replay: RheaReplayBuffer
     learner = None
     learner_cfg = None
-    if not args.no_learner:
-        learner_cfg = RheaValueLearnerConfig(
-            value_lr=args.value_lr,
-            value_batch_size=args.value_batch_size,
-            replay_buffer_size=args.replay_size,
-            min_replay_before_train=args.min_replay_before_train,
-            updates_per_real_turn=args.updates_per_turn,
-            gamma_turn=args.gamma_turn,
-            gradient_clip_norm=args.grad_clip,
-            weight_decay=args.weight_decay,
-            target_update_interval=args.target_update_interval,
-            target_tau=args.target_tau,
-            target_clip=args.target_clip,
-            freeze_encoder=args.freeze_encoder,
-            unfreeze_last_resblocks=args.unfreeze_last_resblocks,
-        )
-        learner = RheaValueLearner(online, target, replay, learner_cfg, device=args.device)
+
+    if is_remote_worker:
+        online = None
+        target = None
+        replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
+        print(json.dumps({
+            "event": "remote_worker_main",
+            "machine_id": args.machine_id,
+            "learner_host": args.learner_host,
+        }), flush=True)
+    else:
+        online = load_value_checkpoint(args.checkpoint, device=args.device)
+        target = copy.deepcopy(online)
+        replay = RheaReplayBuffer(args.replay_size, seed=args.seed)
+
+        if not args.no_learner:
+            learner_cfg = RheaValueLearnerConfig(
+                value_lr=args.value_lr,
+                value_batch_size=args.value_batch_size,
+                replay_buffer_size=args.replay_size,
+                min_replay_before_train=args.min_replay_before_train,
+                updates_per_real_turn=args.updates_per_turn,
+                gamma_turn=args.gamma_turn,
+                gradient_clip_norm=args.grad_clip,
+                weight_decay=args.weight_decay,
+                target_update_interval=args.target_update_interval,
+                target_tau=args.target_tau,
+                target_clip=args.target_clip,
+                freeze_encoder=args.freeze_encoder,
+                unfreeze_last_resblocks=args.unfreeze_last_resblocks,
+            )
+            learner = RheaValueLearner(online, target, replay, learner_cfg, device=args.device)
 
     # Save an initial refresh checkpoint so actors can load learner-format .pt.
-    # This must be done BEFORE starting actors so they have something to load.
-    latest_path = output_dir / "value_rhea_latest.pt"
+    # Remote workers read checkpoints via SCP; learner/local hosts seed latest here.
     latest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Use a clean checkpoint for actors - copy it safely.
-    # IMPORTANT: Check if source and dest are the same file (WindowsPath equality).
-    import shutil
-    clean_checkpoint = Path(args.checkpoint) if Path(args.checkpoint).exists() else None
-    if clean_checkpoint and clean_checkpoint.exists():
-        # Resolve to absolute paths to detect same-file case.
-        abs_src = clean_checkpoint.resolve()
-        abs_dst = latest_path.resolve()
-        if abs_src == abs_dst:
-            print(json.dumps({
-                "event": "initial_checkpoint_same_file",
-                "path": str(abs_src),
-            }), flush=True)
-        else:
-            shutil.copy(abs_src, abs_dst)
-            print(json.dumps({
-                "event": "initial_checkpoint_copied",
-                "from": str(abs_src),
-                "to": str(abs_dst),
-            }), flush=True)
-    else:
-        _save_checkpoint(latest_path, online, learner_cfg if learner else None, 0)
-    print(json.dumps({"event": "initial_checkpoint_ready", "path": str(latest_path)}), flush=True)
+    if not is_remote_worker:
+        import shutil
+        clean_checkpoint = Path(args.checkpoint) if Path(args.checkpoint).exists() else None
+        if clean_checkpoint and clean_checkpoint.exists():
+            abs_src = clean_checkpoint.resolve()
+            abs_dst = latest_path.resolve()
+            if abs_src == abs_dst:
+                print(json.dumps({
+                    "event": "initial_checkpoint_same_file",
+                    "path": str(abs_src),
+                }), flush=True)
+            else:
+                shutil.copy(abs_src, abs_dst)
+                print(json.dumps({
+                    "event": "initial_checkpoint_copied",
+                    "from": str(abs_src),
+                    "to": str(abs_dst),
+                }), flush=True)
+        elif online is not None:
+            _save_checkpoint(latest_path, online, learner_cfg, 0)
+        print(json.dumps({"event": "initial_checkpoint_ready", "path": str(latest_path)}), flush=True)
 
     # Gradient aggregation state (for push-gradients mode)
     gradient_poll_interval = float(getattr(args, "gradient_poll_interval", 30.0))
@@ -1980,8 +2288,8 @@ def main() -> None:
     gradient_step = 0
     optimizer_for_gradients = None
     
-    if args.push_gradients and learner is not None:
-        # Create optimizer for applying remote gradients
+    if args.push_gradients and learner is not None and online is not None:
+        # Create optimizer for applying remote gradients (learner host only)
         params = [p for p in online.parameters() if p.requires_grad]
         optimizer_for_gradients = torch.optim.AdamW(
             params,
@@ -1992,7 +2300,19 @@ def main() -> None:
             "event": "gradient_aggregation_ready",
             "gradient_poll_interval": gradient_poll_interval,
             "machine_id": args.machine_id,
+            "gradient_dir": args.learner_gradient_dir,
         }), flush=True)
+
+    session_tmp = _project_root / ".tmp"
+    session_tmp.mkdir(parents=True, exist_ok=True)
+    fd, session_counter_db = tempfile.mkstemp(
+        prefix="awbw_rhea_session_games_",
+        suffix=".sqlite",
+        dir=str(session_tmp),
+    )
+    os.close(fd)
+    os.environ[SESSION_GAME_COUNTER_DB_ENV] = session_counter_db
+    atexit.register(lambda p=session_counter_db: Path(p).unlink(missing_ok=True))
 
     ctx = mp.get_context("spawn")
     out_q: mp.Queue = ctx.Queue(maxsize=int(args.queue_size))
@@ -2003,6 +2323,48 @@ def main() -> None:
         p = ctx.Process(target=_actor_loop, args=(actor_id, args, out_q, stop_event), daemon=True)
         p.start()
         procs.append(p)
+
+    worker_sync_stop = threading.Event()
+    worker_sync_threads: list[threading.Thread] = []
+    if is_remote_worker and args.push_gradients:
+        worker_local_ckpt_dir = args.local_checkpoint_dir or "D:/awbw/checkpoints/local_checkpoints"
+        Path(worker_local_ckpt_dir).mkdir(parents=True, exist_ok=True)
+        worker_sync_threads.append(threading.Thread(
+            target=_sync_checkpoint_from_shared_worker,
+            args=(
+                args.machine_id,
+                worker_local_ckpt_dir,
+                worker_sync_stop,
+                args.checkpoint_sync_interval,
+                args.learner_host,
+                args.learner_user,
+                args.learner_checkpoint_dir,
+            ),
+            daemon=True,
+            name="main-ckpt-sync",
+        ))
+        worker_sync_threads.append(threading.Thread(
+            target=_sync_hist_checkpoint_from_learner_worker,
+            args=(
+                args.machine_id,
+                worker_local_ckpt_dir,
+                worker_sync_stop,
+                max(args.checkpoint_sync_interval * 2, 120.0),
+                args.learner_host,
+                args.learner_user,
+                args.learner_checkpoint_dir,
+            ),
+            daemon=True,
+            name="main-hist-sync",
+        ))
+        for t in worker_sync_threads:
+            t.start()
+        print(json.dumps({
+            "event": "worker_checkpoint_sync_started",
+            "machine_id": args.machine_id,
+            "local_ckpt_dir": worker_local_ckpt_dir,
+            "learner_host": args.learner_host,
+        }), flush=True)
 
     transitions = 0
     games_done = 0
@@ -2020,7 +2382,10 @@ def main() -> None:
     remote_transitions_ingested = 0
 
     try:
-        while (gradient_step if args.push_gradients else transitions) < int(args.total_transitions):
+        while (
+            is_remote_worker
+            or (gradient_step if args.push_gradients else transitions) < int(args.total_transitions)
+        ):
             try:
                 msg = out_q.get(timeout=30.0)
             except queue.Empty:
@@ -2070,25 +2435,20 @@ def main() -> None:
                             "error": str(e),
                         }), flush=True)
 
-                # Poll for gradient files (push-gradients mode)
-                if args.push_gradients and optimizer_for_gradients is not None:
+                # Poll for gradient files (push-gradients mode, learner host only)
+                if (
+                    args.push_gradients
+                    and optimizer_for_gradients is not None
+                    and online is not None
+                    and _is_learner_host(args.machine_id)
+                ):
                     now = time.time()
                     if now - last_gradient_poll_time >= gradient_poll_interval:
                         try:
-                            # Learner (machine-id == "learner") polls local D:\data\gradients\
-                            # Workers use _poll_gradients_from_shared (Z:)
-                            if getattr(args, "machine_id", "actor") == "learner":
-                                    gradient_results, gradient_poll_mtime = _poll_gradients_for_learner(
-                                        gradient_dir="D:/awbw/data/gradients",
-                                        last_poll_mtime=gradient_poll_mtime,
-                                    )
-                            else:
-                                # Backward compatibility: workers still use _poll_gradients_from_shared
-                                # but this should not be reached in the new SCP architecture
-                                gradient_results, gradient_poll_mtime = _poll_gradients_from_shared(
-                                    shared_root="Z:",
-                                    last_poll_time=gradient_poll_mtime,
-                                )
+                            gradient_results, gradient_poll_mtime = _poll_gradients_for_learner(
+                                gradient_dir=args.learner_gradient_dir,
+                                last_poll_mtime=gradient_poll_mtime,
+                            )
                             
                             if gradient_results:
                                 # Aggregate gradients from all actors
@@ -2143,7 +2503,7 @@ def main() -> None:
                                         for item in gradient_results:
                                             if len(item) == 5:
                                                 all_files_to_delete.add(item[0])  # file_path
-                                        if getattr(args, "machine_id", "actor") == "learner":
+                                        if _is_learner_host(args.machine_id):
                                             for fp in all_files_to_delete:
                                                 try:
                                                     Path(fp).unlink()
@@ -2152,7 +2512,7 @@ def main() -> None:
                                                         "file": str(fp),
                                                         "reason": "NaN/Inf grads",
                                                     }), flush=True)
-                                                except Exception as e:
+                                                except Exception:
                                                     pass
                                         continue
                                     
@@ -2189,7 +2549,7 @@ def main() -> None:
                                     }), flush=True)
                                     
                                     # Delete gradient files after training (learner only)
-                                    if getattr(args, "machine_id", "actor") == "learner":
+                                    if _is_learner_host(args.machine_id):
                                         for fp in file_paths_to_delete:
                                             try:
                                                 Path(fp).unlink()
@@ -2200,9 +2560,15 @@ def main() -> None:
                                                     "error": str(e),
                                                 }), flush=True)
                                     
-                                    # Save checkpoint periodically (only if grad_norm is valid)
-                                    if gradient_step % 10 == 0 and grad_norm is not None and not (isinstance(grad_norm, float) and torch.isnan(torch.tensor(grad_norm))):
-                                        _save_checkpoint(latest_path, online, learner_cfg, gradient_step)
+                                    _maybe_save_learner_checkpoints(
+                                        latest_path=latest_path,
+                                        output_dir=output_dir,
+                                        model=online,
+                                        learner_cfg=learner_cfg,
+                                        step=gradient_step,
+                                        save_every=args.save_every_transitions,
+                                        grad_norm=grad_norm,
+                                    )
                         
                         except Exception as e:
                             print(json.dumps({
@@ -2297,8 +2663,10 @@ def main() -> None:
 
     finally:
         stop_event.set()
-        if learner:
-            _save_checkpoint(latest_path, online, learner_cfg, transitions)
+        worker_sync_stop.set()
+        if learner and online is not None:
+            step = gradient_step if args.push_gradients else transitions
+            _save_checkpoint(latest_path, online, learner_cfg, step)
         for p in procs:
             p.join(timeout=5.0)
             if p.is_alive():

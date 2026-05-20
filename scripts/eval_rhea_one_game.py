@@ -8,132 +8,12 @@ import random
 import time
 from pathlib import Path
 
-from rl.env import AWBWEnv, POOL_PATH, _flat_to_action, _BUILD_OFFSET, _ENC_W
-from engine.unit import UnitType as _eng_unit_type_fix
-from engine.action import ActionStage
+from rl.env import AWBWEnv, POOL_PATH
 from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions, _salvage_ender
-from engine.action import Action, ActionType, get_legal_actions
 from rl.rhea_fitness import RheaFitness
+from rl.opening_book import drain_joint_opening_book
 from rl.value_net import load_value_checkpoint
 from tools.export_awbw_replay import write_awbw_replay
-
-_N_UNIT_TYPES_BOOK = len(_eng_unit_type_fix)
-
-
-def _advance_to_select_for_book(state: object) -> None:
-    """Step through MOVE/ACTION until SELECT so opening-book flats can decode."""
-
-    guard = 0
-    while (
-        state is not None
-        and getattr(state, "winner", None) is None
-        and state.action_stage != ActionStage.SELECT
-        and guard < 500
-    ):
-        legal = get_legal_actions(state)
-        if not legal:
-            break
-        try:
-            state.step(legal[0], oracle_mode=True)
-        except Exception:
-            break
-        guard += 1
-
-
-def _drain_opening_book(env: AWBWEnv, mgr: object) -> int:
-    """Replay both seats' book lines in calendar order until exhausted or stale."""
-
-    n_applied = 0
-    stale_loops = 0
-    while env.state is not None and env.state.winner is None and stale_loops < 16:
-        c0 = mgr.controllers.get(0)
-        c1 = mgr.controllers.get(1)
-        b0_ex = (
-            c0 is None
-            or not getattr(c0, "episode_enabled", False)
-            or c0._book is None
-            or c0._cursor >= len(c0._book.action_indices)
-        )
-        b1_ex = (
-            c1 is None
-            or not getattr(c1, "episode_enabled", False)
-            or c1._book is None
-            or c1._cursor >= len(c1._book.action_indices)
-        )
-        if b0_ex and b1_ex:
-            break
-
-        active = int(env.state.active_player)
-        ctl = mgr.controllers.get(active)
-
-        if (
-            ctl is None
-            or not getattr(ctl, "episode_enabled", False)
-            or ctl._book is None
-            or ctl._cursor >= len(ctl._book.action_indices)
-        ):
-            stale_loops += 1
-            continue
-
-        stale_loops = 0
-        cursor = ctl._cursor
-        flat_idx = int(ctl._book.action_indices[cursor])
-        st = env.state
-        _advance_to_select_for_book(st)
-        if st.winner is not None:
-            break
-
-        legal = get_legal_actions(st)
-        if flat_idx == 0:
-            action = Action(ActionType.END_TURN)
-        else:
-            action = _flat_to_action(flat_idx, st, legal=legal)
-
-        # BUILD flat when decoder misses (wrong stage): SELECT factory tile, then BUILD.
-        if action is None and flat_idx >= _BUILD_OFFSET:
-            flat_off = flat_idx - _BUILD_OFFSET
-            br = flat_off // (_ENC_W * _N_UNIT_TYPES_BOOK)
-            rem = flat_off % (_ENC_W * _N_UNIT_TYPES_BOOK)
-            bc = rem // _N_UNIT_TYPES_BOOK
-            sel_flat = 3 + br * _ENC_W + bc
-            sel_a = _flat_to_action(sel_flat, st)
-            if sel_a is not None:
-                try:
-                    st.step(sel_a, oracle_mode=True)
-                except Exception:
-                    pass
-            _advance_to_select_for_book(st)
-            legal_b = get_legal_actions(st)
-            action = _flat_to_action(flat_idx, st, legal=legal_b)
-            if action is None:
-                ut_idx = int(flat_idx - _BUILD_OFFSET) % _N_UNIT_TYPES_BOOK
-                try:
-                    ut = _eng_unit_type_fix(ut_idx)
-                except ValueError:
-                    ut = _eng_unit_type_fix.INFANTRY
-                action = Action(ActionType.BUILD, move_pos=(br, bc), unit_type=ut)
-
-        if action is None:
-            print(
-                f"  [BOOK] seat={active} flat={flat_idx} cursor={cursor} "
-                f"not decodable; stage={st.action_stage!r}",
-                flush=True,
-            )
-            break
-        try:
-            st.step(action, oracle_mode=True)
-            ctl._cursor = cursor + 1
-            n_applied += 1
-            # Post-build micromanagement stays in MOVE/ACTION; next iter advances.
-            _advance_to_select_for_book(st)
-        except Exception as e:
-            print(
-                f"  [BOOK] seat={active} flat={flat_idx} FAILED: {e}",
-                flush=True,
-            )
-            break
-
-    return n_applied
 
 
 def _setup_env_vars(args: argparse.Namespace) -> None:
@@ -222,7 +102,16 @@ def main() -> None:
     parser.add_argument("--dual-gradient-hist-prob", type=float, default=0.0)
     parser.add_argument("--opening-book-path", type=str, default=None)
     parser.add_argument("--opening-book-prob", type=float, default=1.0)
-    
+    parser.add_argument(
+        "--opening-book-strike-release",
+        action="store_true",
+        help="Release opening book when a unit enters enemy strike range",
+    )
+    parser.add_argument(
+        "--opening-book-verbose",
+        action="store_true",
+        help="Log each opening-book micro-step during drain",
+    )
     args = parser.parse_args()
     
     # Setup environment variables for phi and dual-gradient features
@@ -262,16 +151,23 @@ def main() -> None:
         co_p1=args.co_p1,
         max_turns=args.max_days,
         opening_book_path=args.opening_book_path,
+        opening_book_seats="both",
         opening_book_prob=args.opening_book_prob,
+        opening_book_strike_release=bool(args.opening_book_strike_release),
     )
     env.reset()
 
-    # Drain joint opening book before RHEA (both seats alternate by calendar clock).
-    mgr = getattr(env, '_opening_book_manager', None)
+    mgr = getattr(env, "_opening_book_manager", None)
     if mgr is not None:
-        n_book = _drain_opening_book(env, mgr)
+        n_book, book_err = drain_joint_opening_book(
+            env,
+            mgr,
+            verbose=bool(args.opening_book_verbose),
+        )
         if n_book:
             print(f"  [BOOK] drained {n_book} opening indices", flush=True)
+        if book_err:
+            print(f"  [BOOK] stopped early: {book_err}", flush=True)
 
     # Collect snapshots for replay export
     snapshots = [copy.deepcopy(env.state)]

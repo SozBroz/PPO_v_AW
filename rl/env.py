@@ -1322,6 +1322,102 @@ class AWBWEnv(gym.Env):
             )
         self._async_rollout_mode = mode
 
+    def record_rhea_turn(
+        self,
+        acting_seat: int,
+        *,
+        state_before: GameState,
+        phi_before: float,
+        phi_after: float,
+        terminal_done: bool = False,
+    ) -> None:
+        """Update episode accumulators after one RHEA full-turn replay (no :meth:`step`)."""
+        if self.state is None:
+            return
+
+        self._p0_env_steps += 1
+        acting = int(acting_seat)
+        other = 1 - acting
+
+        self._maybe_record_neutral_income_snapshot_days()
+
+        if self._first_learner_capture_step is None:
+            learner = int(self._learner_seat)
+            for e in self.state.game_log:
+                if e.get("type") == "capture" and int(e.get("player", -1)) == learner:
+                    self._first_learner_capture_step = int(self._p0_env_steps)
+                    break
+
+        if self._reward_shaping_mode != "phi":
+            return
+
+        pd = float(phi_after - phi_before)
+        if hasattr(self, "_episode_reward_phi_potential_delta_cumulative"):
+            self._episode_reward_phi_potential_delta_cumulative[acting] += pd
+            self._episode_reward_phi_potential_delta_cumulative[other] -= pd
+
+        if hasattr(self, "_episode_reward_army_cumulative"):
+            comp_before = self._compute_phi_components_for_seat(state_before, acting)
+            comp_after = self._compute_phi_components_for_seat(self.state, acting)
+            d_a = float(comp_after["army"] - comp_before["army"])
+            d_p = float(comp_after["property"] - comp_before["property"])
+            d_c = float(comp_after["capture"] - comp_before["capture"])
+            d_i = float(comp_after["income"] - comp_before["income"])
+            self._episode_reward_army_cumulative[acting] += d_a
+            self._episode_reward_army_cumulative[other] -= d_a
+            self._episode_reward_property_cumulative[acting] += d_p
+            self._episode_reward_property_cumulative[other] -= d_p
+            self._episode_reward_capture_cumulative[acting] += d_c
+            self._episode_reward_capture_cumulative[other] -= d_c
+            self._episode_reward_income_cumulative[acting] += d_i
+            self._episode_reward_income_cumulative[other] -= d_i
+
+        if terminal_done and self.state.done:
+            rb = 0.0
+            reward_adj = self._apply_phi_sparse_terminal_replacement_for_seat(0.0, acting)
+            dphi = float(reward_adj - rb)
+            if hasattr(self, "_episode_reward_sparse_cumulative"):
+                self._episode_reward_sparse_cumulative[acting] += dphi
+                self._episode_reward_sparse_cumulative[other] -= dphi
+
+            pre_enemy_alive = {
+                u.unit_id: (u.unit_type, u.hp)
+                for u in state_before.units[other]
+                if u.is_alive
+            }
+            kb = float(
+                self._phi_enemy_kill_one_time_bonus_for_seat(pre_enemy_alive, acting)
+            )
+            if kb != 0.0 and hasattr(self, "_episode_reward_kill_bonus_cumulative"):
+                self._episode_reward_kill_bonus_cumulative[acting] += kb
+
+    def finalize_rhea_episode(
+        self,
+        *,
+        truncated: bool = False,
+        truncation_reason: str | None = None,
+        async_rollout_mode: str | None = None,
+    ) -> None:
+        """Write one ``logs/game_log.jsonl`` row after a RHEA self-play episode."""
+        if self.state is None:
+            return
+        if async_rollout_mode is not None:
+            self.set_async_rollout_mode(async_rollout_mode)
+        self._log_episode_truncated = bool(truncated)
+        self._log_episode_truncation_reason = truncation_reason
+        if (
+            truncated
+            and truncation_reason in ("max_env_steps", "max_p1_microsteps")
+            and self.state.winner is None
+        ):
+            learner = int(self._learner_seat)
+            p_me = int(self.state.count_properties(learner))
+            p_en = int(self.state.count_properties(1 - learner))
+            lead = p_me - p_en
+            if lead >= 1:
+                self._log_tie_breaker_property_count = lead
+        self._log_finished_game()
+
     def _get_legal(self) -> list[Action]:
         """Return cached legal actions for self.state; populate on first call.
 
