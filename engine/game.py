@@ -1340,10 +1340,14 @@ class GameState:
         # Counterattack
         if dmg is not None and dmg > 0 and defender.hp > 0 and defender.is_alive:
             # Defender becomes the counterattacker, attacker becomes the target
+            # ``calculate_counterattack(striker, counterattacker, ...)`` — striker
+            # first (the unit that moved in), counterattacker second (original
+            # defender). Do not pass (defender, attacker); that inverts the
+            # strike direction and zeros most counters (e.g. inf vs tank).
             counter_dmg = calculate_counterattack(
-                defender, attacker,  # defender counters against attacker
-                def_terrain, att_terrain,  # terrain for counterattacker, target
-                def_co, att_co,  # CO states for counterattacker, target
+                attacker, defender,
+                att_terrain, def_terrain,
+                att_co, def_co,
                 dmg,  # pass primary damage for Sonja SCOP
                 luck_rng=self.luck_rng,
             )

@@ -165,6 +165,28 @@ def _colin_atk_rider(attacker_co: COState) -> int:
     return av
 
 
+def _comm_tower_count(co: COState) -> int:
+    """Owned comm towers for this seat (refreshed each turn in ``GameState``)."""
+    return max(0, int(getattr(co, "comm_towers", 0) or 0))
+
+
+def _comm_tower_atk_rider(attacker_co: COState) -> int:
+    """Universal map bonus: +10 AV per owned Communication Tower (all COs)."""
+    return 10 * _comm_tower_count(attacker_co)
+
+
+def _javier_comm_tower_def_rider(defender_co: COState) -> int:
+    """Javier (co_id=27): +10/20/30 DV per owned tower (D2D / COP / SCOP)."""
+    if defender_co.co_id != 27:
+        return 0
+    n = _comm_tower_count(defender_co)
+    if defender_co.scop_active:
+        return 30 * n
+    if defender_co.cop_active:
+        return 20 * n
+    return 10 * n
+
+
 # ---------------------------------------------------------------------------
 # Seam damage
 # ---------------------------------------------------------------------------
@@ -224,6 +246,7 @@ def calculate_seam_damage(
             av += attacker_terrain.defense * 10
     av += _kindle_atk_rider(attacker_co, attacker_terrain)
     av += _colin_atk_rider(attacker_co)
+    av += _comm_tower_atk_rider(attacker_co)
 
     hpa_bars = attacker.display_hp
     # Defender side: Neotank at 0 defense stars, full HP, no luck applied.
@@ -418,6 +441,7 @@ def calculate_damage(
 
     # Colin (co_id=15): D2D −10 %% + SCOP "Power of Money" attack rider.
     av += _colin_atk_rider(attacker_co)
+    av += _comm_tower_atk_rider(attacker_co)
 
     # --- Luck ---
     l_val, lb_val = _resolve_attack_luck_terms(
@@ -446,6 +470,7 @@ def calculate_damage(
 
     # --- Defense Value ---
     dv = defender_co.total_def_for_unit_against(defender.unit_type, attacker.unit_type)
+    dv += _javier_comm_tower_def_rider(defender_co)
 
     # Terrain defense stars
     dtr = defender_terrain.defense
