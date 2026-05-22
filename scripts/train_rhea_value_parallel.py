@@ -15,6 +15,10 @@ This is not PPO VecEnv. The actors are independent RHEA self-play workers.
 They periodically refresh their value net from the learner checkpoint if it
 exists, but stale actor values are acceptable for the first parallel collector.
 
+Spirit-broken early termination (``engine/spirit_pressure``) defaults **on**
+(``AWBW_SPIRIT_BROKEN=1``) unless the host already set that variable or you pass
+``--no-spirit-broken``.
+
 Gradient flow (--push-gradients):
     Remote workers (--machine-id != learner): actors write gradients locally; a background
     thread SCPs them to the learner host (--learner-gradient-dir). Another thread SCPs
@@ -2044,6 +2048,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
     ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
 
+    # Spirit-broken (engine/spirit_pressure.py): default on if host left AWBW_SPIRIT_BROKEN unset.
+    ap.add_argument(
+        "--no-spirit-broken",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable spirit_broken heuristics for this run: sets AWBW_SPIRIT_BROKEN=0 "
+            "(overrides the default on when the host did not set AWBW_SPIRIT_BROKEN)."
+        ),
+    )
+
     # Build punishment.
     ap.add_argument("--build-punishment", type=float, default=0.0,
                       help="AWBW_BUILD_PUNISHMENT: non-zero penalises ending turn with owned bases but no build")
@@ -2271,6 +2286,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def _setup_env_vars(args: argparse.Namespace) -> None:
     """Set environment variables for phi capture phase weighting and other features."""
+    if bool(getattr(args, "no_spirit_broken", False)):
+        os.environ["AWBW_SPIRIT_BROKEN"] = "0"
+    elif os.environ.get("AWBW_SPIRIT_BROKEN") is None:
+        os.environ["AWBW_SPIRIT_BROKEN"] = "1"
+
     if bool(getattr(args, "phi_capture_phase_weighting", False)):
         os.environ["AWBW_PHI_CAPTURE_PHASE_WEIGHTING"] = "1"
     else:
@@ -2322,6 +2342,19 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
 def main() -> None:
     args = build_arg_parser().parse_args()
     _setup_env_vars(args)
+    print(
+        json.dumps(
+            {
+                "event": "spirit_broken_config",
+                "enabled": not bool(getattr(args, "no_spirit_broken", False))
+                and (os.environ.get("AWBW_SPIRIT_BROKEN", "") or "").strip().lower()
+                in ("1", "true", "yes", "on"),
+                "env": os.environ.get("AWBW_SPIRIT_BROKEN"),
+                "no_spirit_broken_flag": bool(getattr(args, "no_spirit_broken", False)),
+            }
+        ),
+        flush=True,
+    )
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
