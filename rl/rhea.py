@@ -34,6 +34,7 @@ Key design properties:
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 import random
 from typing import Callable, Optional
@@ -1250,6 +1251,20 @@ class RheaPlanner:
             buy_exhaustive_truncated = bool(ex_pick.truncated)
             buy_exhaustive_frontier_depth_at_cap = ex_pick.frontier_depth_at_cap
             buy_generations_used = 0
+            print(
+                json.dumps(
+                    {
+                        "event": "rhea_buy_exhaustive",
+                        "slots": len(fo),
+                        "cap": int(self.cfg.buy_exhaustive_max_candidates),
+                        "candidates_enumerated": buy_candidates_enumerated,
+                        "candidates_scored": buy_candidates_scored,
+                        "truncated": buy_exhaustive_truncated,
+                        "frontier_depth_at_cap": buy_exhaustive_frontier_depth_at_cap,
+                    }
+                ),
+                flush=True,
+            )
         else:
             try:
                 print(

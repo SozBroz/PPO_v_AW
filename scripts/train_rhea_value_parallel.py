@@ -119,6 +119,7 @@ import torch
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv, SESSION_GAME_COUNTER_DB_ENV
+from rl.opening_book import drain_joint_opening_book
 from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import (
@@ -394,22 +395,23 @@ def _maybe_save_learner_checkpoints(
     save_every: int,
     grad_norm: float | None,
 ) -> None:
-    """Persist latest (every 10 steps) and timestamped archive on save-every boundary."""
+    """Persist latest and a timestamped archive on the same cadence (every 10 steps)."""
+    _ = save_every
     if grad_norm is None:
         return
     if isinstance(grad_norm, float) and torch.isnan(torch.tensor(grad_norm)):
         return
-    if step % 10 == 0:
-        _save_checkpoint(latest_path, model, learner_cfg, step)
-    if save_every > 0 and step % save_every == 0:
-        _save_checkpoint(latest_path, model, learner_cfg, step)
-        archive = output_dir / f"value_rhea_{_timestamp_str()}.pt"
-        _save_checkpoint(archive, model, learner_cfg, step)
-        print(json.dumps({
-            "event": "checkpoint_archive_saved",
-            "step": step,
-            "path": str(archive),
-        }), flush=True)
+    if step % 10 != 0:
+        return
+    _save_checkpoint(latest_path, model, learner_cfg, step)
+    archive = output_dir / f"value_rhea_{_timestamp_str()}.pt"
+    _save_checkpoint(archive, model, learner_cfg, step)
+    print(json.dumps({
+        "event": "checkpoint_archive_saved",
+        "step": step,
+        "latest": str(latest_path),
+        "path": str(archive),
+    }), flush=True)
 
 
 def _timestamp_str() -> str:
@@ -462,24 +464,55 @@ def _load_weight_deltas(remote_dir: Path) -> list[tuple[int, dict[str, torch.Ten
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+def _cuda_recover_after_error(device: str) -> None:
+    """Best-effort reset after a poisoned CUDA context (Windows TDR / bad ckpt)."""
+    if not str(device).startswith("cuda") or not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _state_dict_has_nonfinite(sd: dict[str, torch.Tensor]) -> bool:
+    for tensor in sd.values():
+        if not torch.is_tensor(tensor):
+            continue
+        if not torch.isfinite(tensor).all():
+            return True
+    return False
+
+
 def _load_value_pt_into_model(path: Path, model: AWBWValueNet, device: str, verbose: bool = False) -> bool:
     if not path.exists():
         return False
     try:
-        ckpt = torch.load(path, map_location=device)
-        # Support both 'state_dict' and 'model_state_dict' keys for consistency
+        # Always deserialize on CPU — avoids racing SCP mid-write on GPU and
+        # keeps a bad checkpoint from wedging the device during torch.load.
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if "state_dict" in ckpt:
             sd = ckpt["state_dict"]
         elif "model_state_dict" in ckpt:
             sd = ckpt["model_state_dict"]
         else:
-            # If neither key exists, try using the entire checkpoint
             sd = ckpt
+        if not isinstance(sd, dict):
+            raise TypeError(f"checkpoint has no state_dict (got {type(sd)!r})")
+        if _state_dict_has_nonfinite(sd):
+            raise ValueError("checkpoint contains non-finite weights (NaN/Inf)")
         model.load_state_dict(sd, strict=False)
         model.to(device)
         model.eval()
+        # Drop stale GPU tensor caches tied to old weights / shapes.
+        for attr in ("_value_np_cache", "_value_batch_cache"):
+            if hasattr(model, attr):
+                delattr(model, attr)
+        if str(device).startswith("cuda"):
+            torch.cuda.synchronize()
         return True
     except Exception as exc:
+        _cuda_recover_after_error(device)
         if verbose:
             print(json.dumps({"event": "actor_refresh_failed", "path": str(path), "error": repr(exc)}), flush=True)
         return False
@@ -1599,6 +1632,26 @@ def _actor_loop(
 
                 env.reset()
                 game_turns = 0
+                mgr = getattr(env, "_opening_book_manager", None)
+                if mgr is not None:
+                    t_book0 = time.perf_counter()
+                    n_book, book_err = drain_joint_opening_book(
+                        env,
+                        mgr,
+                        verbose=bool(getattr(args, "opening_book_verbose", False)),
+                    )
+                    book_s = time.perf_counter() - t_book0
+                    if n_book or book_err:
+                        print(json.dumps({
+                            "event": "opening_book_drained",
+                            "actor_id": actor_id,
+                            "actions": int(n_book),
+                            "error": book_err,
+                            "wall_s": round(book_s, 4),
+                        }), flush=True)
+                    sync_log = getattr(env, "_sync_opening_book_log", None)
+                    if callable(sync_log):
+                        sync_log()
 
                 # 10% chance to disable COP for each seat at game start (forces SCOP learning)
                 cop_disable_p = getattr(args, "cop_disable_per_seat_p", 0.10)
@@ -1624,7 +1677,7 @@ def _actor_loop(
                         state = env.state
                         acting = int(state.active_player)
                         day = int(getattr(state, "turn", getattr(state, "day", 0)))
-                        if game_turns <= 20:
+                        if args.verbose and game_turns <= 20:
                             print(json.dumps({"event": "debug_turn", "day": day, "max_days": args.max_days, "winner": state.winner, "turn": state.turn, "game_turns": game_turns}), flush=True)
 
                         # Swap value model if using historical checkpoint opponent
@@ -1659,10 +1712,34 @@ def _actor_loop(
                         planner.dynamic_budget = args.rhea_autotune
                         planner.complexity_metrics = complexity_metrics
 
+                        t_search0 = time.perf_counter()
                         result = planner.choose_full_turn(state)
+                        search_s = time.perf_counter() - t_search0
 
                         # Replay actions on real environment.
+                        t_replay0 = time.perf_counter()
                         applied_actions, skipped_actions = replay_rhea_actions(env.state, result.actions, acting)
+                        replay_s = time.perf_counter() - t_replay0
+
+                        if game_turns <= 20:
+                            print(json.dumps({
+                                "event": "rhea_turn_timing",
+                                "actor_id": actor_id,
+                                "day": day,
+                                "max_days": args.max_days,
+                                "winner": state.winner,
+                                "turn": state.turn,
+                                "game_turns": game_turns,
+                                "search_s": round(search_s, 4),
+                                "replay_s": round(replay_s, 4),
+                                "buy_mode": getattr(result, "buy_mode_used", None),
+                                "buy_candidates_enumerated": int(getattr(result, "buy_candidates_enumerated", 0)),
+                                "buy_candidates_scored": int(getattr(result, "buy_candidates_scored", 0)),
+                                "buy_exhaustive_truncated": bool(getattr(result, "buy_exhaustive_truncated", False)),
+                                "actions_planned": len(result.actions),
+                                "actions_applied": applied_actions,
+                                "actions_skipped": skipped_actions,
+                            }), flush=True)
 
                         if skipped_actions > 0:
                             print(json.dumps({
@@ -1769,6 +1846,12 @@ def _actor_loop(
                                         "actions_applied": applied_actions,
                                         "actions_skipped": skipped_actions,
                                         "use_hist_checkpoint": use_hist_checkpoint,
+                                        "search_s": search_s,
+                                        "replay_s": replay_s,
+                                        "buy_mode": getattr(result, "buy_mode_used", None),
+                                        "buy_candidates_enumerated": int(getattr(result, "buy_candidates_enumerated", 0)),
+                                        "buy_candidates_scored": int(getattr(result, "buy_candidates_scored", 0)),
+                                        "buy_exhaustive_truncated": bool(getattr(result, "buy_exhaustive_truncated", False)),
                                     },
                                 }
                             )
@@ -1786,6 +1869,8 @@ def _actor_loop(
 
                     except Exception as e:
                         import traceback
+                        if "cuda" in repr(e).lower():
+                            _cuda_recover_after_error(actor_device)
                         print(json.dumps({
                             "event": "turn_error",
                             "actor_id": actor_id,

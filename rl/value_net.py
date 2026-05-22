@@ -75,8 +75,15 @@ def evaluate_value_np(
         }
         model._value_np_cache = cache
     buf = cache[dev]
-    buf["spatial"].copy_(torch.as_tensor(spatial, dtype=torch.float32), non_blocking=True)
-    buf["scalars"].copy_(torch.as_tensor(scalars, dtype=torch.float32), non_blocking=True)
+    non_blocking = dev.type == "cuda"
+    buf["spatial"].copy_((
+        torch.as_tensor(spatial, dtype=torch.float32)
+    ), non_blocking=non_blocking)
+    buf["scalars"].copy_((
+        torch.as_tensor(scalars, dtype=torch.float32)
+    ), non_blocking=non_blocking)
+    if non_blocking:
+        torch.cuda.current_stream(dev).synchronize()
     logit = float(model(buf["spatial"], buf["scalars"]).item())
     if return_logits:
         return logit

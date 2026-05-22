@@ -115,24 +115,22 @@ def enumerate_buy_allocations(
             return
 
         # Branch 2: each affordable unit in catalog[fac]
+        build_by_unit: dict[UnitType, Action] = {}
+        for a in legal:
+            if a.action_type != ActionType.BUILD:
+                continue
+            if a.move_pos is None or a.unit_type is None:
+                continue
+            if (int(a.move_pos[0]), int(a.move_pos[1])) != fac:
+                continue
+            build_by_unit[a.unit_type] = a
         for ut in catalog.get(fac, ()):
             cost = int(UNIT_STATS[ut].cost)
             if cost > coins:
                 continue
             sim2 = clone_for_search(sim)
             _ensure_select(sim2)
-            legal2 = get_legal_actions(sim2)
-            act: Action | None = None
-            for a in legal2:
-                if a.action_type != ActionType.BUILD:
-                    continue
-                if a.move_pos is None or a.unit_type is None:
-                    continue
-                if (int(a.move_pos[0]), int(a.move_pos[1])) != fac:
-                    continue
-                if a.unit_type == ut:
-                    act = a
-                    break
+            act = build_by_unit.get(ut)
             if act is None:
                 continue
             try:
