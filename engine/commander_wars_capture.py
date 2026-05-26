@@ -62,7 +62,8 @@ def _terrain_at(state, pos: Coord):
     return get_terrain(tid)
 
 
-def _is_capturable_property(state, player: int, pos: Coord) -> bool:
+def is_capturable_property_at(state, player: int, pos: Coord) -> bool:
+    """Income property tile where foot units may issue CAPTURE (not lab/tower)."""
     terrain = _terrain_at(state, pos)
     if not terrain.is_property:
         return False
@@ -76,6 +77,32 @@ def _is_capturable_property(state, player: int, pos: Coord) -> bool:
 
     owner = getattr(prop, "owner", None)
     return owner is None or int(owner) != int(player)
+
+
+def is_foot_capture_mandatory_tile(state, player: int, pos: Coord) -> bool:
+    """Tiles where infantry/mech must not WAIT when capture is required.
+
+    Broader than :func:`is_capturable_property_at`: also true on property
+    terrain that lacks a ``PropertyState`` row (map data gap) so the legal
+    mask still blocks idle WAIT on a city/base tile.
+    """
+    terrain = _terrain_at(state, pos)
+    if not terrain.is_property:
+        return False
+
+    prop = _property_at(state, pos)
+    if prop is None:
+        return True
+
+    if getattr(prop, "is_comm_tower", False) or getattr(prop, "is_lab", False):
+        return False
+
+    owner = getattr(prop, "owner", None)
+    return owner is None or int(owner) != int(player)
+
+
+def _is_capturable_property(state, player: int, pos: Coord) -> bool:
+    return is_capturable_property_at(state, player, pos)
 
 
 def _terrain_priority(state, pos: Coord) -> float:

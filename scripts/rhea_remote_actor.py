@@ -45,14 +45,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
-from rl.env import AWBWEnv
-from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
-from rl.rhea_fitness import RheaFitness
-from rl.rhea_replay import RheaTransition, transition_to_payload
-from rl.value_net import AWBWValueNet, load_value_checkpoint
-
-
 # ---------------------------------------------------------------------------
 # Cython auto-recompile: if any .pyx is newer than its compiled .pyd/.so,
 # rebuild the Cython extensions before importing rl.* modules.
@@ -121,9 +113,15 @@ _maybe_recompile_cython()
 
 from rl.encoder import GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS, encode_state
 from rl.env import AWBWEnv
+from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import RheaTransition, transition_to_payload
 from rl.value_net import AWBWValueNet, load_value_checkpoint
+from scripts.train_rhea_value_parallel import (
+    add_rhea_adaptive_args,
+    add_rhea_autotune_args,
+    rhea_autotune_config_from_args,
+)
 
 
 def _parse_co_list(s: str) -> list[int]:
@@ -435,7 +433,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-generations", type=int, default=10)
     ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
-    ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
+    ap.add_argument("--rhea-max-actions-per-turn", type=int, default=256)
+    ap.add_argument("--rhea-top-k-per-state", type=int, default=96)
+    add_rhea_autotune_args(ap)
     ap.add_argument(
         "--buy-mode",
         choices=("rhea", "exhaustive"),
@@ -448,6 +448,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=8192,
         help="Candidate cap for opt-in --buy-mode exhaustive.",
     )
+    add_rhea_adaptive_args(ap)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
 
@@ -477,9 +478,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # RHEA tactical beam
     ap.add_argument("--rhea-use-tactical-beam", action="store_true")
-    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=48)
-    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
-    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
+    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=96)
+    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=28)
+    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=48)
 
     # Phi capture phase weighting
     ap.add_argument("--phi-capture-phase-weighting", action="store_true")
@@ -602,11 +603,19 @@ def main() -> None:
             generations=args.rhea_generations,
             elite=args.rhea_elite,
             mutation_rate=args.rhea_mutation_rate,
+            autotune=rhea_autotune_config_from_args(args),
+            max_actions_per_turn=args.rhea_max_actions_per_turn,
             top_k_per_state=args.rhea_top_k_per_state,
             reward_weight=args.reward_weight,
             value_weight=args.value_weight,
             buy_mode=args.buy_mode,
             buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
+            adaptive_extend=args.rhea_adaptive_extend,
+            adaptive_max_extra_generations=args.rhea_adaptive_max_extra_generations,
+            adaptive_patience_generations=args.rhea_adaptive_patience_generations,
+            adaptive_min_improvement=args.rhea_adaptive_min_improvement,
+            adaptive_max_wall_s=args.rhea_adaptive_max_wall_s,
+            adaptive_hard_turn_wall_s=args.rhea_adaptive_hard_turn_wall_s,
             seed=seed,
             use_tactical_beam=args.rhea_use_tactical_beam,
             tactial_beam_max_width=args.rhea_tactical_beam_max_width,
@@ -694,7 +703,11 @@ def main() -> None:
                 planner.complexity_metrics = complexity_metrics
 
                 # Plan and execute full turn
+                t_search0 = time.perf_counter()
                 result = planner.choose_full_turn(state)
+                planner.note_turn_wall_time(time.perf_counter() - t_search0)
+                if getattr(result, "adaptive_disabled_reason", None) is None:
+                    result.adaptive_disabled_reason = planner.adaptive_disabled_reason
 
                 # Replay actions on real environment.
                 _game_abnormal_error = None

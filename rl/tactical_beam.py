@@ -28,17 +28,17 @@ except ImportError:
 class TacticalBeamConfig:
     enabled: bool = True
     min_width: int = 8
-    max_width: int = 48
+    max_width: int = 96
     min_depth: int = 3
-    max_depth: int = 14
-    max_candidates_per_expand: int = 24
-    max_finish_capture: int = 16
-    max_start_capture: int = 16
-    max_killshot: int = 20
-    max_strike: int = 20
-    max_build: int = 8
-    max_power: int = 4
-    max_position: int = 8
+    max_depth: int = 28
+    max_candidates_per_expand: int = 48
+    max_finish_capture: int = 32
+    max_start_capture: int = 32
+    max_killshot: int = 40
+    max_strike: int = 40
+    max_build: int = 16
+    max_power: int = 8
+    max_position: int = 16
     partial_phi_weight: float = 1.0
     partial_value_weight: float = 0.0
     dedupe_states: bool = True

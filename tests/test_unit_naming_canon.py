@@ -184,6 +184,17 @@ def test_zip_snapshot_awbwunit_name_matches_units_json_keys() -> None:
     assert 's:7:"Missile"' in miss
 
 
+def test_zip_snapshot_loaded_cargo_is_marked_carried() -> None:
+    """Snapshot cargo shares the carrier tile, so mark it off-board for viewers."""
+    from tools.export_awbw_replay import _serialize_unit
+
+    cargo = _serialize_unit(
+        3, 100001, UnitType.INFANTRY, 1, 1, 100, 0, 99, True, False, 1,
+        carried=True,
+    )
+    assert 's:7:"carried";s:1:"Y"' in cargo
+
+
 def test_normalize_alias_key_idempotent() -> None:
     for s in ("Md.Tank", "Md. Tank", "Mega Tank", "B-Copter", "Anti Air"):
         n = normalize_alias_key(s)

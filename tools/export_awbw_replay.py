@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from engine.co import COState, make_co_state
 from engine.game import GameState, make_initial_state
 from engine.map_loader import MapData, load_map
 from engine.unit import UnitType, UNIT_STATS
@@ -29,6 +30,65 @@ from engine.unit_naming import UnitNameSurface, from_unit_type
 from engine.terrain import TERRAIN_TABLE
 
 log = logging.getLogger(__name__)
+
+# AWBW Replay Player ``PowerProgress`` uses 90000 per star segment (not engine 9000).
+REPLAY_VIEWER_PROGRESS_PER_BAR: int = 90_000
+# Engine ``COState.power_bar`` charges 9000 funds per star (see ``engine/game.py``).
+ENGINE_POWER_BAR_PER_STAR: int = 9_000
+
+
+def co_power_for_replay_viewer(power_bar: int) -> int:
+    """Scale engine ``power_bar`` to the desktop replay viewer's ``co_power`` units."""
+    return int(power_bar) * (REPLAY_VIEWER_PROGRESS_PER_BAR // ENGINE_POWER_BAR_PER_STAR)
+
+
+def co_max_power_for_replay_viewer(cs: COState) -> Optional[int]:
+    """COP threshold for the desktop replay viewer (small star segments)."""
+    if cs.cop_stars is None:
+        return None
+    v = int(cs.cop_stars) * REPLAY_VIEWER_PROGRESS_PER_BAR
+    return v if v > 0 else None
+
+
+def co_max_spower_for_replay_viewer(cs: COState) -> Optional[int]:
+    """SCOP bar capacity for the desktop replay viewer.
+
+  ``PowerProgress`` draws ``smallBars = co_max_power / 90000`` short segments
+  and ``largeBars = co_max_spower / 90000 - smallBars`` tall segments, so the
+  total segment count must be ``scop_stars`` (e.g. Jess = 6 with 3 small + 3
+  large). Do **not** store ``(cop_stars + scop_stars) * 90000`` here — that
+  yields 9 segments for Jess and matches the common site-download cosmetic bug.
+    """
+    v = int(cs.scop_stars) * REPLAY_VIEWER_PROGRESS_PER_BAR
+    return v if v > 0 else None
+
+
+def site_co_max_spower_uses_cumulative_format(
+    co_id: int,
+    co_max_power: Optional[int],
+    co_max_spower: Optional[int],
+) -> bool:
+    """True when PHP stores ``co_max_spower`` as (COP+SCOP)*90000 (site download)."""
+    if co_max_power is None or co_max_spower is None or co_max_power <= 0:
+        return False
+    cs = make_co_state(int(co_id))
+    cop = int(cs.cop_stars or 0)
+    scop = int(cs.scop_stars)
+    per = REPLAY_VIEWER_PROGRESS_PER_BAR
+    return co_max_power == cop * per and co_max_spower == (cop + scop) * per and cop > 0
+
+
+def normalize_site_co_max_spower_for_viewer(
+    co_id: int,
+    co_max_power: Optional[int],
+    co_max_spower: Optional[int],
+) -> Optional[int]:
+    """Map site ``co_max_spower`` to the value ``PowerProgress`` expects."""
+    if co_max_spower is None:
+        return None
+    if site_co_max_spower_uses_cumulative_format(co_id, co_max_power, co_max_spower):
+        return int(co_max_spower) - int(co_max_power or 0)
+    return int(co_max_spower)
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +453,7 @@ def _serialize_unit(
     moved: bool,
     is_submerged: bool,
     game_id: int,
+    carried: bool = False,
 ) -> str:
     stats = UNIT_STATS[unit_type]
     # AWBW HP scale: 0.1–10 (e.g. 100 → 10, 55 → 5.5)
@@ -456,7 +517,7 @@ def _serialize_unit(
         ("hit_points",      _php_float(awbw_hp)),
         ("cargo1_units_id", _php_long(0)),
         ("cargo2_units_id", _php_long(0)),
-        ("carried",         _php_bool_str(False)),
+        ("carried",         _php_bool_str(carried)),
         ("games_id",        _php_long(game_id)),
         ("symbol",          _php_str(vn)),
     ]
@@ -489,34 +550,20 @@ def serialize_turn_snapshot(
         if cs.cop_active:  return "Y"
         return "N"
 
-    def _co_max(cs, cop: bool) -> Optional[int]:
-        # AWBW viewer's PowerProgress bar uses ProgressPerBar = 90000 (not 9000).
-        # co_max_power/co_max_spower must be exact multiples of 90000 so the integer
-        # division smallBars = value / 90000 yields non-zero segments, preventing
-        # the DivideByZeroException in onCOChange.
-        if cop:
-            if cs.cop_stars is None:
-                return None
-            v = cs.cop_stars * 90000
-            return v if v > 0 else None
-        total = (cs.cop_stars or 0) + cs.scop_stars
-        v2 = total * 90000
-        return v2 if v2 > 0 else None
-
     co0 = state.co_states[0]
     co1 = state.co_states[1]
 
     player_items = [
         (_php_int(0), _serialize_player(
             0, p0_id, p0_uid, "A", p0_cid, co0.co_id,
-            state.funds[0], co0.power_bar,
-            _co_max(co0, True), _co_max(co0, False),
+            state.funds[0], co_power_for_replay_viewer(co0.power_bar),
+            co_max_power_for_replay_viewer(co0), co_max_spower_for_replay_viewer(co0),
             False, _co_power_on_str(co0), game_id, 0,
         )),
         (_php_int(1), _serialize_player(
             1, p1_id, p1_uid, "B", p1_cid, co1.co_id,
-            state.funds[1], co1.power_bar,
-            _co_max(co1, True), _co_max(co1, False),
+            state.funds[1], co_power_for_replay_viewer(co1.power_bar),
+            co_max_power_for_replay_viewer(co1), co_max_spower_for_replay_viewer(co1),
             False, _co_power_on_str(co1), game_id, 1,
         )),
     ]
@@ -612,6 +659,7 @@ def serialize_turn_snapshot(
                     moved=True,
                     is_submerged=False,
                     game_id=game_id,
+                    carried=True,
                 )
                 unit_items.append((_php_int(len(unit_items)), unit_ser))
 

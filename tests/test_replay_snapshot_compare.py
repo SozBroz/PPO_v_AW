@@ -9,13 +9,18 @@ rounded value disagreed with its ceiling (e.g. 6.3 → round=6 vs ceil=7).
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
+from tools.diff_replay_zips import load_replay
 from tools.replay_snapshot_compare import (
     _php_unit_bars,
+    find_live_unit_overlaps,
     php_internal_from_snapshot_hit_points,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize(
@@ -67,3 +72,88 @@ def test_php_internal_coerce_300scale_lossy_point_one():
 
 def test_php_unit_bars_with_engine_coerces_01_to_two_bars():
     assert _php_unit_bars({"hit_points": 0.1}, engine_internal_hp=20) == 2
+
+
+def test_find_live_unit_overlaps_ignores_carried_cargo():
+    frames = [
+        {
+            "day": 1,
+            "turn": 100001,
+            "units": {
+                0: {
+                    "id": 1,
+                    "players_id": 100001,
+                    "name": "APC",
+                    "x": 2,
+                    "y": 3,
+                    "hit_points": 10.0,
+                    "carried": "N",
+                },
+                1: {
+                    "id": 2,
+                    "players_id": 100001,
+                    "name": "Infantry",
+                    "x": 2,
+                    "y": 3,
+                    "hit_points": 10.0,
+                    "carried": "Y",
+                },
+            },
+        }
+    ]
+    assert find_live_unit_overlaps(frames) == []
+
+
+def test_find_live_unit_overlaps_reports_non_cargo_stack():
+    frames = [
+        {
+            "day": 19,
+            "turn": 100002,
+            "units": {
+                0: {
+                    "id": 59,
+                    "players_id": 100001,
+                    "name": "Infantry",
+                    "x": 13,
+                    "y": 5,
+                    "hit_points": 10.0,
+                    "carried": "N",
+                },
+                1: {
+                    "id": 36,
+                    "players_id": 100002,
+                    "name": "Recon",
+                    "x": 13,
+                    "y": 5,
+                    "hit_points": 1.5,
+                    "carried": "N",
+                },
+            },
+        }
+    ]
+    overlaps = find_live_unit_overlaps(frames)
+    assert len(overlaps) == 1
+    assert overlaps[0].frame_index == 0
+    assert overlaps[0].day == 19
+    assert overlaps[0].turn == 100002
+    assert overlaps[0].x == 13
+    assert overlaps[0].y == 5
+    assert overlaps[0].units == (
+        (59, 100001, "Infantry", 10.0),
+        (36, 100002, "Recon", 1.5),
+    )
+
+
+@pytest.mark.skipif(
+    not (ROOT / "replays" / "524629.zip").is_file(),
+    reason="524629 replay fixture not present",
+)
+def test_find_live_unit_overlaps_flags_524629_first_stack():
+    overlaps = find_live_unit_overlaps(load_replay(ROOT / "replays" / "524629.zip"))
+
+    assert overlaps
+    first = overlaps[0]
+    assert first.frame_index == 32
+    assert first.day == 17
+    assert first.turn == 100001
+    assert (first.x, first.y) == (15, 10)

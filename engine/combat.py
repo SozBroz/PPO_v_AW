@@ -111,7 +111,8 @@ def get_base_damage(attacker_type: UnitType, defender_type: UnitType) -> Optiona
 # Plus, under SCOP only, +3 AV per owned urban property (HQs, bases,
 # airports, ports, cities, labs, comm towers — all entries in
 # ``GameState.properties``), which applies off-urban too. ``urban_props``
-# is refreshed each turn by ``GameState._refresh_comm_towers``.
+# is refreshed on property capture and at turn handoff by
+# ``GameState._refresh_comm_towers``.
 def _kindle_atk_rider(attacker_co: COState, attacker_terrain: TerrainInfo) -> int:
     if attacker_co.co_id != 23:
         return 0

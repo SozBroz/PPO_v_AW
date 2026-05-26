@@ -27,7 +27,11 @@ from engine.terrain import get_terrain, INF_PASSABLE
 from engine.weather import effective_move_cost
 
 import os as _os
-from engine.commander_wars_capture import advisor_capture_destinations
+from engine.commander_wars_capture import (
+    advisor_capture_destinations,
+    is_capturable_property_at,
+    is_foot_capture_mandatory_tile,
+)
 
 # Opt-in RL training: when set (see _get_move_actions), infantry/mech MOVE
 # masks are restricted to capturable enemy/neutral property tiles when any
@@ -894,12 +898,9 @@ def _get_action_actions(
     dest_tid  = state.map_data.terrain[move_pos[0]][move_pos[1]]
     dest_info = get_terrain(dest_tid)
 
-    # CAPTURE: only foot units (``UNIT_STATS.can_capture``) on an opponent or
-    # neutral income property (excludes owned tiles).
-    if dest_info.is_property and stats.can_capture:
-        prop = state.get_property_at(*move_pos)
-        if prop is not None and prop.owner != player:
-            actions.append(Action(ActionType.CAPTURE, unit_pos=unit.pos, move_pos=move_pos))
+    # CAPTURE: foot units on neutral/enemy income properties (not lab/tower).
+    if stats.can_capture and is_capturable_property_at(state, player, move_pos):
+        actions.append(Action(ActionType.CAPTURE, unit_pos=unit.pos, move_pos=move_pos))
 
     # --- Unload (transport with cargo) ---
     if stats.carry_capacity > 0 and unit.loaded_units:
@@ -956,22 +957,17 @@ def _get_action_actions(
                     target_pos=(tr, tc),
                 ))
 
-    # --- Prune WAIT when CAPTURE is available ---
-    # If CAPTURE is a legal ACTION terminator, WAIT is not. (ATTACK-only does not
-    # remove WAIT here.) Same for fresh vs mid-capture. Missile silos
-    # (is_property False) and owned buildings are untouched; if CAPTURE is
-    # not offered we leave WAIT so the unit is never deadlocked.
-    if stats.can_capture and dest_info.is_property:
-        prop_here = state.get_property_at(*move_pos)
-        if prop_here is not None and prop_here.owner != player:
-            has_capture = any(a.action_type == ActionType.CAPTURE for a in actions)
-            if has_capture:
-                pruned = [
-                    a for a in actions
-                    if a.action_type not in (ActionType.WAIT, ActionType.DIVE_HIDE)
-                ]
-                if pruned:
-                    actions = pruned
+    # --- Prune WAIT on capturable property tiles ---
+    # If CAPTURE is legal, WAIT is not. (ATTACK-only does not remove WAIT.)
+    # Same for fresh vs mid-capture. Labs, comm towers, missile silos, and
+    # owned buildings are untouched. When property terrain has no
+    # ``PropertyState`` row we still prune WAIT (mask) but do not offer
+    # CAPTURE — map data must include the property for play to proceed.
+    if stats.can_capture and is_foot_capture_mandatory_tile(state, player, move_pos):
+        actions = [
+            a for a in actions
+            if a.action_type not in (ActionType.WAIT, ActionType.DIVE_HIDE)
+        ]
 
     # --- Prune no-op WAIT for empty APCs when a better resupply tile exists ---
     # AWBW APCs resupply every adjacent allied unit at the end of WAIT (all

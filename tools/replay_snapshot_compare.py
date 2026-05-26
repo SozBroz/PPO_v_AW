@@ -23,6 +23,8 @@ Site zips use one of two shapes (both are valid AWBW exports — not gameplay bu
 from __future__ import annotations
 
 import math
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
 from engine.game import GameState
@@ -30,6 +32,66 @@ from engine.unit import UNIT_STATS
 from engine.unit_naming import UnknownUnitName, to_unit_type
 
 PairingMode = Literal["trailing", "tight"]
+
+
+@dataclass(frozen=True)
+class SnapshotUnitOverlap:
+    frame_index: int
+    day: Optional[int]
+    turn: Optional[int]
+    x: int
+    y: int
+    units: tuple[tuple[int, int, str, float], ...]
+
+
+def find_live_unit_overlaps(frames: list[dict[str, Any]]) -> list[SnapshotUnitOverlap]:
+    """Find non-cargo live PHP units sharing one board tile in snapshot frames."""
+    out: list[SnapshotUnitOverlap] = []
+    for frame_index, frame in enumerate(frames):
+        raw_units = frame.get("units") or {}
+        if isinstance(raw_units, dict):
+            unit_iter = raw_units.values()
+        elif isinstance(raw_units, list):
+            unit_iter = raw_units
+        else:
+            continue
+        by_tile: dict[tuple[int, int], list[tuple[int, int, str, float]]] = defaultdict(list)
+        for u in unit_iter:
+            if not isinstance(u, dict):
+                continue
+            if str(u.get("carried", "N")).upper() == "Y":
+                continue
+            try:
+                hp = float(u["hit_points"])
+                x = int(u["x"])
+                y = int(u["y"])
+                uid = int(u["id"])
+                pid = int(u["players_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if hp <= 0:
+                continue
+            by_tile[(x, y)].append((uid, pid, str(u.get("name", "")), hp))
+        for (x, y), units in sorted(by_tile.items()):
+            if len(units) > 1:
+                out.append(
+                    SnapshotUnitOverlap(
+                        frame_index=frame_index,
+                        day=_optional_int(frame.get("day")),
+                        turn=_optional_int(frame.get("turn")),
+                        x=x,
+                        y=y,
+                        units=tuple(units),
+                    )
+                )
+    return out
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def replay_snapshot_pairing(n_frames: int, n_envelopes: int) -> Optional[PairingMode]:

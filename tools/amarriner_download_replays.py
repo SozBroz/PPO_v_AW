@@ -56,6 +56,8 @@ from tools.amarriner_catalog_cos import catalog_row_has_both_cos
 from tools.gl_std_maps import gl_std_map_ids
 from tools.normalize_map_to_os_bm import run_normalize_map_to_os_bm
 from tools.oracle_zip_replay import replay_zip_has_action_stream
+from tools.diff_replay_zips import load_replay
+from tools.replay_snapshot_compare import find_live_unit_overlaps
 
 SECRETS = ROOT / "secrets.txt"
 CATALOG_DEFAULT = ROOT / "data" / "amarriner_gl_std_catalog.json"
@@ -355,6 +357,26 @@ def main() -> int:
             else:
                 dest.write_bytes(raw)
                 has_stream = replay_zip_has_action_stream(dest, games_id=gid)
+                overlaps = find_live_unit_overlaps(load_replay(dest))
+                if overlaps:
+                    first = overlaps[0]
+                    msg = (
+                        "live non-cargo units overlap in PHP snapshots "
+                        f"(count={len(overlaps)}, first_frame={first.frame_index}, "
+                        f"day={first.day}, turn={first.turn}, tile=({first.x},{first.y}), "
+                        f"units={first.units!r})"
+                    )
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    fail += 1
+                    rec = {"games_id": gid, "error": f"snapshot_live_unit_overlap: {msg}", "ts": ts}
+                    print(f"[download] FAIL games_id={gid} {msg}")
+                    if manifest_f:
+                        manifest_f.write(json.dumps(rec) + "\n")
+                        manifest_f.flush()
+                    continue
                 if not has_stream:
                     rv1 += 1
                     msg = (

@@ -37,12 +37,17 @@ import multiprocessing as mp
 import os
 import queue
 import random
+import sys
 import tempfile
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # SSH/SCP for gradient transfer to workhorse1
 try:
@@ -124,7 +129,7 @@ import torch
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
 from rl.env import AWBWEnv, SESSION_GAME_COUNTER_DB_ENV
 from rl.opening_book import drain_joint_opening_book
-from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions
+from rl.rhea import RheaAutotuneConfig, RheaConfig, RheaPlanner, replay_rhea_actions
 from rl.rhea_fitness import RheaFitness
 from rl.rhea_replay import (
     RheaReplayBuffer,
@@ -163,6 +168,11 @@ def _est_timestamp() -> str:
 def _gradient_filename(machine_id: str, actor_id: int) -> str:
     """Generate gradient filename: <machine-id>_<actor-id>_<EST-timestamp>.json"""
     return f"{machine_id}_{actor_id}_{_est_timestamp()}.json"
+
+
+def _latest_seat_for_hist_game() -> int:
+    """Pick which seat runs the current value net in a hist matchup (50/50)."""
+    return random.randint(0, 1)
 
 
 def _ssh_scp_put(local_path: str, remote_path: str, hostname: str = "192.168.0.160", username: str = "sshuser") -> bool:
@@ -1481,12 +1491,20 @@ def _actor_loop(
                     generations=args.rhea_generations,
                     elite=args.rhea_elite,
                     mutation_rate=args.rhea_mutation_rate,
+                    autotune=rhea_autotune_config_from_args(args),
+                    max_actions_per_turn=args.rhea_max_actions_per_turn,
                     top_k_per_state=args.rhea_top_k_per_state,
                     reward_weight=args.reward_weight,
                     value_weight=args.value_weight,
                     build_value_weight=args.build_value_weight,
                     buy_mode=args.buy_mode,
                     buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
+                    adaptive_extend=args.rhea_adaptive_extend,
+                    adaptive_max_extra_generations=args.rhea_adaptive_max_extra_generations,
+                    adaptive_patience_generations=args.rhea_adaptive_patience_generations,
+                    adaptive_min_improvement=args.rhea_adaptive_min_improvement,
+                    adaptive_max_wall_s=args.rhea_adaptive_max_wall_s,
+                    adaptive_hard_turn_wall_s=args.rhea_adaptive_hard_turn_wall_s,
                     seed=seed,
                     use_tactical_beam=args.rhea_use_tactical_beam,
                     tactial_beam_max_width=args.rhea_tactical_beam_max_width,
@@ -1623,7 +1641,10 @@ def _actor_loop(
 
                 # Decide if this game uses historical checkpoint opponent
                 use_hist_checkpoint = random.random() < local_hist_prob
-                
+                latest_seat: int | None = (
+                    _latest_seat_for_hist_game() if use_hist_checkpoint else None
+                )
+
                 # Timer-based refresh for learner-local actors; remote workers use mtime above.
                 now = time.time()
                 if (
@@ -1685,9 +1706,14 @@ def _actor_loop(
                             print(json.dumps({"event": "debug_turn", "day": day, "max_days": args.max_days, "winner": state.winner, "turn": state.turn, "game_turns": game_turns}), flush=True)
 
                         # Swap value model if using historical checkpoint opponent
-                        if use_hist_checkpoint and hist_value_model is not None:
-                            # Use hist_value_model for opponent (seat 1 - enemy), current model for self (seat 0)
-                            fitness.value_model = hist_value_model if acting == 1 else value_model
+                        if (
+                            use_hist_checkpoint
+                            and hist_value_model is not None
+                            and latest_seat is not None
+                        ):
+                            fitness.value_model = (
+                                value_model if acting == latest_seat else hist_value_model
+                            )
 
                         # Encode before state using pre-allocated buffers
                         _encode_into(state, acting, spatial_buf, scalars_buf)
@@ -1719,6 +1745,9 @@ def _actor_loop(
                         t_search0 = time.perf_counter()
                         result = planner.choose_full_turn(state)
                         search_s = time.perf_counter() - t_search0
+                        planner.note_turn_wall_time(search_s)
+                        if getattr(result, "adaptive_disabled_reason", None) is None:
+                            result.adaptive_disabled_reason = planner.adaptive_disabled_reason
 
                         # Replay actions on real environment.
                         t_replay0 = time.perf_counter()
@@ -1740,6 +1769,12 @@ def _actor_loop(
                                 "buy_candidates_enumerated": int(getattr(result, "buy_candidates_enumerated", 0)),
                                 "buy_candidates_scored": int(getattr(result, "buy_candidates_scored", 0)),
                                 "buy_exhaustive_truncated": bool(getattr(result, "buy_exhaustive_truncated", False)),
+                                "move_generations_floor": int(getattr(result, "move_generations_floor", 0)),
+                                "move_generations_used": int(getattr(result, "move_generations_used", 0)),
+                                "adaptive_extra_generations_used": int(getattr(result, "adaptive_extra_generations_used", 0)),
+                                "adaptive_stop_reason": getattr(result, "adaptive_stop_reason", None),
+                                "adaptive_disabled_reason": getattr(result, "adaptive_disabled_reason", None),
+                                "adaptive_best_improvement": getattr(result, "adaptive_best_improvement", None),
                                 "actions_planned": len(result.actions),
                                 "actions_applied": applied_actions,
                                 "actions_skipped": skipped_actions,
@@ -1934,6 +1969,7 @@ def _actor_loop(
                         "games_done": games_done,
                         "transitions_sent": transitions_sent,
                         "use_hist_checkpoint": use_hist_checkpoint,
+                        "latest_seat": latest_seat,
                         "dual_gradient_self_play": args.dual_gradient_self_play,
                         "abnormal_termination": _abnormal_exit_error is not None,
                         "termination_error": _abnormal_exit_error,
@@ -2027,7 +2063,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-generations", type=int, default=10)
     ap.add_argument("--rhea-elite", type=int, default=8)
     ap.add_argument("--rhea-mutation-rate", type=float, default=0.20)
-    ap.add_argument("--rhea-top-k-per-state", type=int, default=48)
+    ap.add_argument("--rhea-max-actions-per-turn", type=int, default=256)
+    ap.add_argument("--rhea-top-k-per-state", type=int, default=96)
+    add_rhea_autotune_args(ap)
     ap.add_argument(
         "--buy-mode",
         choices=("rhea", "exhaustive"),
@@ -2040,13 +2078,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=8192,
         help="Candidate cap for opt-in --buy-mode exhaustive.",
     )
+    add_rhea_adaptive_args(ap)
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.
     ap.add_argument("--rhea-use-tactical-beam", action="store_true")
-    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=48)
-    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=14)
-    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=24)
+    ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=96)
+    ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=28)
+    ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=48)
 
     # Spirit-broken (engine/spirit_pressure.py): default on if host left AWBW_SPIRIT_BROKEN unset.
     ap.add_argument(
@@ -2282,6 +2321,93 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Training heartbeats still go to logs/games_log.jsonl.
 
     return ap
+
+
+def add_rhea_autotune_args(ap: argparse.ArgumentParser) -> None:
+    """Expose the dynamic move-search formula used by ``--rhea-autotune``."""
+    ap.add_argument("--rhea-autotune-owned-unit-weight", type=float, default=1.0)
+    ap.add_argument("--rhea-autotune-factory-weight", type=float, default=1.5)
+    ap.add_argument("--rhea-autotune-contested-capture-weight", type=float, default=2.0)
+    ap.add_argument("--rhea-autotune-contact-weight", type=float, default=0.5)
+    ap.add_argument("--rhea-autotune-juicy-attack-weight", type=float, default=0.0)
+    ap.add_argument("--rhea-autotune-pop-base", type=float, default=12.0)
+    ap.add_argument("--rhea-autotune-pop-scale", type=float, default=1.5)
+    ap.add_argument("--rhea-autotune-pop-min", type=int, default=24)
+    ap.add_argument("--rhea-autotune-pop-max", type=int, default=96)
+    ap.add_argument("--rhea-autotune-gen-base", type=float, default=3.0)
+    ap.add_argument("--rhea-autotune-gen-scale", type=float, default=1.0 / 6.0)
+    ap.add_argument("--rhea-autotune-gen-min", type=int, default=5)
+    ap.add_argument("--rhea-autotune-gen-max", type=int, default=12)
+
+
+def add_rhea_adaptive_args(ap: argparse.ArgumentParser) -> None:
+    """Expose bounded adaptive extension for move-phase RHEA."""
+    ap.add_argument(
+        "--rhea-adaptive-extend",
+        action="store_true",
+        help="Allow bounded extra move generations when RHEA is still improving.",
+    )
+    ap.add_argument("--rhea-adaptive-max-extra-generations", type=int, default=0)
+    ap.add_argument("--rhea-adaptive-patience-generations", type=int, default=1)
+    ap.add_argument("--rhea-adaptive-min-improvement", type=float, default=0.0025)
+    ap.add_argument(
+        "--rhea-adaptive-max-wall-s",
+        type=float,
+        default=None,
+        help="Soft wall for adaptive extra move search; floor generations still run.",
+    )
+    ap.add_argument(
+        "--rhea-adaptive-hard-turn-wall-s",
+        type=float,
+        default=900.0,
+        help="Hard per-turn RHEA wall; disables adaptive extension after breach.",
+    )
+
+
+def rhea_autotune_config_from_args(args: argparse.Namespace) -> RheaAutotuneConfig:
+    return RheaAutotuneConfig(
+        owned_unit_weight=args.rhea_autotune_owned_unit_weight,
+        factory_weight=args.rhea_autotune_factory_weight,
+        contested_capture_weight=args.rhea_autotune_contested_capture_weight,
+        contact_weight=args.rhea_autotune_contact_weight,
+        juicy_attack_weight=args.rhea_autotune_juicy_attack_weight,
+        pop_base=args.rhea_autotune_pop_base,
+        pop_complexity_scale=args.rhea_autotune_pop_scale,
+        pop_min=args.rhea_autotune_pop_min,
+        pop_max=args.rhea_autotune_pop_max,
+        gen_base=args.rhea_autotune_gen_base,
+        gen_complexity_scale=args.rhea_autotune_gen_scale,
+        gen_min=args.rhea_autotune_gen_min,
+        gen_max=args.rhea_autotune_gen_max,
+    )
+
+
+def rhea_autotune_config_from_mapping(data: dict[str, Any]) -> RheaAutotuneConfig:
+    """Build autotune config from JSON using CLI-style or dataclass field names."""
+    alias = {
+        "rhea_autotune_owned_unit_weight": "owned_unit_weight",
+        "rhea_autotune_factory_weight": "factory_weight",
+        "rhea_autotune_contested_capture_weight": "contested_capture_weight",
+        "rhea_autotune_contact_weight": "contact_weight",
+        "rhea_autotune_juicy_attack_weight": "juicy_attack_weight",
+        "rhea_autotune_pop_base": "pop_base",
+        "rhea_autotune_pop_scale": "pop_complexity_scale",
+        "rhea_autotune_pop_min": "pop_min",
+        "rhea_autotune_pop_max": "pop_max",
+        "rhea_autotune_gen_base": "gen_base",
+        "rhea_autotune_gen_scale": "gen_complexity_scale",
+        "rhea_autotune_gen_min": "gen_min",
+        "rhea_autotune_gen_max": "gen_max",
+    }
+    kwargs: dict[str, Any] = {}
+    defaults = RheaAutotuneConfig()
+    for field_name in dataclasses.asdict(defaults):
+        if field_name in data:
+            kwargs[field_name] = data[field_name]
+    for src, dst in alias.items():
+        if src in data:
+            kwargs[dst] = data[src]
+    return RheaAutotuneConfig(**kwargs)
 
 
 def _setup_env_vars(args: argparse.Namespace) -> None:

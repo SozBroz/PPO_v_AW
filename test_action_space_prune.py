@@ -258,6 +258,18 @@ class TestWaitPruningOnProperty(unittest.TestCase):
         self.assertIs(st.selected_unit, inf)
         self.assertEqual(prop.capture_points, cap_before)
 
+    def test_wait_pruned_on_property_terrain_without_property_state(self) -> None:
+        """Property terrain without a PropertyState row: mask blocks WAIT anyway."""
+        terrain = [[PLAIN] * 5 for _ in range(5)]
+        terrain[2][2] = NEUTRAL_CITY
+        st = _fresh_state(terrain, [])
+        inf = _make_unit(st, UnitType.INFANTRY, 0, (2, 3))
+
+        _select_and_move(st, inf, (2, 2))
+        types = {a.action_type for a in get_legal_actions(st)}
+        self.assertNotIn(ActionType.WAIT, types)
+        self.assertNotIn(ActionType.CAPTURE, types)
+
     def test_step_accepts_wait_on_partially_capped_city(self) -> None:
         """Phase 10M: same STEP-GATE contract as ``test_step_accepts_hand_crafted_wait_on_neutral_city``."""
         terrain = [[PLAIN] * 5 for _ in range(5)]

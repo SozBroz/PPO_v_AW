@@ -21,8 +21,8 @@ dynamically-regenerated candidate list.  Illegal genes are **soft-failed**
 entire genome.
 
 Key design properties:
-  - No ``max_actions_per_turn`` — the genome is naturally bounded by the number
-    of unmoved units + owned factories.
+  - ``max_actions_per_turn`` caps unit intents per turn (default 256, 2× legacy
+    128). The unit segment is padded to cover every unmoved unit at pool build.
   - Builds are separated from unit actions, so they never pollute the
     SELECT-stage candidate pool.
   - CO power activation is a separate phase so Eagle-style SCOP interleaving
@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from dataclasses import dataclass, field
 import random
+import time
 from typing import Callable, Optional
 
 from engine.action import (
@@ -420,6 +422,25 @@ def _collect_buy_catalog(
     return ordered, catalog
 
 
+@dataclass(slots=True)
+class RheaAutotuneConfig:
+    """Elastic move-search budget formula for ``--rhea-autotune``."""
+
+    owned_unit_weight: float = 1.0
+    factory_weight: float = 1.5
+    contested_capture_weight: float = 2.0
+    contact_weight: float = 0.5
+    juicy_attack_weight: float = 0.0
+    pop_base: float = 12.0
+    pop_complexity_scale: float = 1.5
+    pop_min: int = 24
+    pop_max: int = 96
+    gen_base: float = 3.0
+    gen_complexity_scale: float = 1.0 / 6.0
+    gen_min: int = 5
+    gen_max: int = 12
+
+
 def dynamic_buy_budget(
     num_factories: int,
     avg_affordable_unit_types: float,
@@ -436,6 +457,8 @@ def dynamic_rhea_budget(
     factories: int,
     contested_captures: int,
     enemy_in_range_contacts: int,
+    juicy_attacks: int | RheaAutotuneConfig = 0,
+    config: RheaAutotuneConfig | None = None,
 ) -> tuple[int, int]:
     """
     Compute dynamic RHEA search budget based on game state complexity.
@@ -443,18 +466,27 @@ def dynamic_rhea_budget(
     Returns: (population, generations) — no max_actions_per_turn, the genome
     is self-sizing from the number of unmoved units + factories.
     """
+    if isinstance(juicy_attacks, RheaAutotuneConfig) and config is None:
+        config = juicy_attacks
+        juicy_attacks = 0
+    cfg = config or RheaAutotuneConfig()
     complexity = (
-        owned_units
-        + 1.5 * factories
-        + 2.0 * contested_captures
-        + 0.5 * enemy_in_range_contacts
+        float(cfg.owned_unit_weight) * float(owned_units)
+        + float(cfg.factory_weight) * float(factories)
+        + float(cfg.contested_capture_weight) * float(contested_captures)
+        + float(cfg.contact_weight) * float(enemy_in_range_contacts)
+        + float(cfg.juicy_attack_weight) * float(juicy_attacks)
     )
 
-    pop = int(12 + 1.5 * complexity)
-    gen = int(3 + complexity / 6)
+    pop = int(float(cfg.pop_base) + float(cfg.pop_complexity_scale) * complexity)
+    gen = int(float(cfg.gen_base) + float(cfg.gen_complexity_scale) * complexity)
 
-    pop = max(24, min(pop, 96))
-    gen = max(5, min(gen, 12))
+    pop_min = int(cfg.pop_min)
+    pop_max = max(pop_min, int(cfg.pop_max))
+    gen_min = int(cfg.gen_min)
+    gen_max = max(gen_min, int(cfg.gen_max))
+    pop = max(pop_min, min(pop, pop_max))
+    gen = max(gen_min, min(gen, gen_max))
 
     return pop, gen
 
@@ -470,9 +502,10 @@ class RheaConfig:
     generations: int = 10
     elite: int = 8
     mutation_rate: float = 0.20
-    # max_actions_per_turn removed — genome is now self-sizing based on
-    # unmoved units + factories in the before-state.
-    top_k_per_state: int = 48
+    autotune: RheaAutotuneConfig = field(default_factory=RheaAutotuneConfig)
+    # Upper bound on unit intents simulated per turn (2× legacy 128).
+    max_actions_per_turn: int = 256
+    top_k_per_state: int = 96
     reward_weight: float = 0.90
     value_weight: float = 0.10
     build_value_weight: float = 20.0  # unused when two-phase buy RHEA is on
@@ -502,13 +535,19 @@ class RheaConfig:
     buy_bank_credit_per_1k: float = 0.01
     buy_mode: str = "rhea"  # "rhea" | "exhaustive" (opt-in)
     buy_exhaustive_max_candidates: int = 8192
+    adaptive_extend: bool = False
+    adaptive_max_extra_generations: int = 0
+    adaptive_patience_generations: int = 1
+    adaptive_min_improvement: float = 0.0025
+    adaptive_max_wall_s: Optional[float] = None
+    adaptive_hard_turn_wall_s: float = 900.0
     log_initial_best: bool = True
     seed: Optional[int] = None
     # Tactical beam config (unchanged)
     use_tactical_beam: bool = False
-    tactial_beam_max_width: int = 48
-    tactial_beam_max_depth: int = 14
-    tactial_beam_max_expand: int = 24
+    tactial_beam_max_width: int = 96
+    tactial_beam_max_depth: int = 28
+    tactial_beam_max_expand: int = 48
 
 
 @dataclass(slots=True)
@@ -530,6 +569,64 @@ class RheaResult:
     buy_exhaustive_truncated: bool = False
     buy_mode_used: str = "rhea"
     buy_exhaustive_frontier_depth_at_cap: int | None = None
+    move_generations_floor: int = 0
+    move_generations_used: int = 0
+    adaptive_stop_reason: str | None = None
+    adaptive_extra_generations_used: int = 0
+    adaptive_disabled_reason: str | None = None
+    adaptive_best_improvement: float | None = None
+
+
+def _update_adaptive_progress(
+    *,
+    current_best: float,
+    best_score_seen: float | None,
+    stale_generations: int,
+    min_improvement: float,
+) -> tuple[float, int]:
+    if best_score_seen is None:
+        return float(current_best), 0
+    if float(current_best) - float(best_score_seen) >= float(min_improvement):
+        return float(current_best), 0
+    return float(best_score_seen), int(stale_generations) + 1
+
+
+def _adaptive_stop_after_generation(
+    *,
+    generation_done: int,
+    floor_generations: int,
+    max_extra_generations: int,
+    stale_generations: int,
+    patience_generations: int,
+) -> str | None:
+    if int(generation_done) < int(floor_generations):
+        return None
+    if int(max_extra_generations) <= 0:
+        return None
+    if int(stale_generations) >= max(1, int(patience_generations)):
+        return "patience"
+    if int(generation_done) >= int(floor_generations) + int(max_extra_generations):
+        return "extra_cap"
+    return None
+
+
+def _adaptive_wall_stop_reason(
+    *,
+    elapsed_s: float,
+    generation_index: int,
+    floor_generations: int,
+    soft_wall_s: float | None,
+    hard_wall_s: float,
+) -> str | None:
+    if float(hard_wall_s) > 0.0 and float(elapsed_s) >= float(hard_wall_s):
+        return "hard_wall"
+    if (
+        int(generation_index) >= int(floor_generations)
+        and soft_wall_s is not None
+        and float(elapsed_s) >= float(soft_wall_s)
+    ):
+        return "soft_wall"
+    return None
 
 
 ReplayStepCallback = Callable[
@@ -769,6 +866,7 @@ class RheaPlanner:
         self.rng = random.Random(config.seed)
         self.dynamic_budget = dynamic_budget
         self.complexity_metrics = complexity_metrics
+        self.adaptive_disabled_reason: str | None = None
         # Tactical beam planner (unchanged)
         if config.use_tactical_beam:
             self.tactical_beam = TacticalBeamPlanner(
@@ -783,12 +881,18 @@ class RheaPlanner:
         else:
             self.tactical_beam = None
 
+    def note_turn_wall_time(self, wall_s: float) -> None:
+        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
+        if hard_wall_s <= 0.0 or float(wall_s) < hard_wall_s:
+            return
+        self.adaptive_disabled_reason = "turn_wall_900s"
+
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
     def choose_full_turn(self, state: GameState) -> RheaResult:
-        if bool(self.cfg.two_phase_buy_rhea and not self.cfg.use_tactical_beam):
+        if bool(self.cfg.two_phase_buy_rhea):
             return self._choose_full_turn_two_phase(state)
         return self._choose_full_turn_monolithic(state)
 
@@ -814,11 +918,15 @@ class RheaPlanner:
         generations = self.cfg.generations
 
         if self.dynamic_budget and self.complexity_metrics is not None:
-            owned_units, factories, contested_captures, enemy_in_range_contacts = (
-                self.complexity_metrics
-            )
+            owned_units, factories, contested_captures, enemy_in_range_contacts = self.complexity_metrics[:4]
+            juicy_attacks = self.complexity_metrics[4] if len(self.complexity_metrics) > 4 else 0
             pop, gen = dynamic_rhea_budget(
-                owned_units, factories, contested_captures, enemy_in_range_contacts
+                owned_units,
+                factories,
+                contested_captures,
+                enemy_in_range_contacts,
+                juicy_attacks,
+                self.cfg.autotune,
             )
             population_size = pop
             generations = gen
@@ -831,15 +939,13 @@ class RheaPlanner:
             self._random_genome(action_pool) for _ in range(population_size)
         ]
 
-        # Seed a fraction of the initial population with capture-biased and
-        # attack-biased intents to give evolution a useful starting signal.
         if action_pool.unit_options:
-            _n_seeded = max(1, population_size // 4)
-            for _i_seed in range(_n_seeded):
-                genome = self._random_genome(action_pool)
-                self._bias_genome_toward_capture_attack(genome, action_pool)
-                self._bias_genome_toward_expensive_builds(genome, action_pool)
-                population[_i_seed] = genome
+            self._seed_initial_population_biases(
+                population,
+                action_pool,
+                include_build_bias=True,
+                make_genome=self._random_genome,
+            )
 
         print(f"  [RHEA] pop={population_size} gen={generations} "
               f"combos={population_size * generations} "
@@ -931,7 +1037,7 @@ class RheaPlanner:
             while len(next_pop) < population_size:
                 p1 = copy.deepcopy(self.rng.choice(elites)[1])
                 p2 = copy.deepcopy(self.rng.choice(elites)[1])
-                child = self._crossover(p1, p2)
+                child = self._crossover(p1, p2, action_pool)
                 self._mutate(child, action_pool)
                 next_pop.append(child)
 
@@ -1012,12 +1118,15 @@ class RheaPlanner:
         population_size = self.cfg.population
         generations = self.cfg.generations
         if self.dynamic_budget and self.complexity_metrics is not None:
-            owned_units, factories, contested_caps, contacts = self.complexity_metrics
+            owned_units, factories, contested_caps, contacts = self.complexity_metrics[:4]
+            juicy_attacks = self.complexity_metrics[4] if len(self.complexity_metrics) > 4 else 0
             population_size, generations = dynamic_rhea_budget(
                 owned_units,
                 factories,
                 contested_caps,
                 contacts,
+                juicy_attacks,
+                self.cfg.autotune,
             )
 
         pool = ActionPool.build(before)
@@ -1025,11 +1134,12 @@ class RheaPlanner:
             self._random_move_only_genome(pool) for _ in range(population_size)
         ]
         if pool.unit_options:
-            n_seed = max(1, population_size // 4)
-            for i_s in range(n_seed):
-                g0 = self._random_move_only_genome(pool)
-                self._bias_genome_toward_capture_attack(g0, pool)
-                population[i_s] = g0
+            self._seed_initial_population_biases(
+                population,
+                pool,
+                include_build_bias=False,
+                make_genome=self._random_move_only_genome,
+            )
 
         try:
             print(
@@ -1067,6 +1177,7 @@ class RheaPlanner:
         vw = float(self.fitness.value_weight)
         igen_pen = float(self.fitness.illegal_gene_penalty)
 
+        adaptive_best_improvement: float | None = None
         move_track_best: tuple[float, RheaGenome] | None = None
         init_move_best: float | None = None
 
@@ -1074,7 +1185,45 @@ class RheaPlanner:
         v_before = float(self.fitness.value(before, acting_seat))
         fac_block_pp = float(self.cfg.buy_base_skip_penalty)
 
-        for mv_gen in range(generations):
+        move_wall_start = time.perf_counter()
+        move_generations_floor = int(generations)
+        move_generations_used = 0
+        adaptive_extra_used = 0
+        adaptive_stop_reason = "floor_complete"
+        adaptive_hard_reason: str | None = None
+        best_score_seen: float | None = None
+        stale_generations = 0
+        max_extra_generations = (
+            max(0, int(self.cfg.adaptive_max_extra_generations))
+            if bool(self.cfg.adaptive_extend) and self.adaptive_disabled_reason is None
+            else 0
+        )
+        patience_generations = max(1, int(self.cfg.adaptive_patience_generations))
+        min_improvement = max(0.0, float(self.cfg.adaptive_min_improvement))
+        soft_wall_s = self.cfg.adaptive_max_wall_s
+        soft_wall_s = (
+            float(soft_wall_s)
+            if soft_wall_s is not None and float(soft_wall_s) > 0.0
+            else None
+        )
+        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
+        max_move_generations = move_generations_floor + max_extra_generations
+        mv_gen = 0
+        while mv_gen < max_move_generations:
+            elapsed_s = time.perf_counter() - move_wall_start
+            wall_stop_reason = _adaptive_wall_stop_reason(
+                elapsed_s=elapsed_s,
+                generation_index=mv_gen,
+                floor_generations=move_generations_floor,
+                soft_wall_s=soft_wall_s,
+                hard_wall_s=hard_wall_s,
+            )
+            if wall_stop_reason is not None:
+                adaptive_stop_reason = wall_stop_reason
+                if wall_stop_reason == "hard_wall":
+                    adaptive_hard_reason = "turn_wall_900s"
+                    self.adaptive_disabled_reason = adaptive_hard_reason
+                break
             states_after: list[GameState] = []
             ill_moves: list[int] = []
 
@@ -1101,25 +1250,48 @@ class RheaPlanner:
 
             scored_mv.sort(key=lambda x: x[0], reverse=True)
 
+            current_best = float(scored_mv[0][0])
             if mv_gen == 0:
-                init_move_best = float(scored_mv[0][0])
-            if move_track_best is None or scored_mv[0][0] > move_track_best[0]:
-                move_track_best = (float(scored_mv[0][0]), copy.deepcopy(scored_mv[0][1]))
+                init_move_best = current_best
+            if move_track_best is None or current_best > move_track_best[0]:
+                move_track_best = (current_best, copy.deepcopy(scored_mv[0][1]))
+            if init_move_best is not None:
+                adaptive_best_improvement = float(move_track_best[0]) - float(init_move_best)
 
-            if mv_gen == generations - 1 or (mv_gen % 3 == 0 and generations > 3):
+            best_score_seen, stale_generations = _update_adaptive_progress(
+                current_best=current_best,
+                best_score_seen=best_score_seen,
+                stale_generations=stale_generations,
+                min_improvement=min_improvement,
+            )
+
+            move_generations_used = mv_gen + 1
+
+            if mv_gen == max_move_generations - 1 or (mv_gen % 3 == 0 and max_move_generations > 3):
                 try:
                     print(
-                        f"  [RHEA/2phi] MOVE gen={mv_gen + 1}/{generations} "
-                        f"best={scored_mv[0][0]:+.4f}",
+                        f"  [RHEA/2phi] MOVE gen={mv_gen + 1}/{max_move_generations} "
+                        f"best={current_best:+.4f}",
                         flush=True,
                     )
                 except UnicodeEncodeError:
                     # Fallback to ASCII representation
                     print(
-                        f"  [RHEA/2phi] MOVE gen={mv_gen + 1}/{generations} "
-                        f"best={scored_mv[0][0]:+.4f}",
+                        f"  [RHEA/2phi] MOVE gen={mv_gen + 1}/{max_move_generations} "
+                        f"best={current_best:+.4f}",
                         flush=True,
                     )
+
+            gen_stop_reason = _adaptive_stop_after_generation(
+                generation_done=mv_gen + 1,
+                floor_generations=move_generations_floor,
+                max_extra_generations=max_extra_generations,
+                stale_generations=stale_generations,
+                patience_generations=patience_generations,
+            )
+            if gen_stop_reason is not None:
+                adaptive_stop_reason = gen_stop_reason
+                break
 
             elites_mv = scored_mv[: max(1, self.cfg.elite)]
             next_mv: list[RheaGenome] = []
@@ -1129,11 +1301,14 @@ class RheaPlanner:
             while len(next_mv) < population_size:
                 p1 = copy.deepcopy(self.rng.choice(elites_mv)[1])
                 p2 = copy.deepcopy(self.rng.choice(elites_mv)[1])
-                child = self._crossover_move_only(p1, p2)
+                child = self._crossover_move_only(p1, p2, pool)
                 self._mutate_move_phase_genome(child, pool)
                 next_mv.append(child)
 
             population = next_mv
+            mv_gen += 1
+
+        adaptive_extra_used = max(0, move_generations_used - move_generations_floor)
 
         mv_genome_best = (
             population[0]
@@ -1188,7 +1363,7 @@ class RheaPlanner:
                 score=float(score_tot),
                 breakdown=bd,
                 illegal_genes=int(ig_tot),
-                generations=generations + buy_gen_sz,
+                generations=move_generations_used + buy_gen_sz,
                 initial_best_score=init_move_best,
                 evolved_gain=(
                     float(score_tot) - float(init_move_best)
@@ -1196,7 +1371,13 @@ class RheaPlanner:
                 ),
                 genome=mv_genome_best,
                 population_used=population_size,
-                generations_used=generations + buy_gen_sz,
+                generations_used=move_generations_used + buy_gen_sz,
+                move_generations_floor=move_generations_floor,
+                move_generations_used=move_generations_used,
+                adaptive_stop_reason=adaptive_stop_reason,
+                adaptive_extra_generations_used=adaptive_extra_used,
+                adaptive_disabled_reason=adaptive_hard_reason or self.adaptive_disabled_reason,
+                adaptive_best_improvement=adaptive_best_improvement,
                 buy_mode_used=str(self.cfg.buy_mode),
                 n_move_actions=len(move_actions),
                 n_buy_actions=0,
@@ -1472,7 +1653,7 @@ class RheaPlanner:
             score=float(score_total),
             breakdown=bd,
             illegal_genes=int(ig_tot),
-            generations=generations + buy_generations_used,
+            generations=move_generations_used + buy_generations_used,
             initial_best_score=init_move_best,
             evolved_gain=(
                 float(score_total) - float(init_move_best)
@@ -1481,12 +1662,18 @@ class RheaPlanner:
             ),
             genome=mv_genome_best,
             population_used=population_size,
-            generations_used=generations + buy_generations_used,
+            generations_used=move_generations_used + buy_generations_used,
             buy_candidates_enumerated=buy_candidates_enumerated,
             buy_candidates_scored=buy_candidates_scored,
             buy_exhaustive_truncated=buy_exhaustive_truncated,
             buy_mode_used=buy_mode_used,
             buy_exhaustive_frontier_depth_at_cap=buy_exhaustive_frontier_depth_at_cap,
+            move_generations_floor=move_generations_floor,
+            move_generations_used=move_generations_used,
+            adaptive_stop_reason=adaptive_stop_reason,
+            adaptive_extra_generations_used=adaptive_extra_used,
+            adaptive_disabled_reason=adaptive_hard_reason or self.adaptive_disabled_reason,
+            adaptive_best_improvement=adaptive_best_improvement,
             n_move_actions=len(move_actions),
             n_buy_actions=len(exec_buy_act),
         )
@@ -1649,6 +1836,37 @@ class RheaPlanner:
     # Genome operations
     # ------------------------------------------------------------------
 
+    def _unit_intent_cap(self) -> int:
+        return max(1, int(self.cfg.max_actions_per_turn))
+
+    def _ensure_unit_segment_covers_pool(
+        self, genome: RheaGenome, pool: ActionPool
+    ) -> None:
+        """One intent per unmoved unit at turn start (crossover-safe)."""
+        cap = self._unit_intent_cap()
+        if not pool.unmoved_positions:
+            genome.unit_segment = []
+            return
+
+        by_pos: dict[tuple[int, int], UnitIntent] = {}
+        for intent in genome.unit_segment:
+            by_pos[intent.unit_pos] = intent
+
+        ordered: list[UnitIntent] = []
+        for upos in pool.unmoved_positions:
+            if upos in by_pos:
+                ordered.append(by_pos[upos])
+                continue
+            opts = pool.unit_options.get(upos) or []
+            if not opts:
+                continue
+            waits = [o for o in opts if o.action_type == ActionType.WAIT]
+            ordered.append(
+                self.rng.choice(waits) if waits else self.rng.choice(opts)
+            )
+
+        genome.unit_segment = ordered[:cap]
+
     def _random_genome(self, pool: ActionPool) -> RheaGenome:
         """Generate a random genome from the action pool.
 
@@ -1680,11 +1898,13 @@ class RheaPlanner:
                 )
             )
 
-        return RheaGenome(
+        genome = RheaGenome(
             cop_activate=cop_activate,
             unit_segment=unit_segment,
             build_segment=build_segment,
         )
+        self._ensure_unit_segment_covers_pool(genome, pool)
+        return genome
 
     def _random_move_only_genome(self, pool: ActionPool) -> RheaGenome:
         """Move-phase genome with no build genes (Purchase RHEA runs later)."""
@@ -1698,29 +1918,134 @@ class RheaPlanner:
                 continue
             unit_segment.append(self.rng.choice(opts))
 
-        return RheaGenome(cop_activate=cop_activate, unit_segment=unit_segment, build_segment=[])
+        genome = RheaGenome(
+            cop_activate=cop_activate, unit_segment=unit_segment, build_segment=[]
+        )
+        self._ensure_unit_segment_covers_pool(genome, pool)
+        return genome
 
-    def _bias_genome_toward_capture_attack(self, genome: RheaGenome, pool: ActionPool) -> None:
-        """Mutate unit intents in-place toward captures and attacks.
+    _CAPTURE_BIAS_PROB = 0.85
+    _ATTACK_BIAS_PROB = 0.85
 
-        Scans every unit in the genome; for each, if the pool offers an
-        intent with ``action_type in (CAPTURE, ATTACK)`` for the same unit,
-        flip the intent to that option with high probability.
-        """
+    @staticmethod
+    def _count_units_with_capture_options(pool: ActionPool) -> int:
+        return sum(
+            1
+            for opts in pool.unit_options.values()
+            if any(o.action_type == ActionType.CAPTURE for o in opts)
+        )
+
+    @staticmethod
+    def _count_units_with_attack_options(pool: ActionPool) -> int:
+        return sum(
+            1
+            for opts in pool.unit_options.values()
+            if any(
+                o.action_type == ActionType.ATTACK and o.move_dest != o.unit_pos
+                for o in opts
+            )
+        )
+
+    @staticmethod
+    def _compute_initial_seed_counts(
+        num_capture_units: int,
+        num_attack_units: int,
+        seed_budget: int,
+    ) -> tuple[int, int]:
+        """Return (capture_seeded_genomes, attack_seeded_genomes) within *seed_budget*."""
+        if seed_budget <= 0:
+            return 0, 0
+        capture_seeds = (
+            math.ceil(math.sqrt(num_capture_units)) if num_capture_units > 0 else 0
+        )
+        attack_seeds = (
+            math.ceil(math.sqrt(num_attack_units)) if num_attack_units > 0 else 0
+        )
+        has_both = num_capture_units > 0 and num_attack_units > 0
+
+        if has_both and seed_budget >= 2:
+            capture_seeds = max(1, capture_seeds)
+            attack_seeds = max(1, attack_seeds)
+        elif num_capture_units > 0 and num_attack_units == 0:
+            attack_seeds = 0
+            capture_seeds = min(max(capture_seeds, 1), seed_budget)
+            return capture_seeds, 0
+        elif num_attack_units > 0 and num_capture_units == 0:
+            capture_seeds = 0
+            attack_seeds = min(max(attack_seeds, 1), seed_budget)
+            return 0, attack_seeds
+        else:
+            return 0, 0
+
+        min_capture = 1 if has_both and seed_budget >= 2 else 0
+        min_attack = 1 if has_both and seed_budget >= 2 else 0
+        total = capture_seeds + attack_seeds
+        while total > seed_budget:
+            if capture_seeds > attack_seeds and capture_seeds > min_capture:
+                capture_seeds -= 1
+            elif attack_seeds > min_attack:
+                attack_seeds -= 1
+            elif capture_seeds > min_capture:
+                capture_seeds -= 1
+            else:
+                break
+            total = capture_seeds + attack_seeds
+        return capture_seeds, attack_seeds
+
+    def _seed_initial_population_biases(
+        self,
+        population: list[RheaGenome],
+        pool: ActionPool,
+        *,
+        include_build_bias: bool,
+        make_genome: Callable[[ActionPool], RheaGenome],
+    ) -> None:
+        """Replace the first seeded slots with capture- and attack-biased archetypes."""
+        seed_budget = max(1, len(population) // 4)
+        num_capture = self._count_units_with_capture_options(pool)
+        num_attack = self._count_units_with_attack_options(pool)
+        capture_seeds, attack_seeds = self._compute_initial_seed_counts(
+            num_capture, num_attack, seed_budget,
+        )
+        seed_idx = 0
+        for _ in range(capture_seeds):
+            genome = make_genome(pool)
+            self._bias_genome_toward_capture(genome, pool)
+            if include_build_bias:
+                self._bias_genome_toward_expensive_builds(genome, pool)
+            population[seed_idx] = genome
+            seed_idx += 1
+        for _ in range(attack_seeds):
+            genome = make_genome(pool)
+            self._bias_genome_toward_attack(genome, pool)
+            if include_build_bias:
+                self._bias_genome_toward_expensive_builds(genome, pool)
+            population[seed_idx] = genome
+            seed_idx += 1
+
+    def _bias_genome_toward_capture(self, genome: RheaGenome, pool: ActionPool) -> None:
+        """Mutate unit intents in-place toward CAPTURE only."""
         for i, intent in enumerate(genome.unit_segment):
             opts = pool.unit_options.get(intent.unit_pos)
             if not opts:
                 continue
-            juicy: list[UnitIntent] = [
-                o for o in opts
-                if o.action_type in (ActionType.CAPTURE, ActionType.ATTACK,
-                                     ActionType.JOIN)
-                and o.move_dest != intent.unit_pos  # not just WAIT
+            captures = [o for o in opts if o.action_type == ActionType.CAPTURE]
+            if captures and self.rng.random() < self._CAPTURE_BIAS_PROB:
+                genome.unit_segment[i] = self.rng.choice(captures)
+
+    def _bias_genome_toward_attack(self, genome: RheaGenome, pool: ActionPool) -> None:
+        """Mutate unit intents in-place toward ATTACK only (not JOIN)."""
+        for i, intent in enumerate(genome.unit_segment):
+            opts = pool.unit_options.get(intent.unit_pos)
+            if not opts:
+                continue
+            attacks = [
+                o
+                for o in opts
+                if o.action_type == ActionType.ATTACK and o.move_dest != intent.unit_pos
             ]
-            if juicy:
-                # 50 % chance to replace with a capture or attack.
-                if self.rng.random() < 0.5:
-                    genome.unit_segment[i] = self.rng.choice(juicy)
+            if attacks and self.rng.random() < self._ATTACK_BIAS_PROB:
+                genome.unit_segment[i] = self.rng.choice(attacks)
 
     def _bias_genome_toward_expensive_builds(self, genome: RheaGenome, pool: ActionPool) -> None:
         """Mutate build segment in-place toward higher-value units.
@@ -1740,7 +2065,7 @@ class RheaPlanner:
                 best = [bi for bi in opts if UNIT_STATS[bi.unit_type].cost == max_cost]
                 genome.build_segment[i] = self.rng.choice(best)
 
-    def _crossover(self, a: RheaGenome, b: RheaGenome) -> RheaGenome:
+    def _crossover(self, a: RheaGenome, b: RheaGenome, pool: ActionPool) -> RheaGenome:
         def _sp_cut(seq_a: list, seq_b: list) -> list:
             if not seq_a or not seq_b:
                 return list(seq_a or seq_b)
@@ -1752,20 +2077,25 @@ class RheaPlanner:
             unit_segment=_sp_cut(a.unit_segment, b.unit_segment),
             build_segment=self._crossover_builds(a.build_segment, b.build_segment),
         )
+        self._ensure_unit_segment_covers_pool(child, pool)
         return child
 
-    def _crossover_move_only(self, a: RheaGenome, b: RheaGenome) -> RheaGenome:
+    def _crossover_move_only(
+        self, a: RheaGenome, b: RheaGenome, pool: ActionPool
+    ) -> RheaGenome:
         def _sp_cut(seq_a: list, seq_b: list) -> list:
             if not seq_a or not seq_b:
                 return list(seq_a or seq_b)
             cut = self.rng.randrange(0, min(len(seq_a), len(seq_b)) + 1)
             return list(seq_a[:cut]) + list(seq_b[cut:])
 
-        return RheaGenome(
+        child = RheaGenome(
             cop_activate=a.cop_activate if self.rng.random() < 0.5 else b.cop_activate,
             unit_segment=_sp_cut(a.unit_segment, b.unit_segment),
             build_segment=[],
         )
+        self._ensure_unit_segment_covers_pool(child, pool)
+        return child
 
     @staticmethod
     def _crossover_builds(
@@ -1814,6 +2144,8 @@ class RheaPlanner:
         if len(genome.unit_segment) > 1 and self.rng.random() < mr * 0.2:
             idx = self.rng.randrange(len(genome.unit_segment))
             genome.unit_segment.pop(idx)
+
+        self._ensure_unit_segment_covers_pool(genome, pool)
 
     def _mutate(self, genome: RheaGenome, pool: ActionPool) -> None:
         """In-place mutation for monolithic RHEA (moves + builds)."""
@@ -1890,7 +2222,7 @@ class RheaPlanner:
                 except Exception:
                     illegal += 1
 
-        for intent in genome.unit_segment:
+        for intent in genome.unit_segment[: self._unit_intent_cap()]:
             if sim.winner is not None:
                 break
             if int(sim.active_player) != acting:
@@ -2013,7 +2345,7 @@ class RheaPlanner:
         # ------------------------------------------------
         # Phase 1: Unit actions (soft fail per gene)
         # ------------------------------------------------
-        for intent in genome.unit_segment:
+        for intent in genome.unit_segment[: self._unit_intent_cap()]:
             if sim.winner is not None:
                 break
             if int(sim.active_player) != acting:
@@ -2511,7 +2843,7 @@ class RheaPlanner:
     @staticmethod
     def compute_complexity_metrics(
         state: GameState, observer_seat: int
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int, int]:
         """Compute game state complexity metrics for dynamic budgeting."""
         enemy_seat = 1 - observer_seat
         owned_units = sum(1 for u in state.units[observer_seat] if u.is_alive)
@@ -2548,4 +2880,44 @@ class RheaPlanner:
                     enemy_in_range_contacts += 1
         except Exception:
             enemy_in_range_contacts = len(state.units[enemy_seat]) // 4
-        return owned_units, factories, contested_captures, enemy_in_range_contacts
+        juicy_attacks = RheaPlanner._count_juicy_attacks(state, observer_seat)
+        return (
+            owned_units,
+            factories,
+            contested_captures,
+            enemy_in_range_contacts,
+            juicy_attacks,
+        )
+
+    @staticmethod
+    def _count_juicy_attacks(state: GameState, observer_seat: int) -> int:
+        """Count high-value attack intents available on the current board."""
+        count = 0
+        old_stage = state.action_stage
+        old_selected = state.selected_unit
+        old_move = state.selected_move_pos
+        try:
+            for unit in state.units[observer_seat]:
+                if not unit.is_alive or getattr(unit, "has_acted", False):
+                    continue
+                state.action_stage = ActionStage.MOVE
+                state.selected_unit = unit
+                state.selected_move_pos = None
+                for cand in enumerate_candidates(state):
+                    if cand.kind != CandidateKind.MOVE_ATTACK or cand.preview is None:
+                        continue
+                    f = cand.preview
+                    if (
+                        float(f[21]) >= 1.0
+                        or float(f[17]) >= 0.12
+                        or (float(f[13]) >= 0.55 and float(f[19]) <= 0.20)
+                    ):
+                        count += 1
+                        break
+        except Exception:
+            return 0
+        finally:
+            state.action_stage = old_stage
+            state.selected_unit = old_selected
+            state.selected_move_pos = old_move
+        return count

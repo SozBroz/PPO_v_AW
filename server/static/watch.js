@@ -46,15 +46,21 @@ function updateGameInfo(state) {
 
   function coPanel(co, funds) {
     if (!co) return '<span style="color:#555;">—</span>';
-    const totalStars = co.scop_stars * 9000;
-    const powerPct = totalStars > 0
-      ? Math.min(100, Math.round((co.power_bar / totalStars) * 100))
+    const perStar = 9000;
+    const copNeed = (co.cop_stars || 0) * perStar;
+    const scopNeed = co.scop_stars * perStar;
+    const bar = co.power_bar || 0;
+    const powerPct = scopNeed > 0
+      ? Math.min(100, Math.round((bar / scopNeed) * 100))
       : 0;
+    const copReady = copNeed > 0 && bar >= copNeed;
     const powerLabel = co.scop_active
       ? '<span style="color:#ffd700; font-weight:bold;">SCOP Active!</span>'
       : co.cop_active
       ? '<span style="color:#ffd700; font-weight:bold;">COP Active!</span>'
-      : `<span style="color:#888;">${powerPct}%</span>`;
+      : copReady
+      ? `<span style="color:#8bc34a;">COP ready</span> · ${powerPct}%→SCOP`
+      : `<span style="color:#888;">${powerPct}%→SCOP</span>`;
 
     // Power bar visual
     const barFill = co.cop_active || co.scop_active ? '#ffd700' : '#0f3460';

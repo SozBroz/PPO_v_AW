@@ -1,15 +1,14 @@
 """CO meter credit from combat (display-bucket AWBW formula)."""
 from __future__ import annotations
 
-from engine.action import ActionStage
-from engine.game import GameState
+from engine.action import Action, ActionStage, ActionType
 from engine.co import make_co_state_safe
-from engine.unit import Unit, UnitType, UNIT_STATS
+from engine.game import GameState
 from engine.map_loader import MapData
+from engine.unit import Unit, UnitType, UNIT_STATS
 
 
 def _blank_state() -> GameState:
-    """Create a minimal GameState with Andy (co_id=1) for both seats."""
     md = MapData(
         width=5,
         height=5,
@@ -66,72 +65,138 @@ def _unit(tp: UnitType, player: int, *, hp: int, uid: int) -> Unit:
 
 
 def test_meter_full_kill_infantry_vs_aa() -> None:
-    """User example: AA kills fresh infantry (100 internal HP)."""
+    """AA kills infantry: 10 display bars; striker half uses victim (inf) cost."""
     state = _blank_state()
     aa = _unit(UnitType.ANTI_AIR, player=0, hp=100, uid=501)
     inf = _unit(UnitType.INFANTRY, player=1, hp=100, uid=502)
-    # 100 internal HP lost (full kill = 100 internal HP)
-    state._apply_co_meter_from_internal_hp_lost(aa, inf, 100)
-    # P0 (striker, AA=8000): 100 × 8000 ÷ 180 = 4444
-    # P1 (victim, Infantry=1000): 100 × 1000 ÷ 90 = 1111
-    assert state.co_states[0].power_bar == 4444
-    assert state.co_states[1].power_bar == 1111
+    state._apply_co_meter_from_display_buckets_lost(aa, inf, 10)
+    assert state.co_states[0].power_bar == 500   # 10 × 1000 ÷ 20
+    assert state.co_states[1].power_bar == 1000  # 10 × 1000 ÷ 10
 
 
 def test_meter_exchange_copter_chunks() -> None:
-    """User example swing: 70 internal HP lost (7 display HP)."""
+    """7 display bars lost on B-Copter."""
     state = _blank_state()
     bc = _unit(UnitType.B_COPTER, player=0, hp=100, uid=701)
-    bc2 = _unit(UnitType.B_COPTER, player=1, hp=91, uid=702)
-    # B_COPTER cost = 9000, 70 internal HP lost (7 display HP)
-    # P0 (striker, 9000): 70 × 9000 ÷ 180 = 3500
-    # P1 (victim, 9000): 70 × 9000 ÷ 90 = 7000 (no cap at SCOP threshold)
-    state._apply_co_meter_from_internal_hp_lost(bc, bc2, 70)
-    assert state.co_states[0].power_bar == 3500
-    assert state.co_states[1].power_bar == 7000  # Not capped at SCOP threshold
+    bc2 = _unit(UnitType.B_COPTER, player=1, hp=100, uid=702)
+    state._apply_co_meter_from_display_buckets_lost(bc, bc2, 7)
+    assert state.co_states[0].power_bar == 3150
+    assert state.co_states[1].power_bar == 6300
 
 
-def test_meter尹ch_recon_split_main_and_counter() -> None:
-    """User scenario 3: main hit Δ=50 internal HP on mech, counter Δ=20 on recon."""
+def test_meter_recon_mech_split_main_and_counter() -> None:
+    """Recon hits mech 6 bars; mech counters 2 bars on recon."""
     state = _blank_state()
-    # Recon cost = 4000, Mech cost = 3000
     recon = _unit(UnitType.RECON, player=1, hp=100, uid=901)
     mech = _unit(UnitType.MECH, player=0, hp=90, uid=902)
-    # First hit: recon (P1, 4000) hits mech (P0, 3000) for 50 internal HP
-    # P0 (victim, Mech=3000): 50 × 3000 ÷ 90 = 1666.67 → 1667 (rounded half up)
-    # P1 (striker, recon=4000): 50 × 4000 ÷ 180 = 1111
-    state._apply_co_meter_from_internal_hp_lost(recon, mech, 50)
-    assert state.co_states[0].power_bar == 1667  # 1666.67 rounded half up
-    assert state.co_states[1].power_bar == 1111
-    # Counterattack: mech (P0, 3000) hits recon (P1, 4000) for 20 internal HP
-    # P1 (victim, recon=4000): 20 × 4000 ÷ 90 = 888
-    # P0 (striker, mech=3000): 20 × 3000 ÷ 180 = 333
-    state._apply_co_meter_from_internal_hp_lost(mech, recon, 20)
-    assert state.co_states[0].power_bar == 2000  # 1667 + 333
-    assert state.co_states[1].power_bar == 2000  # 1111 + 889
+    state._apply_co_meter_from_display_buckets_lost(recon, mech, 6)
+    assert state.co_states[0].power_bar == 1800
+    assert state.co_states[1].power_bar == 900
+    state._apply_co_meter_from_display_buckets_lost(mech, recon, 2)
+    assert state.co_states[0].power_bar == 2200
+    assert state.co_states[1].power_bar == 1700
 
 
-def test_meter_skips_seat_under_active_power() -> None:
-    """CO meter still charges even when COP is active (current implementation)."""
+def test_meter_infantry_vs_aa_exchange() -> None:
+    """P1 inf 8→0, P0 AA 10→9: AWBW symmetric 1200 each."""
+    state = _blank_state()
+    inf = _unit(UnitType.INFANTRY, player=1, hp=80, uid=5)
+    aa = _unit(UnitType.ANTI_AIR, player=0, hp=100, uid=18)
+    state._apply_co_meter_from_display_buckets_lost(inf, aa, 1)
+    state._apply_co_meter_from_display_buckets_lost(aa, inf, 8)
+    assert state.co_states[0].power_bar == 1200
+    assert state.co_states[1].power_bar == 1200
+
+
+def test_meter_aa_vs_tank_exchange() -> None:
+    """P0 AA hits P1 tank 5→2 (3 bars); tank counters AA 9→8 (1 bar)."""
+    state = _blank_state()
+    aa = _unit(UnitType.ANTI_AIR, player=0, hp=90, uid=1)
+    tank = _unit(UnitType.TANK, player=1, hp=50, uid=2)
+    state._apply_co_meter_from_display_buckets_lost(aa, tank, 3)
+    state._apply_co_meter_from_display_buckets_lost(tank, aa, 1)
+    assert state.co_states[0].power_bar == 1850  # 1050 dealt + 800 received
+    assert state.co_states[1].power_bar == 2500  # 2100 received + 400 dealt
+
+
+def test_meter_aa_vs_tank_via_apply_attack() -> None:
+    """Full _apply_attack path with oracle-pinned display deltas."""
+    state = _blank_state()
+    state.map_data = MapData(
+        map_id=0,
+        name="aa_tank",
+        map_type="std",
+        terrain=[[3, 3], [3, 3]],
+        height=2,
+        width=2,
+        cap_limit=99,
+        unit_limit=50,
+        unit_bans=[],
+        tiers=[],
+        objective_type=None,
+        properties=[],
+        hq_positions={0: [], 1: []},
+        lab_positions={0: [], 1: []},
+        country_to_player={},
+    )
+    aa = _unit(UnitType.ANTI_AIR, player=0, hp=90, uid=1)
+    aa.pos = (0, 0)
+    tank = _unit(UnitType.TANK, player=1, hp=50, uid=2)
+    tank.pos = (0, 1)
+    state.units[0] = [aa]
+    state.units[1] = [tank]
+    state.active_player = 0
+    state.action_stage = ActionStage.ACTION
+    state.selected_unit = aa
+    state.selected_move_pos = (0, 0)
+    state._oracle_combat_damage_override = (30, 10)
+    state._apply_attack(
+        Action(ActionType.ATTACK, unit_pos=(0, 0), move_pos=(0, 0), target_pos=(0, 1))
+    )
+    assert aa.display_hp == 8
+    assert tank.display_hp == 2
+    assert state.co_states[0].power_bar == 1850
+    assert state.co_states[1].power_bar == 2500
+
+
+def test_meter_no_credit_without_display_tick() -> None:
+    state = _blank_state()
+    tank = _unit(UnitType.TANK, player=0, hp=100, uid=1)
+    other = _unit(UnitType.TANK, player=1, hp=100, uid=2)
+    state._apply_co_meter_from_display_buckets_lost(tank, other, 0)
+    assert state.co_states[0].power_bar == 0
+    assert state.co_states[1].power_bar == 0
+
+
+def test_meter_skips_charge_while_power_active() -> None:
+    """AWBW: no meter gain for a seat while its COP/SCOP is active."""
     state = _blank_state()
     state.co_states[0].cop_active = True
     aa = _unit(UnitType.ANTI_AIR, player=0, hp=100, uid=1)
     inf = _unit(UnitType.INFANTRY, player=1, hp=100, uid=2)
-    # Even with COP active, meter still charges
-    # 100 internal HP lost (full kill)
-    # P0 (striker, AA=8000): 100 × 8000 ÷ 180 = 4444
-    # P1 (victim, Infantry=1000): 100 × 1000 ÷ 90 = 1111
-    state._apply_co_meter_from_internal_hp_lost(aa, inf, 100)
-    assert state.co_states[0].power_bar == 4444  # Active but still charges
-    assert state.co_states[1].power_bar == 1111
+    state._apply_co_meter_from_display_buckets_lost(aa, inf, 10)
+    assert state.co_states[0].power_bar == 0
+    assert state.co_states[1].power_bar == 1000
+
+
+def test_power_active_until_next_turn_start() -> None:
+    """COP persists through opponent turn; clears when that seat acts again."""
+    state = _blank_state()
+    state.active_player = 0
+    state.co_states[0].cop_active = True
+
+    state._end_turn()  # P0 ends → P1's turn
+    assert state.active_player == 1
+    assert state.co_states[0].cop_active is True
+
+    state._end_turn()  # P1 ends → P0's next turn
+    assert state.active_player == 0
+    assert state.co_states[0].cop_active is False
+    assert state.co_states[0].scop_active is False
 
 
 def test_activate_cop_subtracts_threshold_retains_remainder() -> None:
-    """COP activation subtracts threshold, retains remainder (like AWBW)."""
     state = _blank_state()
-    # Andy: threshold=6 stars = 54000
-    state.co_states[0].power_bar = 60000  # 6.66 stars
-    state.co_states[0].cop_active = False
-    # Simulate COP activation (subtract 6 * 9000 = 54000)
-    state.co_states[0].power_bar -= 6 * 9000
-    assert state.co_states[0].power_bar == 6000  # 6000 is 0.66 stars retained
+    state.co_states[0].power_bar = 60000
+    state.co_states[0].power_bar -= 3 * 9000
+    assert state.co_states[0].power_bar == 33000

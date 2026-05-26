@@ -11,6 +11,10 @@ from engine.search_clone import clone_for_search
 from engine.unit import UNIT_STATS, UnitType
 from rl.rhea_fitness import RheaFitness
 
+# Max terminal states per ``fitness.batch_value`` call during exhaustive buy scoring.
+# Keeps peak RAM ~O(chunk) instead of ~O(max_candidates) full board tensors.
+EXHAUSTIVE_BUY_SCORE_CHUNK = 256
+
 
 def _ensure_select(sim: GameState) -> None:
     sim.action_stage = ActionStage.SELECT
@@ -218,6 +222,55 @@ def _ensure_greedy_in_list(
     return list(genomes) + [greedy]
 
 
+def _scored_buy_better(a: ScoredBuyCandidate, b: ScoredBuyCandidate | None) -> bool:
+    """Same ordering as ``sorted(..., key=(total, gold_spent), reverse=True)[0]``."""
+    if b is None:
+        return True
+    return (float(a.total), int(a.gold_spent)) > (float(b.total), int(b.gold_spent))
+
+
+def _scored_from_executed_genome(
+    g: object,
+    acts_b: list,
+    sf: GameState,
+    igb: int,
+    rk: float,
+    rex: float,
+    *,
+    fitness: RheaFitness,
+    acting_seat: int,
+    v_terminal: float,
+    phi_ref_buy: float,
+    v_ref_buy: float,
+    gold_before: int,
+    reward_weight: float,
+    value_weight: float,
+    buy_value_scale: float,
+    buy_shaping_weight: float,
+    illegal_gene_penalty: float,
+) -> ScoredBuyCandidate:
+    phi_sf = float(fitness.phi(sf, acting_seat))
+    rew_shaped = float(rk) + float(rex)
+    v_adv_b = (float(v_terminal) - float(v_ref_buy)) * 2.0
+    phi_d_b = phi_sf - float(phi_ref_buy)
+    ileg_b = -float(illegal_gene_penalty) * float(igb)
+    tot_b = (
+        float(reward_weight) * phi_d_b
+        + float(value_weight) * v_adv_b * float(buy_value_scale)
+        + float(buy_shaping_weight) * rew_shaped
+        + ileg_b
+    )
+    spent = max(0, int(gold_before) - int(sf.funds[acting_seat]))
+    return ScoredBuyCandidate(
+        total=float(tot_b),
+        gold_spent=int(spent),
+        genome=g,
+        illegal=int(igb),
+        build_actions=list(acts_b),
+        sim_after=sf,
+    )
+
+
 def pick_best_exhaustive_buy(
     planner: object,
     fitness: RheaFitness,
@@ -234,7 +287,7 @@ def pick_best_exhaustive_buy(
     illegal_gene_penalty: float,
     greedy_seed: object | None,
 ) -> ExhaustiveBuyPick:
-    """Enumerate, score, and return argmax (tot, gold_spent) buy genome."""
+    """Enumerate, score in chunks, and return argmax (tot, gold_spent) buy genome."""
     enum = enumerate_buy_allocations(
         post_moves,
         factory_order,
@@ -251,51 +304,55 @@ def pick_best_exhaustive_buy(
     gold_before = int(post_moves.funds[acting_seat])
 
     execute_buy = planner._execute_buy_spend_allocation
+    chunk_size = max(1, int(EXHAUSTIVE_BUY_SCORE_CHUNK))
+    use_batch_value = float(value_weight) > 0.0
 
-    terminal_states: list[GameState] = []
-    exec_rows: list[tuple] = []
-    for g in genomes:
-        acts_b, _ef, sf, igb, rk, rex = execute_buy(
-            post_moves, g, mutate_sim=clone_for_search(post_moves),
-        )
-        terminal_states.append(sf)
-        exec_rows.append((g, acts_b, sf, igb, rk, rex))
-
-    v_batch: list[float] | None = None
-    if float(value_weight) > 0.0 and terminal_states:
-        v_batch = list(fitness.batch_value(terminal_states, acting_seat))
-
-    scored: list[ScoredBuyCandidate] = []
-    for idx, (g, acts_b, sf, igb, rk, rex) in enumerate(exec_rows):
-        if v_batch is not None:
-            v_terminal = float(v_batch[idx])
-        else:
-            v_terminal = float(fitness.value(sf, acting_seat))
-        phi_sf = float(fitness.phi(sf, acting_seat))
-        rew_shaped = float(rk) + float(rex)
-        v_adv_b = (v_terminal - v_ref_buy) * 2.0
-        phi_d_b = phi_sf - phi_ref_buy
-        ileg_b = -illegal_gene_penalty * float(igb)
-        tot_b = (
-            reward_weight * phi_d_b
-            + value_weight * v_adv_b * buy_value_scale
-            + buy_shaping_weight * rew_shaped
-            + ileg_b
-        )
-        spent = max(0, int(gold_before) - int(sf.funds[acting_seat]))
-        scored.append(
-            ScoredBuyCandidate(
-                total=float(tot_b),
-                gold_spent=int(spent),
-                genome=g,
-                illegal=int(igb),
-                build_actions=list(acts_b),
-                sim_after=sf,
+    best: ScoredBuyCandidate | None = None
+    for chunk_start in range(0, len(genomes), chunk_size):
+        chunk = genomes[chunk_start : chunk_start + chunk_size]
+        terminal_states: list[GameState] = []
+        exec_rows: list[tuple] = []
+        for g in chunk:
+            acts_b, _ef, sf, igb, rk, rex = execute_buy(
+                post_moves, g, mutate_sim=clone_for_search(post_moves),
             )
-        )
+            terminal_states.append(sf)
+            exec_rows.append((g, acts_b, sf, igb, rk, rex))
 
-    scored.sort(key=lambda r: (r.total, r.gold_spent), reverse=True)
-    best = scored[0]
+        v_batch: list[float] | None = None
+        if use_batch_value and terminal_states:
+            v_batch = list(fitness.batch_value(terminal_states, acting_seat))
+
+        for idx, (g, acts_b, sf, igb, rk, rex) in enumerate(exec_rows):
+            if v_batch is not None:
+                v_terminal = float(v_batch[idx])
+            else:
+                v_terminal = float(fitness.value(sf, acting_seat))
+            cand = _scored_from_executed_genome(
+                g,
+                acts_b,
+                sf,
+                igb,
+                rk,
+                rex,
+                fitness=fitness,
+                acting_seat=acting_seat,
+                v_terminal=v_terminal,
+                phi_ref_buy=phi_ref_buy,
+                v_ref_buy=v_ref_buy,
+                gold_before=gold_before,
+                reward_weight=reward_weight,
+                value_weight=value_weight,
+                buy_value_scale=buy_value_scale,
+                buy_shaping_weight=buy_shaping_weight,
+                illegal_gene_penalty=illegal_gene_penalty,
+            )
+            if _scored_buy_better(cand, best):
+                best = cand
+
+    if best is None:
+        raise RuntimeError("pick_best_exhaustive_buy: no buy genomes to score")
+
     return ExhaustiveBuyPick(
         genome=best.genome,
         build_actions=best.build_actions,

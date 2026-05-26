@@ -9,10 +9,15 @@ import time
 from pathlib import Path
 
 from rl.env import AWBWEnv, POOL_PATH
-from rl.rhea import RheaConfig, RheaPlanner, replay_rhea_actions, _salvage_ender
+from rl.rhea import RheaAutotuneConfig, RheaConfig, RheaPlanner, replay_rhea_actions, _salvage_ender
 from rl.rhea_fitness import RheaFitness
 from rl.opening_book import drain_joint_opening_book
 from rl.value_net import load_value_checkpoint
+from scripts.train_rhea_value_parallel import (
+    add_rhea_adaptive_args,
+    add_rhea_autotune_args,
+    rhea_autotune_config_from_args,
+)
 from tools.export_awbw_replay import write_awbw_replay
 
 
@@ -87,6 +92,8 @@ def main() -> None:
         action="store_true",
         help="Scale move-phase RHEA pop/gen from per-turn game-state complexity",
     )
+    add_rhea_autotune_args(parser)
+    add_rhea_adaptive_args(parser)
 
     # Tactical beam.
     parser.add_argument("--rhea-use-tactical-beam", action="store_true")
@@ -200,6 +207,7 @@ def main() -> None:
         generations=args.generations,
         reward_weight=args.reward_weight,
         value_weight=args.value_weight,
+        autotune=rhea_autotune_config_from_args(args),
         seed=random.randrange(1 << 30),
         use_tactical_beam=args.rhea_use_tactical_beam,
         tactial_beam_max_width=args.rhea_tactical_beam_max_width,
@@ -208,6 +216,12 @@ def main() -> None:
         two_phase_buy_rhea=not bool(getattr(args, "rhea_monolithic_buy", False)),
         buy_mode=args.buy_mode,
         buy_exhaustive_max_candidates=args.buy_exhaustive_max_candidates,
+        adaptive_extend=args.rhea_adaptive_extend,
+        adaptive_max_extra_generations=args.rhea_adaptive_max_extra_generations,
+        adaptive_patience_generations=args.rhea_adaptive_patience_generations,
+        adaptive_min_improvement=args.rhea_adaptive_min_improvement,
+        adaptive_max_wall_s=args.rhea_adaptive_max_wall_s,
+        adaptive_hard_turn_wall_s=args.rhea_adaptive_hard_turn_wall_s,
     )
     # Override parameters for early game
     # (default top_k_per_state = 48 from RheaConfig)
@@ -235,7 +249,11 @@ def main() -> None:
             except Exception:
                 planner.complexity_metrics = None
 
+        t_search0 = time.perf_counter()
         result = planner.choose_full_turn(state)
+        planner.note_turn_wall_time(time.perf_counter() - t_search0)
+        if getattr(result, "adaptive_disabled_reason", None) is None:
+            result.adaptive_disabled_reason = planner.adaptive_disabled_reason
 
         dyn = ""
         if args.rhea_autotune:
@@ -246,11 +264,17 @@ def main() -> None:
         gain_info = ""
         if result.evolved_gain is not None:
             gain_info = f" gain={result.evolved_gain:+.4f}"
+        bd = result.breakdown
+        rw = float(fitness.reward_weight)
+        vw = float(fitness.value_weight)
+        rew_w = rw * float(bd.phi_delta)
+        val_w = vw * float(bd.value)
         print(
             f"day={getattr(state, 'turn', '?')} active={active} "
             f"score={result.score:.4f} "
-            f"phi={result.breakdown.phi_delta:.4f} "
-            f"v={result.breakdown.value:.4f} "
+            f"phi={bd.phi_delta:.4f} rew={rew_w:.4f} "
+            f"v_adv={bd.value:.4f} val={val_w:.4f} "
+            f"ill={bd.illegal_penalty:.4f} "
             f"illegal={result.illegal_genes} "
             f"actions={len(result.actions)}"
             f"{dyn}{init_info}{gain_info}"

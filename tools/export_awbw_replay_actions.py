@@ -81,11 +81,12 @@ from engine.action import Action, ActionStage, ActionType, reconstruct_shortest_
 from engine.game import GameState, IllegalActionError, make_initial_state
 from engine.map_loader import MapData, load_map
 from engine.unit import Unit, UnitType, UNIT_STATS
-
 from tools.export_awbw_replay import (
-    P0_PLAYER_ID, P1_PLAYER_ID,
+    P0_PLAYER_ID,
+    P1_PLAYER_ID,
     _AWBW_VIEWER_UNIT_NAMES,
     _awbw_move_type,
+    co_power_for_replay_viewer,
 )
 
 
@@ -356,12 +357,12 @@ def _fire_action_json(
             "copValues": {
                 "attacker": {
                     "playerId": attacker_player_id,
-                    "copValue": int(attacker_power_bar),
+                    "copValue": co_power_for_replay_viewer(attacker_power_bar),
                     "tagValue": None,
                 },
                 "defender": {
                     "playerId": defender_player_id,
-                    "copValue": int(defender_power_bar),
+                    "copValue": co_power_for_replay_viewer(defender_power_bar),
                     "tagValue": None,
                 },
             },

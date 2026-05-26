@@ -537,10 +537,11 @@ class GameState:
         player   = self.active_player
         opponent = 1 - player
 
-        # Deactivate any power that was active
-        co = self.co_states[player]
-        co.cop_active  = False
-        co.scop_active = False
+        # AWBW: COP/SCOP lasts through the opponent's full turn and expires at
+        # the start of the activator's next turn (clear the *incoming* seat).
+        incoming_co = self.co_states[opponent]
+        incoming_co.cop_active = False
+        incoming_co.scop_active = False
 
         # Phase 11J-VONBOLT-SCOP-SHIP — clear Von Bolt "Ex Machina" stun on
         # the units of the player whose turn just ended. AWBW canon: the
@@ -655,6 +656,7 @@ class GameState:
                     if tinfo and ("Sea" in tinfo.name or "Shoal" in tinfo.name):
                         refuel_exempt = True
                 if not refuel_exempt:
+                    self._reset_capture_on_capturer_death(unit)
                     unit.hp = 0   # crash / sink
 
         # Remove units that crashed on fuel starvation
@@ -1333,9 +1335,14 @@ class GameState:
             self.losses_hp[defender.player] += internal_dmg  # Track HP lost
             if defender.hp == 0:
                 self.losses_units[defender.player] += 1  # Track unit destroyed
-            # Pass internal HP to CO meter function
             if internal_dmg > 0:
-                self._apply_co_meter_from_internal_hp_lost(attacker, defender, internal_dmg)
+                self._apply_war_bonds_payout(attacker, defender, pre_def_disp)
+                # CO meter: credit only display-bar buckets lost (AWBW charges per 10% HP tick).
+                disp_lost = max(0, pre_def_disp - defender.display_hp)
+                if disp_lost > 0:
+                    self._apply_co_meter_from_display_buckets_lost(
+                        attacker, defender, disp_lost
+                    )
             
         # Counterattack
         if dmg is not None and dmg > 0 and defender.hp > 0 and defender.is_alive:
@@ -1344,22 +1351,39 @@ class GameState:
             # first (the unit that moved in), counterattacker second (original
             # defender). Do not pass (defender, attacker); that inverts the
             # strike direction and zeros most counters (e.g. inf vs tank).
-            counter_dmg = calculate_counterattack(
-                attacker, defender,
-                att_terrain, def_terrain,
-                att_co, def_co,
-                dmg,  # pass primary damage for Sonja SCOP
-                luck_rng=self.luck_rng,
-            )
+            if override_counter is not None:
+                counter_dmg = max(0, int(override_counter))
+            else:
+                counter_dmg = calculate_counterattack(
+                    attacker, defender,
+                    att_terrain, def_terrain,
+                    att_co, def_co,
+                    dmg,  # pass primary damage for Sonja SCOP
+                    luck_rng=self.luck_rng,
+                )
             if counter_dmg is not None and counter_dmg > 0:
+                pre_att_disp = attacker.display_hp
                 internal_counter = min(int(counter_dmg), attacker.hp)
                 attacker.hp = max(0, attacker.hp - internal_counter)
                 self.losses_hp[attacker.player] += internal_counter
                 if attacker.hp == 0:
                     self.losses_units[attacker.player] += 1
                 if internal_counter > 0:
-                    self._apply_co_meter_from_internal_hp_lost(defender, attacker, internal_counter)
-        
+                    self._apply_war_bonds_payout(defender, attacker, pre_att_disp)
+                    disp_lost = max(0, pre_att_disp - attacker.display_hp)
+                    if disp_lost > 0:
+                        self._apply_co_meter_from_display_buckets_lost(
+                            defender, attacker, disp_lost
+                        )
+
+        # A3 — AWBW: partial capture on a tile resets when the capturer dies
+        # there (same as vacating the tile via _move_unit). Tile-vacated cases
+        # are already handled on move; combat kills must reset explicitly.
+        if defender.hp == 0:
+            self._reset_capture_on_capturer_death(defender)
+        if attacker.hp == 0:
+            self._reset_capture_on_capturer_death(attacker)
+
         self._finish_action(attacker)
         self._evaluate_army_wipe_after_combat()
         return
@@ -1372,50 +1396,59 @@ class GameState:
         ceiling = co._scop_threshold
         co.power_bar = min(ceiling, co.power_bar + int(credit))
 
+    def _apply_co_meter_from_display_buckets_lost(
+        self,
+        striker_unit: Unit,
+        victim_unit: Unit,
+        display_buckets_lost: int,
+    ) -> None:
+        """Award CO-meter for one combat swing from display HP bars lost.
+
+        AWBW: charge accrues when the visible HP bar drops (10% steps). Each
+        display bar lost is ``cost / 10`` funds of damage; 9000 funds = 1 star
+        = 9000 ``power_bar``. Victim gets 100% of funds value; striker 50%.
+
+        Args:
+            display_buckets_lost: Integer drop in ``Unit.display_hp`` (1–10).
+        """
+        if display_buckets_lost <= 0:
+            return
+
+        # AWBW canon: "Real unit cost is also factored into the calculation,
+        # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
+        # charge their powers more slowly / more quickly on a per-unit basis."
+        base_cv = UNIT_STATS[victim_unit.unit_type].cost
+
+        victim_co = self.co_states[int(victim_unit.player)]
+        striker_co = self.co_states[int(striker_unit.player)]
+        mod_v = victim_co.unit_cost_modifier_for_unit(victim_unit.unit_type)
+
+        cv = int(base_cv * (100 + mod_v) / 100)
+
+        # Victim: D bars × victim cost / 10.
+        # Striker: 50% of funds damage inflicted — same defender value (AWBW CO wiki).
+        # AWBW: no CO-meter gain while that CO's power is active.
+        if not (victim_co.cop_active or victim_co.scop_active):
+            victim_credit = _rounded_div_half_up(display_buckets_lost * cv, 10)
+            self.co_states[int(victim_unit.player)].power_bar += victim_credit
+        if not (striker_co.cop_active or striker_co.scop_active):
+            striker_credit = _rounded_div_half_up(display_buckets_lost * cv, 20)
+            self.co_states[int(striker_unit.player)].power_bar += striker_credit
+
     def _apply_co_meter_from_internal_hp_lost(
         self,
         striker_unit: Unit,
         victim_unit: Unit,
         internal_hp_lost: int,
     ) -> None:
-        """Award CO-meter for one combat swing from internal HP lost.
-
-        AWBW formula: CO meter charges based on funds value of damage dealt.
-        9000 funds damage = 1 star = 9000 power_bar units.
-
-        Args:
-            internal_hp_lost: Internal HP lost (1-100), where 10 internal = 1 display HP.
-        """
+        """Test/helper: derive display buckets from internal HP and credit meter."""
         if internal_hp_lost <= 0:
             return
-        
-        # AWBW canon: "Real unit cost is also factored into the calculation,
-        # so COs with cost-affecting powers (Hachi, Colin, Kanbei) will
-        # charge their powers more slowly / more quickly on a per-unit basis."
-        base_cv = UNIT_STATS[victim_unit.unit_type].cost
-        base_cs = UNIT_STATS[striker_unit.unit_type].cost
-        
-        # Apply victim's own CO cost modifier to victim cost
-        victim_co = self.co_states[int(victim_unit.player)]
-        mod_v = victim_co.unit_cost_modifier_for_unit(victim_unit.unit_type)
-        # Apply striker's own CO cost modifier to striker cost
-        striker_co = self.co_states[int(striker_unit.player)]
-        mod_s = striker_co.unit_cost_modifier_for_unit(striker_unit.unit_type)
-        
-        # modifier is %: 20 means +20% → cost * 1.20; -10 → cost * 0.90
-        cv = int(base_cv * (100 + mod_v) / 100)
-        cs = int(base_cs * (100 + mod_s) / 100)
-        
-        # Victim credit: internal HP lost × cost / 90 = funds value
-        # (for 9000 = 1 star)
-        victim_credit = _rounded_div_half_up(internal_hp_lost * cv, 90)
-        
-        # Striker credit: 50% of victim credit (per AWBW)
-        striker_credit = _rounded_div_half_up(internal_hp_lost * cs, 180)
-        
-        # Apply to CO states
-        self.co_states[int(striker_unit.player)].power_bar += striker_credit
-        self.co_states[int(victim_unit.player)].power_bar += victim_credit
+        # Approximate buckets for unit tests that pass internal loss directly.
+        buckets = (internal_hp_lost + 9) // 10
+        self._apply_co_meter_from_display_buckets_lost(
+            striker_unit, victim_unit, buckets
+        )
 
     def _apply_war_bonds_payout(
         self,
@@ -1580,8 +1613,8 @@ class GameState:
                 shaping += _CAPTURE_SHAPING_COMPLETE
             prop.owner = unit.player
             prop.capture_points = 20
-            if prop.is_comm_tower:
-                self._refresh_comm_towers()
+            # Kindle SCOP +3 AV/prop and Javier tower defense read live counts.
+            self._refresh_comm_towers()
             old_tid = self.map_data.terrain[prop.row][prop.col]
             new_tid = property_terrain_id_after_owner_change(
                 old_tid, unit.player, self.map_data.country_to_player
@@ -2314,6 +2347,22 @@ class GameState:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _reset_capture_on_capturer_death(self, unit: Unit) -> None:
+        """Reset partial property capture when a capturer dies on the tile.
+
+        AWBW ties capture progress to a living unit on the property. Death or
+        leaving the tile wipes progress (``capture_points`` back to 20).
+        Move-off is handled in ``_move_unit``; combat and fuel-crash call here.
+        """
+        if unit.is_alive:
+            return
+        prop = self.get_property_at(*unit.pos)
+        if prop is None or prop.capture_points >= 20:
+            return
+        if prop.owner == unit.player:
+            return
+        prop.capture_points = 20
 
     def _move_unit(self, unit: Unit, new_pos: tuple[int, int]):
         """

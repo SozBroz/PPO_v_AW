@@ -162,9 +162,9 @@ def test_a3_capture_points_reset_when_defender_dies():
         target_pos=defender.pos,
     ))
 
-    # Defender must have died. Otherwise this fixture is mis-tuned.
-    survivors = [u for u in s.units[1] if u.unit_id == defender.unit_id]
-    assert not survivors, "fixture failure: defender survived the Mega Tank hit"
+    assert defender.hp == 0 and not defender.is_alive, (
+        "fixture failure: defender survived the Mega Tank hit"
+    )
     assert prop.capture_points == 20, (
         f"capture_points must reset to 20 on defender death; got {prop.capture_points}"
     )
