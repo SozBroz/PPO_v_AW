@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -254,11 +256,13 @@ def _scored_from_executed_genome(
     v_adv_b = (float(v_terminal) - float(v_ref_buy)) * 2.0
     phi_d_b = phi_sf - float(phi_ref_buy)
     ileg_b = -float(illegal_gene_penalty) * float(igb)
+    terminal_sparse = float(fitness.engine_terminal_sparse(sf, acting_seat))
     tot_b = (
         float(reward_weight) * phi_d_b
         + float(value_weight) * v_adv_b * float(buy_value_scale)
         + float(buy_shaping_weight) * rew_shaped
         + ileg_b
+        + terminal_sparse
     )
     spent = max(0, int(gold_before) - int(sf.funds[acting_seat]))
     return ScoredBuyCandidate(
@@ -286,6 +290,7 @@ def pick_best_exhaustive_buy(
     buy_shaping_weight: float,
     illegal_gene_penalty: float,
     greedy_seed: object | None,
+    turn_deadline_at: float | None = None,
 ) -> ExhaustiveBuyPick:
     """Enumerate, score in chunks, and return argmax (tot, gold_spent) buy genome."""
     enum = enumerate_buy_allocations(
@@ -309,19 +314,37 @@ def pick_best_exhaustive_buy(
 
     best: ScoredBuyCandidate | None = None
     for chunk_start in range(0, len(genomes), chunk_size):
+        if turn_deadline_at is not None and time.perf_counter() >= float(turn_deadline_at):
+            break
         chunk = genomes[chunk_start : chunk_start + chunk_size]
         terminal_states: list[GameState] = []
         exec_rows: list[tuple] = []
         for g in chunk:
+            if turn_deadline_at is not None and time.perf_counter() >= float(turn_deadline_at):
+                break
             acts_b, _ef, sf, igb, rk, rex = execute_buy(
                 post_moves, g, mutate_sim=clone_for_search(post_moves),
             )
             terminal_states.append(sf)
             exec_rows.append((g, acts_b, sf, igb, rk, rex))
+        if turn_deadline_at is not None and time.perf_counter() >= float(turn_deadline_at):
+            break
 
         v_batch: list[float] | None = None
         if use_batch_value and terminal_states:
-            v_batch = list(fitness.batch_value(terminal_states, acting_seat))
+            v_batch = []
+            _val_chunk = 8
+            for _vs in range(0, len(terminal_states), _val_chunk):
+                if turn_deadline_at is not None and time.perf_counter() >= float(turn_deadline_at):
+                    break
+                v_batch.extend(
+                    fitness.batch_value(
+                        terminal_states[_vs : _vs + _val_chunk],
+                        acting_seat,
+                    )
+                )
+            if len(v_batch) != len(terminal_states):
+                break
 
         for idx, (g, acts_b, sf, igb, rk, rex) in enumerate(exec_rows):
             if v_batch is not None:
@@ -351,7 +374,12 @@ def pick_best_exhaustive_buy(
                 best = cand
 
     if best is None:
-        raise RuntimeError("pick_best_exhaustive_buy: no buy genomes to score")
+        if greedy_seed is not None:
+            acts_b, _ef, sf, igb, rk, rex = execute_buy(post_moves, greedy_seed, mutate_sim=clone_for_search(post_moves))
+            v_terminal = float(fitness.value(sf, acting_seat))
+            best = _scored_from_executed_genome(greedy_seed, acts_b, sf, igb, rk, rex, fitness=fitness, acting_seat=acting_seat, v_terminal=v_terminal, phi_ref_buy=phi_ref_buy, v_ref_buy=v_ref_buy, gold_before=gold_before, reward_weight=reward_weight, value_weight=value_weight, buy_value_scale=buy_value_scale, buy_shaping_weight=buy_shaping_weight, illegal_gene_penalty=illegal_gene_penalty)
+        if best is None:
+            raise RuntimeError("pick_best_exhaustive_buy: no buy genomes to score")
 
     return ExhaustiveBuyPick(
         genome=best.genome,

@@ -127,6 +127,7 @@ import numpy as np
 import torch
 
 from rl.encoder import encode_state, GRID_SIZE, N_SPATIAL_CHANNELS, N_SCALARS
+from rl.mcts import MCTSAutotuneConfig, MCTSConfig
 from rl.env import AWBWEnv, SESSION_GAME_COUNTER_DB_ENV
 from rl.opening_book import drain_joint_opening_book
 from rl.rhea import RheaAutotuneConfig, RheaConfig, RheaPlanner, replay_rhea_actions
@@ -1510,6 +1511,11 @@ def _actor_loop(
                     tactial_beam_max_width=args.rhea_tactical_beam_max_width,
                     tactial_beam_max_depth=args.rhea_tactical_beam_max_depth,
                     tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
+                    use_pv_lookahead=bool(getattr(args, "rhea_pv_lookahead", True)),
+                    pv_config=rhea_pv_config_from_args(args),
+                    use_mcts=(not args.no_mcts and int(getattr(args, "rhea_pv_random_probes", 0) or 0) > 0),
+                    mcts_config=mcts_config_from_args(args),
+                    mcts_autotune=mcts_autotune_config_from_args(args),
                 ),
                 dynamic_budget=args.rhea_autotune,
                 complexity_metrics=None,
@@ -1775,6 +1781,16 @@ def _actor_loop(
                                 "adaptive_stop_reason": getattr(result, "adaptive_stop_reason", None),
                                 "adaptive_disabled_reason": getattr(result, "adaptive_disabled_reason", None),
                                 "adaptive_best_improvement": getattr(result, "adaptive_best_improvement", None),
+                                "chosen_search": getattr(result, "chosen_search", "rhea"),
+                                "beam_width": int(getattr(result, "beam_width", 0)),
+                                "beam_depth": int(getattr(result, "beam_depth", 0)),
+                                "mcts_sims_run": int(getattr(result, "mcts_sims_run", 0)),
+                                "mcts_wall_s": round(float(getattr(result, "mcts_wall_s", 0.0)), 4),
+                                "mcts_stop_reason": getattr(result, "mcts_stop_reason", None),
+                                "pv_nodes_evaluated": int(getattr(result, "pv_nodes_evaluated", 0)),
+                                "pv_wall_s": round(float(getattr(result, "pv_wall_s", 0.0)), 4),
+                                "pv_stop_reason": getattr(result, "pv_stop_reason", None),
+                                "pv_backed_score": getattr(result, "pv_backed_score", None),
                                 "actions_planned": len(result.actions),
                                 "actions_applied": applied_actions,
                                 "actions_skipped": skipped_actions,
@@ -1891,6 +1907,12 @@ def _actor_loop(
                                         "buy_candidates_enumerated": int(getattr(result, "buy_candidates_enumerated", 0)),
                                         "buy_candidates_scored": int(getattr(result, "buy_candidates_scored", 0)),
                                         "buy_exhaustive_truncated": bool(getattr(result, "buy_exhaustive_truncated", False)),
+                                        "chosen_search": getattr(result, "chosen_search", "rhea"),
+                                        "mcts_sims_run": int(getattr(result, "mcts_sims_run", 0)),
+                                        "mcts_wall_s": float(getattr(result, "mcts_wall_s", 0.0)),
+                                        "pv_nodes_evaluated": int(getattr(result, "pv_nodes_evaluated", 0)),
+                                        "pv_wall_s": float(getattr(result, "pv_wall_s", 0.0)),
+                                        "pv_stop_reason": getattr(result, "pv_stop_reason", None),
                                     },
                                 }
                             )
@@ -2082,10 +2104,58 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--reward-weight", type=float, default=0.90)
     ap.add_argument("--value-weight", type=float, default=0.10)
     # Tactical beam.
-    ap.add_argument("--rhea-use-tactical-beam", action="store_true")
+    ap.add_argument("--rhea-use-tactical-beam", action="store_true", default=True)
+    ap.add_argument("--no-rhea-tactical-beam", dest="rhea_use_tactical_beam", action="store_false")
     ap.add_argument("--rhea-tactical-beam-max-width", type=int, default=96)
     ap.add_argument("--rhea-tactical-beam-max-depth", type=int, default=28)
     ap.add_argument("--rhea-tactical-beam-max-expand", type=int, default=48)
+
+    # MCTS turn search; dynamically budgeted from RHEA complexity metrics.
+    ap.add_argument("--no-mcts", action="store_true", help="Disable turn-level MCTS candidate search.")
+    ap.add_argument("--mcts-sims-base", type=int, default=96)
+    ap.add_argument("--mcts-sims-scale", type=float, default=28.0)
+    ap.add_argument("--mcts-sims-min", type=int, default=16)
+    ap.add_argument("--mcts-sims-max", type=int, default=1024)
+    ap.add_argument("--mcts-root-plans-base", type=int, default=8)
+    ap.add_argument("--mcts-root-plans-scale", type=float, default=0.35)
+    ap.add_argument("--mcts-root-plans-min", type=int, default=4)
+    ap.add_argument("--mcts-root-plans-max", type=int, default=32)
+    ap.add_argument("--mcts-min-depth-base", type=int, default=1)
+    ap.add_argument("--mcts-min-depth-scale", type=float, default=0.08)
+    ap.add_argument("--mcts-min-depth-min", type=int, default=1)
+    ap.add_argument("--mcts-min-depth-max", type=int, default=8)
+    ap.add_argument("--mcts-wall-base-s", type=float, default=20.0)
+    ap.add_argument("--mcts-wall-scale-s", type=float, default=6.0)
+    ap.add_argument("--mcts-wall-min-s", type=float, default=5.0)
+    ap.add_argument("--mcts-wall-max-s", type=float, default=360.0)
+    ap.add_argument("--mcts-turn-wall-fraction", type=float, default=0.40)
+    ap.add_argument("--mcts-c-puct", type=float, default=1.5)
+    ap.add_argument("--mcts-dirichlet-alpha", type=float, default=0.3)
+    ap.add_argument("--mcts-dirichlet-epsilon", type=float, default=0.25)
+    ap.add_argument("--mcts-temperature", type=float, default=1.0)
+    ap.add_argument("--mcts-max-plan-actions", type=int, default=256)
+    ap.add_argument("--mcts-risk-mode", choices=("visit", "mean", "mean_minus_p10", "constrained"), default="visit")
+
+    # RHEA principal-variation lookahead (replaces random MCTS by default).
+    ap.add_argument("--rhea-pv-lookahead", action="store_true", default=True)
+    ap.add_argument("--no-rhea-pv-lookahead", dest="rhea_pv_lookahead", action="store_false")
+    ap.add_argument("--rhea-pv-root-width", type=int, default=3)
+    ap.add_argument("--rhea-pv-root-protected-top", type=int, default=3)
+    ap.add_argument("--rhea-pv-root-pool-width", type=int, default=3, help="Move candidates completed into full turns before root selection (v7 baseline: 3).")
+    ap.add_argument("--rhea-pv-response-width", type=int, default=2)
+    ap.add_argument("--rhea-pv-followup-width", type=int, default=1)
+    ap.add_argument("--rhea-pv-budget-fraction", type=float, default=0.45)
+    ap.add_argument("--rhea-pv-inner-budget-scale", type=float, default=0.30)
+    ap.add_argument("--rhea-pv-response-discount", type=float, default=0.85)
+    ap.add_argument("--rhea-pv-followup-discount", type=float, default=0.70)
+    ap.add_argument("--rhea-pv-random-probes", type=int, default=0, help="Optional low-budget MCTS probes when > 0.")
+    ap.add_argument("--rhea-pv-value-root-slots", type=int, default=0, help="Extra PV root branches from value-head ranking (distinct from reward-top roots).")
+    ap.add_argument("--rhea-pv-value-root-pool-width", type=int, default=8, help="Move genomes scanned from value ranking when filling value-root slots.")
+    ap.add_argument("--rhea-pv-value-root-min-advantage", type=float, default=0.04, help="Minimum value-advance edge over worst reward root before adding a value root.")
+    ap.add_argument("--rhea-pv-min-switch-margin", type=float, default=0.02, help="PV must beat protected base leaf by this margin to switch.")
+    ap.add_argument("--rhea-pv-robust-noise-floor", type=float, default=0.01, help="Minimum robust switch margin floor for leaf backup.")
+    ap.add_argument("--rhea-pv-max-followup-pairs", type=int, default=4, help="Max opp+our followup pairs for iterative PV deepening.")
+    ap.add_argument("--no-rhea-pv-iterative-deepening", dest="rhea_pv_iterative_deepening", action="store_false", default=True, help="Disable iterative PV deepening within turn budget.")
 
     # Spirit-broken (engine/spirit_pressure.py): default on if host left AWBW_SPIRIT_BROKEN unset.
     ap.add_argument(
@@ -2244,6 +2314,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Day/turn boundary for late capture phase weighting (default 18).",
     )
 
+    # Map-control / positional Phi shaping. delta>0 enables a potential-based
+    # territorial term (forward presence toward enemy HQ, chokepoint occupation,
+    # neutral-capture denial). Left None => env keeps its profile default (0.0 =>
+    # off), so existing runs are unchanged unless --phi-control-delta is given.
+    ap.add_argument(
+        "--phi-control-delta",
+        type=float,
+        default=None,
+        help="Weight of the map-control Phi term (0 disables; 0.05 validated).",
+    )
+    ap.add_argument(
+        "--phi-control-center",
+        type=float,
+        default=None,
+        help="Sub-weight for forward presence toward enemy HQ (default 1.0).",
+    )
+    ap.add_argument(
+        "--phi-control-choke",
+        type=float,
+        default=None,
+        help="Sub-weight for chokepoint occupation (default 0.5).",
+    )
+    ap.add_argument(
+        "--phi-control-denial",
+        type=float,
+        default=None,
+        help="Sub-weight for neutral-capture denial (default 0.5).",
+    )
+    ap.add_argument(
+        "--phi-control-denial-radius",
+        type=int,
+        default=None,
+        help="Manhattan radius for neutral-capture denial credit (default 3).",
+    )
+
     # Dual-gradient self-play and zero-sum.
     ap.add_argument(
         "--dual-gradient-self-play",
@@ -2364,6 +2469,69 @@ def add_rhea_adaptive_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
+def mcts_config_from_args(args: argparse.Namespace) -> MCTSConfig:
+    return MCTSConfig(
+        num_sims=int(args.mcts_sims_base),
+        c_puct=float(args.mcts_c_puct),
+        dirichlet_alpha=float(args.mcts_dirichlet_alpha),
+        dirichlet_epsilon=float(args.mcts_dirichlet_epsilon),
+        temperature=float(args.mcts_temperature),
+        min_depth=int(args.mcts_min_depth_base),
+        root_plans=int(args.mcts_root_plans_base),
+        max_plan_actions=int(args.mcts_max_plan_actions),
+        luck_resamples=0,
+        risk_mode=str(args.mcts_risk_mode),
+    )
+
+
+def mcts_autotune_config_from_args(args: argparse.Namespace) -> MCTSAutotuneConfig:
+    return MCTSAutotuneConfig(
+        sims_base=int(args.mcts_sims_base),
+        sims_complexity_scale=float(args.mcts_sims_scale),
+        sims_min=int(args.mcts_sims_min),
+        sims_max=int(args.mcts_sims_max),
+        root_plans_base=int(args.mcts_root_plans_base),
+        root_plans_complexity_scale=float(args.mcts_root_plans_scale),
+        root_plans_min=int(args.mcts_root_plans_min),
+        root_plans_max=int(args.mcts_root_plans_max),
+        min_depth_base=int(args.mcts_min_depth_base),
+        min_depth_complexity_scale=float(args.mcts_min_depth_scale),
+        min_depth_min=int(args.mcts_min_depth_min),
+        min_depth_max=int(args.mcts_min_depth_max),
+        wall_base_s=float(args.mcts_wall_base_s),
+        wall_complexity_scale_s=float(args.mcts_wall_scale_s),
+        wall_min_s=float(args.mcts_wall_min_s),
+        wall_max_s=float(args.mcts_wall_max_s),
+        turn_wall_fraction=float(args.mcts_turn_wall_fraction),
+    )
+
+
+
+
+def rhea_pv_config_from_args(args: argparse.Namespace):
+    from rl.rhea_pv import RheaPVConfig
+
+    return RheaPVConfig(
+        enabled=bool(getattr(args, "rhea_pv_lookahead", True)),
+        root_width=int(getattr(args, "rhea_pv_root_width", 3)),
+        root_protected_top=int(getattr(args, "rhea_pv_root_protected_top", 3)),
+        root_pool_width=int(getattr(args, "rhea_pv_root_pool_width", 6)),
+        response_width=int(getattr(args, "rhea_pv_response_width", 1)),
+        followup_width=int(getattr(args, "rhea_pv_followup_width", 1)),
+        budget_fraction=float(getattr(args, "rhea_pv_budget_fraction", 0.45)),
+        inner_budget_scale=float(getattr(args, "rhea_pv_inner_budget_scale", 0.45)),
+        random_probes=int(getattr(args, "rhea_pv_random_probes", 0)),
+        response_discount=float(getattr(args, "rhea_pv_response_discount", 0.85)),
+        followup_discount=float(getattr(args, "rhea_pv_followup_discount", 0.70)),
+        value_root_slots=int(getattr(args, "rhea_pv_value_root_slots", 0)),
+        value_root_pool_width=int(getattr(args, "rhea_pv_value_root_pool_width", 8)),
+        value_root_min_advantage=float(getattr(args, "rhea_pv_value_root_min_advantage", 0.04)),
+        pv_min_switch_margin=float(getattr(args, "rhea_pv_min_switch_margin", 0.015)),
+        pv_robust_noise_floor=float(getattr(args, "rhea_pv_robust_noise_floor", 0.01)),
+        pv_max_followup_pairs=int(getattr(args, "rhea_pv_max_followup_pairs", 4)),
+        iterative_deepening=bool(getattr(args, "rhea_pv_iterative_deepening", True)),
+    )
+
 def rhea_autotune_config_from_args(args: argparse.Namespace) -> RheaAutotuneConfig:
     return RheaAutotuneConfig(
         owned_unit_weight=args.rhea_autotune_owned_unit_weight,
@@ -2435,6 +2603,11 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
         ("phi_capture_early_mid_end_day", "AWBW_PHI_CAPTURE_EARLY_MID_END_DAY"),
         ("phi_capture_mid_end_day", "AWBW_PHI_CAPTURE_MID_END_DAY"),
         ("phi_capture_late_end_day", "AWBW_PHI_CAPTURE_LATE_END_DAY"),
+        ("phi_control_delta", "AWBW_PHI_CONTROL_DELTA"),
+        ("phi_control_center", "AWBW_PHI_CONTROL_CENTER"),
+        ("phi_control_choke", "AWBW_PHI_CONTROL_CHOKE"),
+        ("phi_control_denial", "AWBW_PHI_CONTROL_DENIAL"),
+        ("phi_control_denial_radius", "AWBW_PHI_CONTROL_DENIAL_RADIUS"),
     ):
         value = getattr(args, attr, None)
         if value is None:

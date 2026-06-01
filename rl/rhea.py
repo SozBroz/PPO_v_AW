@@ -34,6 +34,7 @@ Key design properties:
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import math
 from dataclasses import dataclass, field
@@ -59,8 +60,39 @@ from rl.candidate_actions import (
     enumerate_candidates,
 )
 from rl.buy_exhaustive import pick_best_exhaustive_buy
+from rl.mcts import (
+    MCTSAutotuneConfig,
+    MCTSConfig,
+    dynamic_mcts_config,
+    make_callables_from_rhea_fitness,
+    run_mcts,
+)
 from rl.rhea_fitness import RheaFitness, RheaFitnessBreakdown
+from rl.rhea_pv import (
+    RheaPVConfig,
+    TurnCandidate,
+    decision_point_seed,
+    genome_move_identity_key,
+    run_rhea_pv_lookahead,
+)
 from rl.tactical_beam import TacticalBeamConfig, TacticalBeamPlanner
+
+
+def _dedup_by_move_identity(scored_genomes):
+    """Collapse a score-sorted [(score, genome)] list to one entry per
+    distinct turn-plan (move + build identity), keeping the best-scoring
+    representative. A converged RHEA population otherwise hands PV many
+    near-identical elite clones, leaving the lookahead with no genuine
+    alternative to evaluate or switch to."""
+    seen = set()
+    out = []
+    for score, genome in scored_genomes:
+        key = genome_move_identity_key(genome)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((score, genome))
+    return out
 
 # Cython acceleration — DISABLED for the new segmented genome.
 # The flat-index-lists are gone; the Cython hot-path cannot compile against
@@ -543,11 +575,19 @@ class RheaConfig:
     adaptive_hard_turn_wall_s: float = 900.0
     log_initial_best: bool = True
     seed: Optional[int] = None
+    paired_eval: bool = False
+    eval_game_seed: Optional[int] = None
+    pv_rng_seed: Optional[int] = None
     # Tactical beam config (unchanged)
     use_tactical_beam: bool = False
     tactial_beam_max_width: int = 96
     tactial_beam_max_depth: int = 28
     tactial_beam_max_expand: int = 48
+    use_pv_lookahead: bool = False
+    pv_config: RheaPVConfig = field(default_factory=RheaPVConfig)
+    use_mcts: bool = False
+    mcts_config: MCTSConfig = field(default_factory=MCTSConfig)
+    mcts_autotune: MCTSAutotuneConfig = field(default_factory=MCTSAutotuneConfig)
 
 
 @dataclass(slots=True)
@@ -575,6 +615,27 @@ class RheaResult:
     adaptive_extra_generations_used: int = 0
     adaptive_disabled_reason: str | None = None
     adaptive_best_improvement: float | None = None
+    chosen_search: str = "rhea"
+    beam_width: int = 0
+    beam_depth: int = 0
+    mcts_sims_run: int = 0
+    mcts_wall_s: float = 0.0
+    mcts_stop_reason: str | None = None
+    pv_nodes_evaluated: int = 0
+    pv_root_width: int = 0
+    pv_response_width: int = 0
+    pv_followup_width: int = 0
+    pv_wall_s: float = 0.0
+    pv_stop_reason: str | None = None
+    pv_backed_score: float | None = None
+    pv_best_value_guided: bool = False
+    pv_best_is_protected_base: bool = False
+    pv_switched: bool = False
+    pv_margin_vs_base: float | None = None
+    pv_depth_pairs: int = 0
+    pv_robust_margin: float | None = None
+    pv_base_leaf_score: float | None = None
+    pv_alternate_leaf_score: float | None = None
 
 
 def _update_adaptive_progress(
@@ -610,6 +671,36 @@ def _adaptive_stop_after_generation(
     return None
 
 
+def _turn_elapsed_s(turn_started_at: float) -> float:
+    return time.perf_counter() - float(turn_started_at)
+
+
+def _turn_hard_wall_breached(*, turn_started_at: float, hard_wall_s: float) -> bool:
+    hw = float(hard_wall_s)
+    if hw <= 0.0:
+        return False
+    return _turn_elapsed_s(turn_started_at) >= hw
+
+
+def _turn_hard_wall_deadline_at(*, turn_started_at: float, hard_wall_s: float) -> float | None:
+    hw = float(hard_wall_s)
+    if hw <= 0.0:
+        return None
+    return float(turn_started_at) + hw
+
+
+def _apply_turn_hard_wall_stop(
+    *,
+    turn_started_at: float,
+    hard_wall_s: float,
+    adaptive_stop_reason: str,
+    adaptive_hard_reason: str | None,
+) -> tuple[str, str | None]:
+    if not _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+        return adaptive_stop_reason, adaptive_hard_reason
+    return "hard_wall", "turn_wall_900s"
+
+
 def _adaptive_wall_stop_reason(
     *,
     elapsed_s: float,
@@ -617,7 +708,13 @@ def _adaptive_wall_stop_reason(
     floor_generations: int,
     soft_wall_s: float | None,
     hard_wall_s: float,
+    turn_started_at: float | None = None,
 ) -> str | None:
+    if turn_started_at is not None and _turn_hard_wall_breached(
+        turn_started_at=float(turn_started_at),
+        hard_wall_s=float(hard_wall_s),
+    ):
+        return "hard_wall"
     if float(hard_wall_s) > 0.0 and float(elapsed_s) >= float(hard_wall_s):
         return "hard_wall"
     if (
@@ -864,9 +961,14 @@ class RheaPlanner:
         self.fitness = fitness
         self.cfg = config
         self.rng = random.Random(config.seed)
+        _pv_seed = config.pv_rng_seed if config.pv_rng_seed is not None else ((config.seed or 0) + 9_000_001)
+        self.pv_rng = random.Random(_pv_seed)
+        self._pv_modeling_depth = 0
         self.dynamic_budget = dynamic_budget
         self.complexity_metrics = complexity_metrics
         self.adaptive_disabled_reason: str | None = None
+        self._pv_last_scored_mv: list[tuple[float, RheaGenome]] = []
+        self._pv_last_value_scored_mv: list[tuple[float, RheaGenome]] = []
         # Tactical beam planner (unchanged)
         if config.use_tactical_beam:
             self.tactical_beam = TacticalBeamPlanner(
@@ -891,19 +993,97 @@ class RheaPlanner:
     # Entry point
     # ------------------------------------------------------------------
 
+
+    def _sync_base_rng_for_decision(self, state: GameState) -> None:
+        if not self.cfg.paired_eval or self.cfg.eval_game_seed is None:
+            return
+        day = int(getattr(state, "turn", getattr(state, "day", 0)))
+        seat = int(state.active_player)
+        self.rng.seed(decision_point_seed(int(self.cfg.eval_game_seed), day, seat))
+
+    def _simulate_myopic_turn_candidate(
+        self,
+        before: GameState,
+        acting_seat: int,
+        *,
+        turn_started_at: float,
+        hard_wall_s: float,
+        deadline_at: float | None = None,
+    ) -> TurnCandidate | None:
+        if deadline_at is not None and time.perf_counter() >= float(deadline_at):
+            return None
+        if self._pv_modeling_depth >= 8:
+            return None
+        saved = (
+            self.cfg.use_pv_lookahead,
+            self.cfg.use_tactical_beam,
+            self.cfg.use_mcts,
+        )
+        self.cfg.use_pv_lookahead = False
+        self.cfg.use_tactical_beam = False
+        self.cfg.use_mcts = False
+        self._pv_modeling_depth += 1
+        try:
+            self._sync_base_rng_for_decision(before)
+            result = self._choose_full_turn_two_phase(before)
+        finally:
+            self._pv_modeling_depth -= 1
+            (
+                self.cfg.use_pv_lookahead,
+                self.cfg.use_tactical_beam,
+                self.cfg.use_mcts,
+            ) = saved
+        try:
+            sim = clone_for_search(before)
+            replay_rhea_actions(sim, list(result.actions), acting_seat)
+        except Exception:
+            return None
+        return TurnCandidate(
+            actions=list(result.actions),
+            state_after=sim,
+            score=float(result.score),
+            breakdown=result.breakdown,
+            illegal=int(result.illegal_genes),
+        )
+
     def choose_full_turn(self, state: GameState) -> RheaResult:
+        self._sync_base_rng_for_decision(state)
+        turn_started_at = time.perf_counter()
+        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
         if bool(self.cfg.two_phase_buy_rhea):
-            return self._choose_full_turn_two_phase(state)
-        return self._choose_full_turn_monolithic(state)
+            result = self._choose_full_turn_two_phase(state)
+        else:
+            result = self._choose_full_turn_monolithic(state)
+        elapsed_s = time.perf_counter() - turn_started_at
+        if hard_wall_s > 0.0 and elapsed_s > hard_wall_s + 0.05:
+            print(json.dumps({"event": "turn_hard_wall_exceeded", "elapsed_s": round(elapsed_s, 3), "hard_wall_s": hard_wall_s, "chosen_search": getattr(result, "chosen_search", "rhea")}), flush=True)
+        return result
 
     def _choose_full_turn_monolithic(self, state: GameState) -> RheaResult:
         acting_seat = int(state.active_player)
         before = state
+        turn_started_at = time.perf_counter()
+        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
+        self._active_turn_started_at = turn_started_at
+        self._active_turn_hard_wall_s = hard_wall_s
 
         # Run tactical beam if enabled.
         beam_best = None
-        if self.cfg.use_tactical_beam and self.tactical_beam is not None:
-            beam_result = self.tactical_beam.search(before)
+        if (
+            self.cfg.use_tactical_beam
+            and self.tactical_beam is not None
+            and not _turn_hard_wall_breached(
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+            )
+        ):
+            beam_result = self.tactical_beam.search(
+                before,
+                deadline_at=_turn_hard_wall_deadline_at(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ),
+            )
             if beam_result.lines:
                 best_line = beam_result.lines[0]
                 beam_best = {
@@ -956,17 +1136,52 @@ class RheaPlanner:
         initial_best_score: float | None = None
 
         for _gen in range(generations):
+            if _turn_hard_wall_breached(
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+            ):
+                self.adaptive_disabled_reason = "turn_wall_900s"
+                break
             after_states: list[tuple] = []
+            _hard_during_sim = False
 
             for genome in population:
+                if _turn_hard_wall_breached(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ):
+                    _hard_during_sim = True
+                    break
                 after, actions, illegal, mfo_pen = self._simulate_genome(
                     before, genome,
                 )
                 after_states.append((after, actions, illegal, mfo_pen))
 
+            if _hard_during_sim or not after_states:
+                self.adaptive_disabled_reason = "turn_wall_900s"
+                break
+
             # Batch value evaluation.
             all_states = [after for after, _, _, _ in after_states]
-            all_values = self.fitness.batch_value(all_states, acting_seat)
+            all_values: list[float] = []
+            _value_chunk = 8
+            _hard_during_val = False
+            for _chunk_start in range(0, len(all_states), _value_chunk):
+                if _turn_hard_wall_breached(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ):
+                    _hard_during_val = True
+                    break
+                all_values.extend(
+                    self.fitness.batch_value(
+                        all_states[_chunk_start : _chunk_start + _value_chunk],
+                        acting_seat,
+                    )
+                )
+            if _hard_during_val or len(all_values) != len(all_states):
+                self.adaptive_disabled_reason = "turn_wall_900s"
+                break
             before_value = self.fitness.value(before, acting_seat)
 
             scored: list = []
@@ -991,6 +1206,9 @@ class RheaPlanner:
                     actions, self.cfg.build_value_weight
                 )
 
+                terminal_sparse = float(
+                    self.fitness.engine_terminal_sparse(after, acting_seat)
+                )
                 total = (
                     self.fitness.reward_weight * phi_delta
                     + self.fitness.value_weight * win_advantage
@@ -999,12 +1217,14 @@ class RheaPlanner:
                     + unused_funds_penalty
                     + build_value_reward
                     + float(mfo_pen)
+                    + terminal_sparse
                 )
 
                 breakdown = RheaFitnessBreakdown(
                     phi_delta=float(phi_delta),
                     value=float(win_advantage),
                     illegal_penalty=float(illegal_penalty),
+                    terminal_sparse=float(terminal_sparse),
                     total=float(total),
                 )
 
@@ -1109,11 +1329,525 @@ class RheaPlanner:
                 generations_used=generations,
             )
 
+
+    def _score_state_delta(
+        self,
+        before: GameState,
+        after: GameState,
+        acting_seat: int,
+        v_before: float,
+        *,
+        illegal_genes: int = 0,
+    ) -> RheaFitnessBreakdown:
+        phi_delta = float(self.fitness.phi(after, acting_seat)) - float(self.fitness.phi(before, acting_seat))
+        value_adv = (float(self.fitness.value(after, acting_seat)) - float(v_before)) * 2.0
+        illegal_penalty = -float(self.fitness.illegal_gene_penalty) * float(illegal_genes)
+        terminal_sparse = float(self.fitness.engine_terminal_sparse(after, acting_seat))
+        total = (
+            float(self.fitness.reward_weight) * phi_delta
+            + float(self.fitness.value_weight) * value_adv
+            + illegal_penalty
+            + terminal_sparse
+        )
+        return RheaFitnessBreakdown(
+            phi_delta=float(phi_delta),
+            value=float(value_adv),
+            illegal_penalty=float(illegal_penalty),
+            terminal_sparse=float(terminal_sparse),
+            total=float(total),
+        )
+
+
+
+    def _complete_turn_from_move_genome(
+        self,
+        before: GameState,
+        move_genome: RheaGenome,
+        acting_seat: int,
+        v_before: float,
+        *,
+        turn_started_at: float,
+        hard_wall_s: float,
+    ) -> TurnCandidate | None:
+        if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+            return None
+        factories_before = _factories_fully_owned_positions(before, acting_seat)
+        s_after_moves, move_actions, mv_illegal = self._simulate_move_phase_only(before, move_genome)
+        newly_cap = _newly_captured_factories_this_turn(factories_before, s_after_moves, acting_seat)
+        fo, catalog = _collect_buy_catalog(s_after_moves, acting_seat, newly_cap)
+        rw = float(self.fitness.reward_weight)
+        vw = float(self.fitness.value_weight)
+        igen_pen = float(self.fitness.illegal_gene_penalty)
+        ig_tot = int(mv_illegal)
+        exec_buy_act: list = []
+        end_tail: list = []
+        sim_after = clone_for_search(s_after_moves)
+
+        if not fo:
+            ig_tot += self._simulate_end_turn_sequence(sim_after, acting_seat, end_tail)
+        elif str(self.cfg.buy_mode) == "exhaustive":
+            greedy_seed = self._greedy_cheapest_buy_genome(s_after_moves, acting_seat, fo, catalog)
+            ex_pick = pick_best_exhaustive_buy(
+                self,
+                self.fitness,
+                s_after_moves,
+                acting_seat,
+                fo,
+                catalog,
+                max_candidates=int(self.cfg.buy_exhaustive_max_candidates),
+                reward_weight=rw,
+                value_weight=vw,
+                buy_value_scale=float(self.cfg.buy_value_scale),
+                buy_shaping_weight=float(self.cfg.buy_shaping_weight),
+                illegal_gene_penalty=igen_pen,
+                greedy_seed=greedy_seed,
+                turn_deadline_at=_turn_hard_wall_deadline_at(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ),
+            )
+            exec_buy_act = list(ex_pick.build_actions)
+            sim_after = ex_pick.sim_after
+            ig_tot += int(ex_pick.illegal)
+        else:
+            greedy_seed = self._greedy_cheapest_buy_genome(s_after_moves, acting_seat, fo, catalog)
+            best_buy_g = greedy_seed
+            if best_buy_g is not None:
+                sim_terminal = clone_for_search(s_after_moves)
+                exec_buy_act, _, sim_after, ileg_buy, *_ = self._execute_buy_spend_allocation(
+                    s_after_moves, best_buy_g, mutate_sim=sim_terminal,
+                )
+                ig_tot += int(ileg_buy)
+            if not exec_buy_act and greedy_seed is not None:
+                sim_fb = clone_for_search(s_after_moves)
+                g_acts, _, sim_after, ileg_fb, *_ = self._execute_buy_spend_allocation(
+                    s_after_moves, greedy_seed, mutate_sim=sim_fb,
+                )
+                if g_acts:
+                    exec_buy_act = g_acts
+                    ig_tot += int(ileg_fb)
+
+        if fo:
+            ig_tot += self._simulate_end_turn_sequence(sim_after, acting_seat, end_tail)
+
+        actions = list(move_actions) + list(exec_buy_act) + list(end_tail)
+        breakdown = self._score_state_delta(
+            before, sim_after, acting_seat, v_before, illegal_genes=ig_tot,
+        )
+        return TurnCandidate(
+            actions=actions,
+            state_after=sim_after,
+            score=float(breakdown.total),
+            breakdown=breakdown,
+            illegal=int(ig_tot),
+        )
+
+    def _evolve_top_k_turn_candidates(
+        self,
+        before: GameState,
+        acting_seat: int,
+        k: int,
+        *,
+        budget_scale: float,
+        turn_started_at: float,
+        hard_wall_s: float,
+        pv_budget_deadline: float | None = None,
+    ) -> list[TurnCandidate]:
+        if k <= 0:
+            return []
+        if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+            return []
+        if pv_budget_deadline is not None and time.perf_counter() >= float(pv_budget_deadline):
+            return []
+
+        scale = max(0.05, min(1.0, float(budget_scale)))
+        pop_sz = max(8, int(round(float(self.cfg.population) * scale)))
+        gen_sz = max(2, int(round(float(self.cfg.generations) * scale)))
+        if self.dynamic_budget and self.complexity_metrics is not None:
+            owned_units, factories, contested_caps, contacts = self.complexity_metrics[:4]
+            juicy_attacks = self.complexity_metrics[4] if len(self.complexity_metrics) > 4 else 0
+            pop_sz, gen_sz = dynamic_rhea_budget(
+                owned_units,
+                factories,
+                contested_caps,
+                contacts,
+                juicy_attacks,
+                self.cfg.autotune,
+            )
+            pop_sz = max(8, int(round(pop_sz * scale)))
+            gen_sz = max(2, int(round(gen_sz * scale)))
+
+        pool = ActionPool.build(before)
+        population = [self._random_move_only_genome(pool) for _ in range(pop_sz)]
+        v_before = float(self.fitness.value(before, acting_seat))
+        rw = float(self.fitness.reward_weight)
+        vw = float(self.fitness.value_weight)
+        igen_pen = float(self.fitness.illegal_gene_penalty)
+        phi_before_state = float(self.fitness.phi(before, acting_seat))
+        fac_block_pp = float(self.cfg.buy_base_skip_penalty)
+        factories_before = _factories_fully_owned_positions(before, acting_seat)
+        scored_mv: list[tuple[float, RheaGenome]] = []
+
+        for _gen in range(gen_sz):
+            if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+                break
+            if pv_budget_deadline is not None and time.perf_counter() >= float(pv_budget_deadline):
+                break
+            states_after: list[GameState] = []
+            ill_moves: list[int] = []
+            for g in population:
+                am, _mav, ild = self._simulate_move_phase_only(before, g)
+                states_after.append(am)
+                ill_moves.append(int(ild))
+            vals_mv = self.fitness.batch_value(states_after, acting_seat)
+            scored_mv = []
+            for idx, sam in enumerate(states_after):
+                phi_delta = float(self.fitness.phi(sam, acting_seat)) - phi_before_state
+                wadv = (float(vals_mv[idx]) - v_before) * 2.0
+                ileg_p = -igen_pen * float(ill_moves[idx])
+                fac_occ = _move_phase_factory_occupation_penalty(
+                    sam, acting_seat, factories_before, fac_block_pp,
+                )
+                terminal_sparse = float(
+                    self.fitness.engine_terminal_sparse(sam, acting_seat)
+                )
+                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ + terminal_sparse
+                scored_mv.append((total_m, population[idx]))
+            scored_mv.sort(key=lambda x: x[0], reverse=True)
+            elites = scored_mv[: max(1, self.cfg.elite)]
+            next_mv: list[RheaGenome] = [copy.deepcopy(gx) for _sc, gx in elites]
+            while len(next_mv) < pop_sz:
+                p1 = copy.deepcopy(self.rng.choice(elites)[1])
+                p2 = copy.deepcopy(self.rng.choice(elites)[1])
+                child = self._crossover_move_only(p1, p2, pool)
+                self._mutate_move_phase_genome(child, pool)
+                next_mv.append(child)
+            population = next_mv
+
+        if not scored_mv:
+            return []
+        out: list[TurnCandidate] = []
+        seen: set[tuple] = set()
+        for _sc, genome in scored_mv:
+            key = (
+                bool(genome.cop_activate),
+                tuple((ui.unit_pos, ui.move_dest, ui.action_type, ui.target_pos) for ui in genome.unit_segment),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            cand = self._complete_turn_from_move_genome(
+                before,
+                genome,
+                acting_seat,
+                v_before,
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+            )
+            if cand is not None:
+                out.append(cand)
+            if len(out) >= int(k):
+                break
+        return out
+
+
+    def _turn_candidate_from_base_result(
+        self,
+        before: GameState,
+        base: RheaResult,
+        acting_seat: int,
+    ) -> TurnCandidate | None:
+        """Exact base RHEA turn as a protected PV root candidate."""
+        try:
+            sim = clone_for_search(before)
+            replay_rhea_actions(sim, list(base.actions), acting_seat)
+        except Exception:
+            return None
+        return TurnCandidate(
+            actions=list(base.actions),
+            state_after=sim,
+            score=float(base.score),
+            breakdown=base.breakdown,
+            illegal=int(base.illegal_genes),
+            is_protected_base=True,
+            source_key=("protected_base",),
+            backup_anchor=float(base.score),
+        )
+
+    def _run_rhea_pv_candidate(
+        self,
+        before: GameState,
+        acting_seat: int,
+        v_before: float,
+        base: RheaResult,
+        *,
+        turn_started_at: float,
+        hard_wall_s: float,
+    ) -> dict | None:
+        if not self.cfg.use_pv_lookahead or not self.cfg.pv_config.enabled:
+            return None
+        if before.action_stage != ActionStage.SELECT:
+            return None
+        root_moves = list(getattr(self, "_pv_last_scored_mv", []) or [])
+        value_moves = list(getattr(self, "_pv_last_value_scored_mv", []) or [])
+        if not root_moves:
+            return None
+        protected_base = self._turn_candidate_from_base_result(before, base, acting_seat)
+        try:
+            return run_rhea_pv_lookahead(
+                self,
+                before=before,
+                root_actor=acting_seat,
+                v_before=v_before,
+                root_move_genomes=root_moves,
+                value_move_genomes=value_moves,
+                protected_base=protected_base,
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+            )
+        except Exception as exc:
+            print(json.dumps({"event": "rhea_pv_error", "error": repr(exc)}), flush=True)
+            return None
+
+    def _run_tactical_beam_candidate(
+        self,
+        before: GameState,
+        acting_seat: int,
+        v_before: float,
+    ) -> dict | None:
+        if not self.cfg.use_tactical_beam or self.tactical_beam is None:
+            return None
+        try:
+            deadline_at = _turn_hard_wall_deadline_at(
+                turn_started_at=float(getattr(self, "_active_turn_started_at", 0.0)),
+                hard_wall_s=float(getattr(self, "_active_turn_hard_wall_s", 0.0)),
+            ) if hasattr(self, "_active_turn_started_at") else None
+            beam_result = self.tactical_beam.search(before, deadline_at=deadline_at)
+        except Exception as exc:
+            print(json.dumps({"event": "tactical_beam_error", "error": repr(exc)}), flush=True)
+            return None
+        if not beam_result.lines:
+            return None
+        best_line = beam_result.lines[0]
+        breakdown = best_line.breakdown
+        if breakdown is None:
+            breakdown = self._score_state_delta(before, best_line.state, acting_seat, v_before)
+        return {
+            "source": "beam",
+            "score": float(breakdown.total),
+            "actions": list(best_line.actions),
+            "breakdown": breakdown,
+            "illegal": 0,
+            "beam_width": int(beam_result.width),
+            "beam_depth": int(beam_result.depth),
+        }
+
+    def _run_mcts_candidate(
+        self,
+        before: GameState,
+        acting_seat: int,
+        v_before: float,
+        *,
+        turn_started_at: float,
+        hard_wall_s: float,
+    ) -> dict | None:
+        if not self.cfg.use_mcts or before.action_stage != ActionStage.SELECT:
+            return None
+        elapsed_s = time.perf_counter() - float(turn_started_at)
+        if hard_wall_s > 0.0 and elapsed_s >= hard_wall_s:
+            return None
+        mcts_cfg = dynamic_mcts_config(
+            self.cfg.mcts_config,
+            self.complexity_metrics,
+            self.cfg.mcts_autotune,
+            hard_turn_wall_s=hard_wall_s,
+            elapsed_turn_s=elapsed_s,
+        )
+        if mcts_cfg.num_sims <= 0 or (mcts_cfg.max_wall_time_s is not None and mcts_cfg.max_wall_time_s <= 0.0):
+            return None
+        seed = self.rng.randint(0, 2**31 - 1)
+        mcts_cfg = dataclasses.replace(mcts_cfg, rng_seed=seed)
+        try:
+            policy_c, value_c, prior_c = make_callables_from_rhea_fitness(
+                self.fitness,
+                acting_seat,
+                rng=self.rng,
+            )
+            plan, stats = run_mcts(
+                clone_for_search(before),
+                policy_callable=policy_c,
+                value_callable=value_c,
+                prior_callable=prior_c,
+                config=mcts_cfg,
+                absolute_deadline_at=_turn_hard_wall_deadline_at(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ),
+            )
+            replay = before.apply_full_turn(
+                list(plan),
+                copy=True,
+                max_actions=mcts_cfg.max_plan_actions,
+                rng_seed=seed,
+                return_trace=False,
+            )
+        except Exception as exc:
+            print(json.dumps({"event": "mcts_error", "error": repr(exc)}), flush=True)
+            return None
+        after = replay[0]
+        actions = list(replay[1]) if len(replay) >= 2 else list(plan)
+        breakdown = self._score_state_delta(before, after, acting_seat, v_before)
+        return {
+            "source": "mcts",
+            "score": float(breakdown.total),
+            "actions": actions,
+            "breakdown": breakdown,
+            "illegal": 0,
+            "mcts_sims_run": int(stats.get("total_sims_run", 0)),
+            "mcts_wall_s": float(stats.get("wall_time_s", 0.0)),
+            "mcts_stop_reason": stats.get("mcts_stop_reason"),
+        }
+
+    def _finalize_competing_searches(
+        self,
+        base: RheaResult,
+        aux_candidates: list[dict],
+        before: GameState,
+        acting_seat: int,
+        v_before: float,
+        *,
+        turn_started_at: float,
+        hard_wall_s: float,
+    ) -> RheaResult:
+        pv_candidate = self._run_rhea_pv_candidate(
+            before,
+            acting_seat,
+            v_before,
+            base,
+            turn_started_at=turn_started_at,
+            hard_wall_s=hard_wall_s,
+        )
+        if pv_candidate is not None:
+            pv_score = float(pv_candidate.get("score", -1e30))
+            base_leaf = pv_candidate.get("pv_base_leaf_score")
+            alt_leaf = pv_candidate.get("pv_alternate_leaf_score")
+            robust_margin = float(
+                pv_candidate.get(
+                    "pv_robust_margin",
+                    getattr(self.cfg.pv_config, "pv_min_switch_margin", 0.02) or 0.02,
+                )
+                or 0.0
+            )
+            if base_leaf is not None and alt_leaf is not None:
+                pv_margin = float(alt_leaf) - float(base_leaf)
+            else:
+                # No verified alternate beat the protected base: report a
+                # zero switch margin rather than a meaningless leaf-vs-myopic gap.
+                pv_margin = 0.0
+            base.pv_margin_vs_base = float(pv_margin)
+            if pv_candidate.get("pv_backed_score") is not None:
+                base.pv_backed_score = float(pv_candidate.get("pv_backed_score"))
+            base.pv_nodes_evaluated = max(
+                base.pv_nodes_evaluated,
+                int(pv_candidate.get("pv_nodes_evaluated", 0)),
+            )
+            base.pv_root_width = max(base.pv_root_width, int(pv_candidate.get("pv_root_width", 0)))
+            base.pv_response_width = max(
+                base.pv_response_width, int(pv_candidate.get("pv_response_width", 0))
+            )
+            base.pv_followup_width = max(
+                base.pv_followup_width, int(pv_candidate.get("pv_followup_width", 0))
+            )
+            base.pv_wall_s = max(base.pv_wall_s, float(pv_candidate.get("pv_wall_s", 0.0)))
+            if pv_candidate.get("pv_stop_reason") is not None:
+                base.pv_stop_reason = str(pv_candidate.get("pv_stop_reason"))
+            if pv_candidate.get("pv_best_value_guided"):
+                base.pv_best_value_guided = True
+            if pv_candidate.get("pv_best_is_protected_base"):
+                base.pv_best_is_protected_base = True
+            if pv_candidate.get("pv_depth_pairs") is not None:
+                base.pv_depth_pairs = int(pv_candidate.get("pv_depth_pairs", 0))
+            if pv_candidate.get("pv_robust_margin") is not None:
+                base.pv_robust_margin = float(pv_candidate.get("pv_robust_margin"))
+            if pv_candidate.get("pv_base_leaf_score") is not None:
+                base.pv_base_leaf_score = float(pv_candidate.get("pv_base_leaf_score"))
+            if pv_candidate.get("pv_alternate_leaf_score") is not None:
+                base.pv_alternate_leaf_score = float(pv_candidate.get("pv_alternate_leaf_score"))
+            if pv_candidate.get("pv_best_is_protected_base"):
+                base.pv_switched = False
+            else:
+                pv_candidate["pv_switched"] = True
+                pv_candidate["pv_margin_vs_base"] = float(pv_margin)
+                aux_candidates.append(pv_candidate)
+        run_mcts = bool(self.cfg.use_mcts) and int(getattr(self.cfg.pv_config, "random_probes", 0) or 0) > 0
+        if run_mcts:
+            mcts_candidate = self._run_mcts_candidate(
+                before,
+                acting_seat,
+                v_before,
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+            )
+            if mcts_candidate is not None:
+                aux_candidates.append(mcts_candidate)
+        if not aux_candidates:
+            return base
+        best = max(aux_candidates, key=lambda c: float(c["score"]))
+        base.beam_width = max(base.beam_width, int(best.get("beam_width", 0)))
+        base.beam_depth = max(base.beam_depth, int(best.get("beam_depth", 0)))
+        base.mcts_sims_run = max(base.mcts_sims_run, int(best.get("mcts_sims_run", 0)))
+        base.mcts_wall_s = max(base.mcts_wall_s, float(best.get("mcts_wall_s", 0.0)))
+        if best.get("mcts_stop_reason") is not None:
+            base.mcts_stop_reason = str(best.get("mcts_stop_reason"))
+        base.pv_nodes_evaluated = max(base.pv_nodes_evaluated, int(best.get("pv_nodes_evaluated", 0)))
+        base.pv_root_width = max(base.pv_root_width, int(best.get("pv_root_width", 0)))
+        base.pv_response_width = max(base.pv_response_width, int(best.get("pv_response_width", 0)))
+        base.pv_followup_width = max(base.pv_followup_width, int(best.get("pv_followup_width", 0)))
+        base.pv_wall_s = max(base.pv_wall_s, float(best.get("pv_wall_s", 0.0)))
+        if best.get("pv_stop_reason") is not None:
+            base.pv_stop_reason = str(best.get("pv_stop_reason"))
+        if best.get("pv_backed_score") is not None:
+            base.pv_backed_score = float(best.get("pv_backed_score"))
+        if best.get("pv_best_value_guided"):
+            base.pv_best_value_guided = True
+        if best.get("pv_best_is_protected_base"):
+            base.pv_best_is_protected_base = True
+        if str(best.get("source", "")) == "rhea_pv":
+            base.pv_switched = True
+            if best.get("pv_margin_vs_base") is not None:
+                base.pv_margin_vs_base = float(best.get("pv_margin_vs_base"))
+        if str(best.get("source", "")) == "rhea_pv" and not best.get("pv_best_is_protected_base"):
+            base.actions = list(best["actions"])
+            base.score = float(best["score"])
+            base.breakdown = best["breakdown"]
+            base.illegal_genes = int(best.get("illegal", 0))
+            base.chosen_search = "rhea_pv"
+            return base
+        if float(best["score"]) <= float(base.score):
+            return base
+        base.actions = list(best["actions"])
+        base.score = float(best["score"])
+        base.breakdown = best["breakdown"]
+        base.illegal_genes = int(best.get("illegal", 0))
+        base.chosen_search = str(best.get("source", "rhea"))
+        return base
+
     def _choose_full_turn_two_phase(self, state: GameState) -> RheaResult:
         """Separate Move RHEA (Φ/value on post-move snapshot) → Buy RHEA (value+shaping)."""
         acting_seat = int(state.active_player)
         before = state
         factories_before = _factories_fully_owned_positions(before, acting_seat)
+        turn_started_at = time.perf_counter()
+        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
+        self._active_turn_started_at = turn_started_at
+        self._active_turn_hard_wall_s = hard_wall_s
+        aux_candidates: list[dict] = []
+        v_before = float(self.fitness.value(before, acting_seat))
+        beam_candidate = None
+        if not _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+            beam_candidate = self._run_tactical_beam_candidate(before, acting_seat, v_before)
+        if beam_candidate is not None:
+            aux_candidates.append(beam_candidate)
 
         population_size = self.cfg.population
         generations = self.cfg.generations
@@ -1182,10 +1916,9 @@ class RheaPlanner:
         init_move_best: float | None = None
 
         phi_before_state = float(self.fitness.phi(before, acting_seat))
-        v_before = float(self.fitness.value(before, acting_seat))
         fac_block_pp = float(self.cfg.buy_base_skip_penalty)
 
-        move_wall_start = time.perf_counter()
+        move_wall_start = turn_started_at
         move_generations_floor = int(generations)
         move_generations_used = 0
         adaptive_extra_used = 0
@@ -1206,10 +1939,13 @@ class RheaPlanner:
             if soft_wall_s is not None and float(soft_wall_s) > 0.0
             else None
         )
-        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
         max_move_generations = move_generations_floor + max_extra_generations
         mv_gen = 0
         while mv_gen < max_move_generations:
+            if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+                adaptive_stop_reason, adaptive_hard_reason = _apply_turn_hard_wall_stop(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s, adaptive_stop_reason=adaptive_stop_reason, adaptive_hard_reason=adaptive_hard_reason)
+                if adaptive_hard_reason == "turn_wall_900s": self.adaptive_disabled_reason = adaptive_hard_reason
+                break
             elapsed_s = time.perf_counter() - move_wall_start
             wall_stop_reason = _adaptive_wall_stop_reason(
                 elapsed_s=elapsed_s,
@@ -1217,6 +1953,7 @@ class RheaPlanner:
                 floor_generations=move_generations_floor,
                 soft_wall_s=soft_wall_s,
                 hard_wall_s=hard_wall_s,
+                turn_started_at=turn_started_at,
             )
             if wall_stop_reason is not None:
                 adaptive_stop_reason = wall_stop_reason
@@ -1226,13 +1963,56 @@ class RheaPlanner:
                 break
             states_after: list[GameState] = []
             ill_moves: list[int] = []
+            _hard_during_sim = False
 
             for g in population:
+                if _turn_hard_wall_breached(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ):
+                    _hard_during_sim = True
+                    break
                 am, _mav, ild = self._simulate_move_phase_only(before, g)
                 states_after.append(am)
                 ill_moves.append(int(ild))
 
-            vals_mv = self.fitness.batch_value(states_after, acting_seat)
+            if _hard_during_sim or len(states_after) != len(population):
+                adaptive_stop_reason, adaptive_hard_reason = _apply_turn_hard_wall_stop(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                    adaptive_stop_reason="hard_wall",
+                    adaptive_hard_reason=adaptive_hard_reason,
+                )
+                if adaptive_hard_reason == "turn_wall_900s":
+                    self.adaptive_disabled_reason = adaptive_hard_reason
+                break
+
+            vals_mv: list[float] = []
+            _value_chunk = 8
+            _hard_during_gen = False
+            for _chunk_start in range(0, len(states_after), _value_chunk):
+                if _turn_hard_wall_breached(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                ):
+                    _hard_during_gen = True
+                    break
+                vals_mv.extend(
+                    self.fitness.batch_value(
+                        states_after[_chunk_start : _chunk_start + _value_chunk],
+                        acting_seat,
+                    )
+                )
+            if _hard_during_gen or len(vals_mv) != len(states_after):
+                adaptive_stop_reason, adaptive_hard_reason = _apply_turn_hard_wall_stop(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                    adaptive_stop_reason="hard_wall",
+                    adaptive_hard_reason=adaptive_hard_reason,
+                )
+                if adaptive_hard_reason == "turn_wall_900s":
+                    self.adaptive_disabled_reason = adaptive_hard_reason
+                break
 
             scored_mv: list = []
             for idx, sam in enumerate(states_after):
@@ -1245,10 +2025,20 @@ class RheaPlanner:
                 fac_occ = _move_phase_factory_occupation_penalty(
                     sam, acting_seat, factories_before, fac_block_pp,
                 )
-                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ
+                terminal_sparse = float(
+                    self.fitness.engine_terminal_sparse(sam, acting_seat)
+                )
+                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ + terminal_sparse
                 scored_mv.append((total_m, population[idx]))
 
             scored_mv.sort(key=lambda x: x[0], reverse=True)
+            self._pv_last_scored_mv = _dedup_by_move_identity(scored_mv)
+            value_scored_mv = [
+                ((float(vals_mv[idx]) - float(v_before)) * 2.0, population[idx])
+                for idx in range(len(population))
+            ]
+            value_scored_mv.sort(key=lambda x: x[0], reverse=True)
+            self._pv_last_value_scored_mv = _dedup_by_move_identity(value_scored_mv)
 
             current_best = float(scored_mv[0][0])
             if mv_gen == 0:
@@ -1350,15 +2140,19 @@ class RheaPlanner:
                 float(self.fitness.value(sim_fin, acting_seat)) - v_before
             ) * 2.0
             ill_c = -igen_pen * float(ig_tot)
-            score_tot = rw * phi_end + vw * v_adv_end + ill_c
+            terminal_sparse = float(
+                self.fitness.engine_terminal_sparse(sim_fin, acting_seat)
+            )
+            score_tot = rw * phi_end + vw * v_adv_end + ill_c + terminal_sparse
 
             bd = RheaFitnessBreakdown(
                 phi_delta=float(phi_end),
                 value=float(v_adv_end),
                 illegal_penalty=float(ill_c),
+                terminal_sparse=float(terminal_sparse),
                 total=float(score_tot),
             )
-            return RheaResult(
+            result = RheaResult(
                 actions=list(move_actions) + list(tail),
                 score=float(score_tot),
                 breakdown=bd,
@@ -1381,6 +2175,15 @@ class RheaPlanner:
                 buy_mode_used=str(self.cfg.buy_mode),
                 n_move_actions=len(move_actions),
                 n_buy_actions=0,
+            )
+            return self._finalize_competing_searches(
+                result,
+                aux_candidates,
+                before,
+                acting_seat,
+                v_before,
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
             )
 
         buy_mode_used = str(self.cfg.buy_mode)
@@ -1407,32 +2210,50 @@ class RheaPlanner:
             greedy_seed = self._greedy_cheapest_buy_genome(
                 s_after_moves, acting_seat, fo, catalog,
             )
-            ex_pick = pick_best_exhaustive_buy(
-                self,
-                self.fitness,
-                s_after_moves,
-                acting_seat,
-                fo,
-                catalog,
-                max_candidates=int(self.cfg.buy_exhaustive_max_candidates),
-                reward_weight=rw,
-                value_weight=vw,
-                buy_value_scale=float(self.cfg.buy_value_scale),
-                buy_shaping_weight=float(self.cfg.buy_shaping_weight),
-                illegal_gene_penalty=igen_pen,
-                greedy_seed=greedy_seed,
-            )
-            best_buy_g = ex_pick.genome
-            exec_buy_act = list(ex_pick.build_actions)
-            sim_after_buy = ex_pick.sim_after
-            sim_terminal = clone_for_search(s_after_moves)
-            ileg_buy = int(ex_pick.illegal)
-            buy_candidates_enumerated = int(ex_pick.candidates_enumerated)
-            buy_candidates_scored = int(ex_pick.candidates_scored)
-            buy_exhaustive_truncated = bool(ex_pick.truncated)
-            buy_exhaustive_frontier_depth_at_cap = ex_pick.frontier_depth_at_cap
-            buy_generations_used = 0
-            print(
+            exec_buy_act = []
+            sim_after_buy = clone_for_search(s_after_moves)
+            ileg_buy = 0
+            best_buy_g = greedy_seed
+            if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+                adaptive_stop_reason, adaptive_hard_reason = _apply_turn_hard_wall_stop(
+                    turn_started_at=turn_started_at,
+                    hard_wall_s=hard_wall_s,
+                    adaptive_stop_reason=adaptive_stop_reason,
+                    adaptive_hard_reason=adaptive_hard_reason,
+                )
+                if adaptive_hard_reason == "turn_wall_900s":
+                    self.adaptive_disabled_reason = adaptive_hard_reason
+                buy_generations_used = 0
+            else:
+                ex_pick = pick_best_exhaustive_buy(
+                    self,
+                    self.fitness,
+                    s_after_moves,
+                    acting_seat,
+                    fo,
+                    catalog,
+                    max_candidates=int(self.cfg.buy_exhaustive_max_candidates),
+                    reward_weight=rw,
+                    value_weight=vw,
+                    buy_value_scale=float(self.cfg.buy_value_scale),
+                    buy_shaping_weight=float(self.cfg.buy_shaping_weight),
+                    illegal_gene_penalty=igen_pen,
+                    greedy_seed=greedy_seed,
+                    turn_deadline_at=_turn_hard_wall_deadline_at(
+                        turn_started_at=turn_started_at,
+                        hard_wall_s=hard_wall_s,
+                    ),
+                )
+                best_buy_g = ex_pick.genome
+                exec_buy_act = list(ex_pick.build_actions)
+                sim_after_buy = ex_pick.sim_after
+                ileg_buy = int(ex_pick.illegal)
+                buy_candidates_enumerated = int(ex_pick.candidates_enumerated)
+                buy_candidates_scored = int(ex_pick.candidates_scored)
+                buy_exhaustive_truncated = bool(ex_pick.truncated)
+                buy_exhaustive_frontier_depth_at_cap = ex_pick.frontier_depth_at_cap
+                buy_generations_used = 0
+                print(
                 json.dumps(
                     {
                         "event": "rhea_buy_exhaustive",
@@ -1493,8 +2314,19 @@ class RheaPlanner:
             phi_ref_buy = float(self.fitness.phi(s_after_moves, acting_seat))
 
             for by_gen in range(buy_gen_sz):
+                if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+                    adaptive_stop_reason, adaptive_hard_reason = _apply_turn_hard_wall_stop(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s, adaptive_stop_reason=adaptive_stop_reason, adaptive_hard_reason=adaptive_hard_reason)
+                    if adaptive_hard_reason == "turn_wall_900s": self.adaptive_disabled_reason = adaptive_hard_reason
+                    break
                 scored_b: list = []
+                _hard_during_buy = False
                 for bg in buy_population:
+                    if _turn_hard_wall_breached(
+                        turn_started_at=turn_started_at,
+                        hard_wall_s=hard_wall_s,
+                    ):
+                        _hard_during_buy = True
+                        break
                     sc = clone_for_search(s_after_moves)
                     acts_b, _ef, sf, igb, rk, rex = (
                         self._execute_buy_spend_allocation(
@@ -1528,6 +2360,17 @@ class RheaPlanner:
                             f"tot={tot_b:+.4f}",
                             flush=True,
                         )
+
+                if _hard_during_buy or not scored_b:
+                    adaptive_stop_reason, adaptive_hard_reason = _apply_turn_hard_wall_stop(
+                        turn_started_at=turn_started_at,
+                        hard_wall_s=hard_wall_s,
+                        adaptive_stop_reason="hard_wall",
+                        adaptive_hard_reason=adaptive_hard_reason,
+                    )
+                    if adaptive_hard_reason == "turn_wall_900s":
+                        self.adaptive_disabled_reason = adaptive_hard_reason
+                    break
 
                 scored_b.sort(
                     key=lambda row: (row[0], row[1]),
@@ -1639,16 +2482,20 @@ class RheaPlanner:
             float(self.fitness.value(sim_after_buy, acting_seat)) - v_before
         ) * 2.0
         ill_c = -igen_pen * float(ig_tot)
-        score_total = rw * phi_end + vw * v_adv_end + ill_c
+        terminal_sparse = float(
+            self.fitness.engine_terminal_sparse(sim_after_buy, acting_seat)
+        )
+        score_total = rw * phi_end + vw * v_adv_end + ill_c + terminal_sparse
 
         bd = RheaFitnessBreakdown(
             phi_delta=float(phi_end),
             value=float(v_adv_end),
             illegal_penalty=float(ill_c),
+            terminal_sparse=float(terminal_sparse),
             total=float(score_total),
         )
 
-        return RheaResult(
+        result = RheaResult(
             actions=list(move_actions) + list(exec_buy_act) + list(end_tail),
             score=float(score_total),
             breakdown=bd,
@@ -1676,6 +2523,15 @@ class RheaPlanner:
             adaptive_best_improvement=adaptive_best_improvement,
             n_move_actions=len(move_actions),
             n_buy_actions=len(exec_buy_act),
+        )
+        return self._finalize_competing_searches(
+            result,
+            aux_candidates,
+            before,
+            acting_seat,
+            v_before,
+            turn_started_at=turn_started_at,
+            hard_wall_s=hard_wall_s,
         )
 
     # ------------------------------------------------------------------

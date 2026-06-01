@@ -467,3 +467,102 @@ def test_phi_episode_power_activation_counters(phi_env) -> None:
     env._phi_after_step_record_power_activations(Action(ActionType.ACTIVATE_SCOP), 1)
     assert env._episode_cop_by_seat == [1, 0]
     assert env._episode_scop_by_seat == [0, 1]
+
+
+# --- Map-control (positioning) Phi term -----------------------------------
+
+
+def _control_env(*, delta=1.0, center_w=0.0, choke_w=0.0, denial_w=0.0, denial_radius=3):
+    from rl.env import AWBWEnv
+    env = object.__new__(AWBWEnv)
+    env._phi_control_delta = float(delta)
+    env._phi_control_center_w = float(center_w)
+    env._phi_control_choke_w = float(choke_w)
+    env._phi_control_denial_w = float(denial_w)
+    env._phi_control_denial_radius = int(denial_radius)
+    env._map_control_cache = {}
+    env._phi_alpha = 0.0
+    env._phi_beta = 0.0
+    env._phi_kappa = 0.0
+    env._phi_gamma = 0.0
+    env._phi_contextual_capture = False
+    env._phi_capture_phase_weighting = False
+    return env
+
+
+def _ctrl_unit(player, pos, hp=100, uid=1):
+    st = UNIT_STATS[UnitType.INFANTRY]
+    return Unit(
+        UnitType.INFANTRY, player, hp, st.max_ammo, st.max_fuel, pos,
+        False, [], False, 20, uid,
+    )
+
+
+def _ctrl_state(terrain, units, properties, *, map_id=900001):
+    from engine.co import make_co_state_safe
+    from engine.game import GameState
+    from engine.map_loader import MapData
+    height = len(terrain)
+    width = len(terrain[0]) if terrain else 0
+    md = MapData(
+        map_id=map_id, name="control_probe", map_type="std",
+        terrain=[row[:] for row in terrain], height=height, width=width,
+        cap_limit=999, unit_limit=999, unit_bans=[], tiers=[],
+        objective_type=None, properties=list(properties),
+        hq_positions={0: [(0, 0)], 1: [(height - 1, width - 1)]},
+        lab_positions={0: [], 1: []}, country_to_player={},
+        predeployed_specs=[],
+    )
+    return GameState(
+        map_data=md, units=units, funds=[0, 0],
+        co_states=[make_co_state_safe(1), make_co_state_safe(1)],
+        properties=list(properties), turn=1, active_player=0,
+        action_stage=ActionStage.SELECT, selected_unit=None,
+        selected_move_pos=None, done=False, winner=None, win_reason=None,
+        game_log=[], tier_name="T2", full_trace=[],
+    )
+
+
+def test_map_control_phi_rises_toward_center():
+    env = _control_env(delta=1.0, center_w=1.0)
+    terrain = [[1] * 5 for _ in range(5)]
+    corner = _ctrl_state(terrain, {0: [_ctrl_unit(0, (0, 0))], 1: []}, [])
+    center = _ctrl_state(terrain, {0: [_ctrl_unit(0, (2, 2))], 1: []}, [])
+    assert env._map_control_for_seat(center, 0) > env._map_control_for_seat(corner, 0)
+    assert env._compute_phi_for_seat(center, 0) > env._compute_phi_for_seat(corner, 0)
+
+
+def test_map_control_phi_rewards_chokepoint():
+    env = _control_env(delta=1.0, choke_w=1.0)
+    SEA = 28
+    terrain = [
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 1],
+        [SEA, SEA, 1, SEA, SEA],
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 1],
+    ]
+    probe = _ctrl_state(terrain, {0: [], 1: []}, [], map_id=900002)
+    _, chokes = env._map_control_static(probe)
+    assert (2, 2) in chokes
+    assert (1, 2) not in chokes
+    on_choke = _ctrl_state(terrain, {0: [_ctrl_unit(0, (2, 2))], 1: []}, [], map_id=900002)
+    off_choke = _ctrl_state(terrain, {0: [_ctrl_unit(0, (1, 2))], 1: []}, [], map_id=900002)
+    assert env._compute_phi_for_seat(on_choke, 0) > env._compute_phi_for_seat(off_choke, 0)
+
+
+def test_map_control_phi_rewards_capture_denial():
+    from engine.map_loader import PropertyState
+    env = _control_env(delta=1.0, denial_w=1.0, denial_radius=3)
+    terrain = [[1] * 5 for _ in range(5)]
+    neutral = PropertyState(
+        terrain_id=34, row=2, col=2, owner=None, capture_points=20,
+        is_hq=False, is_lab=False, is_comm_tower=False, is_base=False,
+        is_airport=False, is_port=False,
+    )
+    enemy = _ctrl_unit(1, (2, 4), uid=2)
+    on_prop = _ctrl_state(terrain, {0: [_ctrl_unit(0, (2, 2))], 1: [enemy]}, [neutral], map_id=900003)
+    far = _ctrl_state(terrain, {0: [_ctrl_unit(0, (0, 0))], 1: [enemy]}, [neutral], map_id=900003)
+    assert env._map_control_for_seat(on_prop, 0) > 0.0
+    assert env._map_control_for_seat(far, 0) == 0.0
+    assert env._compute_phi_for_seat(on_prop, 0) > env._compute_phi_for_seat(far, 0)

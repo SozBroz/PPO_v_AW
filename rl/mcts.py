@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -136,6 +136,68 @@ class MCTSConfig:
     p0_mcts_invocation_fraction: float = 1.0
     # Brute-force optimization: if estimated branching factor is <= this threshold, enumerate all plans
     brute_force_branching_threshold: int = 0  # 0 = disabled
+
+
+@dataclass(slots=True)
+class MCTSAutotuneConfig:
+    """Position-complexity budget for training-time turn-level MCTS."""
+
+    sims_base: int = 32
+    sims_complexity_scale: float = 18.0
+    sims_min: int = 16
+    sims_max: int = 512
+    root_plans_base: int = 4
+    root_plans_complexity_scale: float = 0.35
+    root_plans_min: int = 4
+    root_plans_max: int = 16
+    min_depth_base: int = 1
+    min_depth_complexity_scale: float = 0.08
+    min_depth_min: int = 1
+    min_depth_max: int = 6
+    wall_base_s: float = 8.0
+    wall_complexity_scale_s: float = 3.0
+    wall_min_s: float = 5.0
+    wall_max_s: float = 180.0
+    turn_wall_fraction: float = 0.25
+
+
+def dynamic_mcts_config(
+    base: MCTSConfig,
+    metrics: tuple[int, ...] | None,
+    autotune: MCTSAutotuneConfig | None = None,
+    *,
+    hard_turn_wall_s: float | None = None,
+    elapsed_turn_s: float = 0.0,
+) -> MCTSConfig:
+    """Scale MCTS sims/root plans/depth/wall from the same complexity tuple as RHEA."""
+
+    cfg = autotune or MCTSAutotuneConfig()
+    owned_units = int(metrics[0]) if metrics and len(metrics) > 0 else 0
+    factories = int(metrics[1]) if metrics and len(metrics) > 1 else 0
+    contested_captures = int(metrics[2]) if metrics and len(metrics) > 2 else 0
+    contacts = int(metrics[3]) if metrics and len(metrics) > 3 else 0
+    juicy_attacks = int(metrics[4]) if metrics and len(metrics) > 4 else 0
+    complexity = (
+        0.40 * owned_units
+        + 0.70 * factories
+        + 1.60 * contested_captures
+        + 1.35 * contacts
+        + 1.75 * juicy_attacks
+    )
+    sims = int(round(float(cfg.sims_base) + float(cfg.sims_complexity_scale) * complexity))
+    root_plans = int(round(float(cfg.root_plans_base) + float(cfg.root_plans_complexity_scale) * complexity))
+    min_depth = int(round(float(cfg.min_depth_base) + float(cfg.min_depth_complexity_scale) * complexity))
+    wall_s = float(cfg.wall_base_s) + float(cfg.wall_complexity_scale_s) * complexity
+    sims = max(int(cfg.sims_min), min(int(cfg.sims_max), sims))
+    root_plans = max(int(cfg.root_plans_min), min(int(cfg.root_plans_max), root_plans))
+    min_depth = max(int(cfg.min_depth_min), min(int(cfg.min_depth_max), min_depth))
+    wall_s = max(float(cfg.wall_min_s), min(float(cfg.wall_max_s), wall_s))
+    hard = 0.0 if hard_turn_wall_s is None else max(0.0, float(hard_turn_wall_s))
+    if hard > 0.0:
+        remaining = max(0.0, hard - max(0.0, float(elapsed_turn_s)))
+        wall_cap = remaining * max(0.0, min(1.0, float(cfg.turn_wall_fraction)))
+        wall_s = min(wall_s, wall_cap) if wall_cap > 0.0 else 0.0
+    return replace(base, num_sims=sims, root_plans=root_plans, min_depth=min_depth, max_wall_time_s=wall_s)
 
 
 def plan_key(final_state: GameState, actions: list[Action]) -> bytes:
@@ -532,6 +594,7 @@ def run_mcts(
     prior_callable: Callable[[GameState, list[list[Action]]], list[float]],
     config: MCTSConfig,
     decision_log_context: dict[str, Any] | None = None,
+    absolute_deadline_at: float | None = None,
 ) -> tuple[list[Action], dict[str, Any]]:
     if root_state.action_stage != ActionStage.SELECT:
         raise ValueError("run_mcts requires root action_stage == SELECT")
@@ -568,6 +631,9 @@ def run_mcts(
     stop_reason: str = "sims"
     sidx = 0
     while sidx < sim_target:
+        if absolute_deadline_at is not None and time.perf_counter() >= float(absolute_deadline_at):
+            stop_reason = "turn_wall"
+            break
         if wall_s is not None and float(wall_s) > 0.0 and (time.perf_counter() - t0) >= float(wall_s):
             stop_reason = "time"
             break
@@ -752,3 +818,46 @@ def make_callables_from_sb3_policy(model: Any, env: Any) -> tuple[
         return [float(x) / ssum for x in w.tolist()]
 
     return policy_callable, value_callable, prior_callable
+
+
+def make_callables_from_rhea_fitness(
+    fitness: Any,
+    acting_seat: int,
+    *,
+    rng: Any | None = None,
+) -> tuple[
+    Callable[[GameState], Action],
+    Callable[[GameState], float],
+    Callable[[GameState, list[list[Action]]], list[float]],
+]:
+    """
+    Build MCTS callables from a RHEA value fitness object.
+
+    Training-time MCTS stays independent from PPO while leaves are evaluated
+    with the current value head. Rollout actions and plan priors are uniform.
+    """
+
+    import random as random_mod
+
+    from engine.action import get_legal_actions
+
+    _rng = rng if rng is not None else random_mod.Random()
+
+    def policy_callable(st: GameState) -> Action:
+        legal = get_legal_actions(st)
+        if not legal:
+            raise RuntimeError("policy_callable: no legal actions")
+        return _rng.choice(legal)
+
+    def value_callable(st: GameState) -> float:
+        v = float(fitness.value(st, int(acting_seat)))
+        return float(np.clip(v, -1.0, 1.0))
+
+    def prior_callable(_st: GameState, plans: list[list[Action]]) -> list[float]:
+        n = len(plans)
+        if n <= 0:
+            return []
+        return [1.0 / n] * n
+
+    return policy_callable, value_callable, prior_callable
+

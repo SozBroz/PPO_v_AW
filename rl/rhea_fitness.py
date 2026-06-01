@@ -10,6 +10,9 @@ from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS, encode_state
 from rl.env import AWBWEnv
 from rl.value_net import AWBWValueNet, evaluate_value_np, evaluate_value_batch
 
+RHEA_ENGINE_TERMINAL_WIN_REASONS = frozenset({"hq_capture", "army_wipe"})
+
+
 # Cython acceleration for hot paths
 USE_CYTHON_FITNESS = True
 try:
@@ -24,7 +27,8 @@ class RheaFitnessBreakdown:
     phi_delta: float
     value: float
     illegal_penalty: float
-    total: float
+    terminal_sparse: float = 0.0
+    total: float = 0.0
 
 
 class RheaFitness:
@@ -67,6 +71,19 @@ class RheaFitness:
         depending on the episode's opponent mode.
         """
         self.value_model = value_model
+
+    @staticmethod
+    def engine_terminal_sparse(state: GameState, observer_seat: int) -> float:
+        if state is None or not state.done or state.winner is None:
+            return 0.0
+        win_reason = getattr(state, "win_reason", None)
+        if win_reason not in RHEA_ENGINE_TERMINAL_WIN_REASONS:
+            return 0.0
+        winner = int(state.winner)
+        if winner == -1:
+            return 0.0
+        seat = int(observer_seat)
+        return 1.0 if winner == seat else -1.0
 
     def phi(self, state: GameState, observer_seat: int) -> float:
         if USE_CYTHON_FITNESS and phi_cython is not None:
@@ -257,6 +274,8 @@ class RheaFitness:
                                 build_punishment_details += f" base_utilization_penalty={base_utilization_penalty:.4f} (bases={base_count}, built={units_built}, affordable_cheapest={max_affordable_with_cheapest}, funds={available_funds_before})"
                                 unused_funds_penalty = base_utilization_penalty
 
+        terminal_sparse = self.engine_terminal_sparse(after, observer_seat)
+
         total = (
             self.reward_weight * phi_delta
             + self.value_weight * win_advantage
@@ -264,11 +283,13 @@ class RheaFitness:
             + build_punishment
             + mech_penalty
             + unused_funds_penalty
+            + terminal_sparse
         )
 
         return RheaFitnessBreakdown(
             phi_delta=float(phi_delta),
             value=float(win_advantage),
             illegal_penalty=float(illegal_penalty),
+            terminal_sparse=float(terminal_sparse),
             total=float(total),
         )

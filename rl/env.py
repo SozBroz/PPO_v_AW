@@ -51,7 +51,7 @@ from engine.game import GameState, make_initial_state, MAX_TURNS
 from engine.map_loader import MapData, load_map
 from engine.action import Action, ActionStage, ActionType, get_legal_actions
 from engine.unit import UnitType, UNIT_STATS
-from engine.terrain import get_terrain
+from engine.terrain import get_terrain, MOVE_INF
 from engine.combat import damage_range, _colin_atk_rider, _kindle_atk_rider
 from engine.belief import BeliefState
 
@@ -292,6 +292,15 @@ PHI_CAPTURE_OPENING_END_DAY_ENV = "AWBW_PHI_CAPTURE_OPENING_END_DAY"
 PHI_CAPTURE_EARLY_MID_END_DAY_ENV = "AWBW_PHI_CAPTURE_EARLY_MID_END_DAY"
 PHI_CAPTURE_MID_END_DAY_ENV = "AWBW_PHI_CAPTURE_MID_END_DAY"
 PHI_CAPTURE_LATE_END_DAY_ENV = "AWBW_PHI_CAPTURE_LATE_END_DAY"
+# Optional map-control / positioning term in Phi (default-off via delta=0).
+# Rewards forward/center presence, chokepoint occupation, and sitting on
+# properties an enemy can reach soon (capture denial). All terms are pure
+# functions of state, so phi_delta stays potential-based (policy-invariant).
+PHI_CONTROL_DELTA_ENV = "AWBW_PHI_CONTROL_DELTA"
+PHI_CONTROL_CENTER_ENV = "AWBW_PHI_CONTROL_CENTER"
+PHI_CONTROL_CHOKE_ENV = "AWBW_PHI_CONTROL_CHOKE"
+PHI_CONTROL_DENIAL_ENV = "AWBW_PHI_CONTROL_DENIAL"
+PHI_CONTROL_DENIAL_RADIUS_ENV = "AWBW_PHI_CONTROL_DENIAL_RADIUS"
 PAIRWISE_ZERO_SUM_REWARD_ENV = "AWBW_PAIRWISE_ZERO_SUM_REWARD"
 # (α, β, κ, γ) when in phi mode and a coefficient env is unset:
 #   α (alpha, 2e-5): army value coefficient — unit cost × hp/100, scaled by 2e-5
@@ -301,6 +310,13 @@ PAIRWISE_ZERO_SUM_REWARD_ENV = "AWBW_PAIRWISE_ZERO_SUM_REWARD"
 PHI_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
     "balanced": (2e-5, 0.05, 0.05, 0.05),
     "capture": (2e-5, 0.02, 0.25, 0.20),
+}
+# Map-control defaults per profile: (delta, center_w, choke_w, denial_w).
+# delta defaults to 0.0 so existing runs are unchanged until explicitly
+# enabled (set AWBW_PHI_CONTROL_DELTA>0, or give a profile a non-zero delta).
+PHI_CONTROL_PROFILE_DEFAULTS: dict[str, tuple[float, float, float, float]] = {
+    "balanced": (0.0, 1.0, 0.5, 0.5),
+    "capture": (0.0, 1.0, 0.5, 0.5),
 }
 # Φ: one-time bonus for removing an enemy unit on the learner’s engine step,
 # in the same value units as the army line (α × cost × hp/100), scaled
@@ -1173,6 +1189,18 @@ class AWBWEnv(gym.Env):
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
         self._phi_gamma: float = _read_float(PHI_GAMMA_ENV, p_gamma)
+        cd_delta, cd_center, cd_choke, cd_denial = PHI_CONTROL_PROFILE_DEFAULTS.get(
+            prof_raw, (0.0, 1.0, 0.5, 0.5)
+        )
+        self._phi_control_delta: float = _read_float(PHI_CONTROL_DELTA_ENV, cd_delta)
+        self._phi_control_center_w: float = _read_float(PHI_CONTROL_CENTER_ENV, cd_center)
+        self._phi_control_choke_w: float = _read_float(PHI_CONTROL_CHOKE_ENV, cd_choke)
+        self._phi_control_denial_w: float = _read_float(PHI_CONTROL_DENIAL_ENV, cd_denial)
+        self._phi_control_denial_radius: int = int(
+            _read_float(PHI_CONTROL_DENIAL_RADIUS_ENV, 3.0)
+        )
+        # Lazy per-map cache keyed by map identity.
+        self._map_control_cache: dict = {}
         self._phi_contextual_capture: bool = _env_truthy(PHI_CONTEXTUAL_CAPTURE_ENV)
         self._phi_contested_neutral_capture_mult: float = max(
             1.0, _read_float(PHI_CONTESTED_NEUTRAL_CAPTURE_MULT_ENV, 1.75)
@@ -3451,11 +3479,18 @@ class AWBWEnv(gym.Env):
         cap_me = self._capture_progress_for_seat(state, me)
         cap_en = self._capture_progress_for_seat(state, en)
 
+        control = 0.0
+        if self._phi_control_delta != 0.0:
+            control = self._map_control_for_seat(
+                state, me
+            ) - self._map_control_for_seat(state, en)
+
         return (
             self._phi_alpha * (v_me - v_en)
             + self._phi_beta * (p_me - p_en)
             + self._phi_kappa * (cap_me - cap_en)
             + self._phi_gamma * self._income_saturation(state, me, en)
+            + self._phi_control_delta * control
         )
 
     def _compute_phi_components_for_seat(self, state: GameState, observer_seat: int) -> dict[str, float]:
@@ -3480,12 +3515,153 @@ class AWBWEnv(gym.Env):
         cap_me = self._capture_progress_for_seat(state, me)
         cap_en = self._capture_progress_for_seat(state, en)
 
+        control = 0.0
+        if self._phi_control_delta != 0.0:
+            control = self._map_control_for_seat(
+                state, me
+            ) - self._map_control_for_seat(state, en)
         return {
             "army": self._phi_alpha * (v_me - v_en),
             "property": self._phi_beta * (p_me - p_en),
             "capture": self._phi_kappa * (cap_me - cap_en),
             "income": self._phi_gamma * self._income_saturation(state, me, en),
+            "control": self._phi_control_delta * control,
         }
+
+    def _map_control_static(self, state):
+        """Per-map cached positioning structures, computed once per map.
+
+        Returns ``(centrality, chokes)`` where ``centrality`` is a
+        ``height x width`` grid of floats in ``[0, 1]`` (1.0 at the map center,
+        decaying with Manhattan distance; impassable tiles are 0.0) and
+        ``chokes`` is a frozenset of ground-passable tiles that form narrow
+        corridors / bridges (at most two passable orthogonal neighbours). Both
+        depend only on static terrain, so they are cached by map identity.
+        """
+        md = state.map_data
+        key = (int(getattr(md, "map_id", -1)), int(md.height), int(md.width))
+        cached = self._map_control_cache.get(key)
+        if cached is not None:
+            return cached
+        height = int(md.height)
+        width = int(md.width)
+        terrain = md.terrain
+
+        def _passable(r, c):
+            if r < 0 or c < 0 or r >= height or c >= width:
+                return False
+            return MOVE_INF in get_terrain(terrain[r][c]).move_costs
+
+        cr = (height - 1) / 2.0
+        cc = (width - 1) / 2.0
+        max_d = max(1.0, cr + cc)
+        centrality = [[0.0] * width for _ in range(height)]
+        chokes = set()
+        for r in range(height):
+            for c in range(width):
+                if not _passable(r, c):
+                    continue
+                d = abs(r - cr) + abs(c - cc)
+                centrality[r][c] = max(0.0, 1.0 - d / max_d)
+                deg = (
+                    int(_passable(r - 1, c))
+                    + int(_passable(r + 1, c))
+                    + int(_passable(r, c - 1))
+                    + int(_passable(r, c + 1))
+                )
+                if 1 <= deg <= 2:
+                    chokes.add((r, c))
+        result = (centrality, frozenset(chokes))
+        self._map_control_cache[key] = result
+        return result
+
+    def _map_control_denial_cells(self, state, observer_seat):
+        """Cells granting capture-denial credit to ``observer_seat``.
+
+        A unit earns credit by sitting on (or orthogonally adjacent to) a
+        neutral or own property that an enemy unit can reach soon -- the human
+        habit of parking a body on a city the opponent is walking toward. Uses
+        the same proximity test as ``_phi_enemy_near_property`` but with a
+        dedicated, separately tunable radius.
+        """
+        me = int(observer_seat)
+        enemy = 1 - me
+        radius = int(getattr(self, "_phi_control_denial_radius", 3))
+        cells = set()
+        if radius <= 0:
+            return frozenset(cells)
+        enemies = [u for u in state.units[enemy] if u.is_alive]
+        if not enemies:
+            return frozenset(cells)
+        for prop in state.properties:
+            owner = getattr(prop, "owner", None)
+            # Capture-denial should reward contesting NEUTRAL property the
+            # enemy is walking toward (forward map control), not retreating
+            # to guard home-side cities we already own. Neutral tiles only.
+            if owner is not None:
+                continue
+            pr, pc = int(prop.row), int(prop.col)
+            near = False
+            for u in enemies:
+                if abs(int(u.pos[0]) - pr) + abs(int(u.pos[1]) - pc) <= radius:
+                    near = True
+                    break
+            if not near:
+                continue
+            cells.add((pr, pc))
+            cells.add((pr - 1, pc))
+            cells.add((pr + 1, pc))
+            cells.add((pr, pc - 1))
+            cells.add((pr, pc + 1))
+        return frozenset(cells)
+
+    def _map_control_for_seat(self, state, observer_seat):
+        """Positioning score for ``observer_seat`` (higher = better control).
+
+        Sum over the units of ``observer_seat`` of hp-scaled credit for
+        center/forward presence, chokepoint occupation, and capture denial.
+        hp-scaling stops the agent from trading real army value (the alpha
+        term) for reckless forward pushes with crippled units.
+        """
+        me = int(observer_seat)
+        enemy = 1 - me
+        centrality, chokes = self._map_control_static(state)
+        md = state.map_data
+        height = int(md.height)
+        width = int(md.width)
+        ehqs = md.hq_positions.get(enemy, []) if hasattr(md, "hq_positions") else []
+        adv_diag = max(1.0, float(height + width))
+        center_w = float(self._phi_control_center_w)
+        choke_w = float(self._phi_control_choke_w)
+        denial_w = float(self._phi_control_denial_w)
+        denial_cells = (
+            self._map_control_denial_cells(state, me)
+            if denial_w != 0.0
+            else frozenset()
+        )
+        score = 0.0
+        for u in state.units[me]:
+            if not u.is_alive:
+                continue
+            r, c = int(u.pos[0]), int(u.pos[1])
+            if r < 0 or c < 0 or r >= height or c >= width:
+                continue
+            hp_frac = max(0.0, min(1.0, float(u.hp) / 100.0))
+            if center_w != 0.0:
+                # Forward presence: reward closeness to the ENEMY HQ so units
+                # push into contested ground. Fall back to geometric
+                # centrality only when no enemy HQ is known.
+                if ehqs:
+                    dmin = min(abs(r - hr) + abs(c - hc) for (hr, hc) in ehqs)
+                    fwd = max(0.0, 1.0 - dmin / adv_diag)
+                else:
+                    fwd = centrality[r][c]
+                score += center_w * fwd * hp_frac
+            if choke_w != 0.0 and (r, c) in chokes:
+                score += choke_w * hp_frac
+            if denial_w != 0.0 and (r, c) in denial_cells:
+                score += denial_w * hp_frac
+        return score
 
     def _get_learner_capture_progress(self) -> float:
         """Compute learner's partial capture progress (chip sum) toward enemy properties.

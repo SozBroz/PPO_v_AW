@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import time
 from typing import Iterable, Sequence, Tuple, Optional
 
 from engine.game import GameState
@@ -69,7 +70,7 @@ class TacticalBeamPlanner:
         self.fitness = fitness
         self.cfg = config or TacticalBeamConfig()
 
-    def search(self, root: GameState) -> TacticalBeamResult:
+    def search(self, root: GameState, *, deadline_at: float | None = None) -> TacticalBeamResult:
         acting = int(root.active_player)
         initial = self._juicy_candidates(root)
         budget = self._dynamic_budget(root, initial)
@@ -87,9 +88,13 @@ class TacticalBeamPlanner:
         best_lines: list[BeamLine] = []
 
         for _depth_idx in range(budget["depth"]):
+            if deadline_at is not None and time.perf_counter() >= float(deadline_at):
+                break
             expanded: list[BeamLine] = []
 
             for line in beam:
+                if deadline_at is not None and time.perf_counter() >= float(deadline_at):
+                    break
                 if line.state.winner is not None or int(line.state.active_player) != acting:
                     best_lines.append(line)
                     continue
@@ -120,6 +125,7 @@ class TacticalBeamPlanner:
                     score = (
                         self.cfg.partial_phi_weight * br.phi_delta
                         + self.cfg.partial_value_weight * br.value
+                        + br.terminal_sparse
                     )
 
                     expanded.append(
