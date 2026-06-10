@@ -37,10 +37,32 @@ import copy
 import dataclasses
 import json
 import math
+import os
 from dataclasses import dataclass, field
 import random
 import time
 from typing import Callable, Optional
+
+import builtins as _builtins
+
+# Verbose per-candidate RHEA tracing ("  [RHEA/...]" lines) is extremely chatty:
+# with many parallel actors it can flood stdout fast enough to deadlock a piped
+# consumer and balloon log files. Gate it behind AWBW_RHEA_VERBOSE=1. We shadow
+# the module-level ``print`` so the dozens of existing ``print("  [RHEA/...]")``
+# call sites need no edits; all non-RHEA output (JSON heartbeats, game_done,
+# warnings) passes through unchanged.
+_RHEA_VERBOSE = os.environ.get("AWBW_RHEA_VERBOSE", "0") == "1"
+
+
+def print(*args, **kwargs):  # noqa: A001 - intentional module-scoped shadow
+    if (
+        not _RHEA_VERBOSE
+        and args
+        and isinstance(args[0], str)
+        and args[0].lstrip().startswith("[RHEA")
+    ):
+        return
+    return _builtins.print(*args, **kwargs)
 
 from engine.action import (
     Action,
@@ -1062,10 +1084,16 @@ class RheaPlanner:
     def _choose_full_turn_monolithic(self, state: GameState) -> RheaResult:
         acting_seat = int(state.active_player)
         before = state
-        turn_started_at = time.perf_counter()
-        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
-        self._active_turn_started_at = turn_started_at
-        self._active_turn_hard_wall_s = hard_wall_s
+        if self._pv_modeling_depth > 0 and getattr(self, "_active_turn_started_at", None) is not None:
+            # See _choose_full_turn_two_phase: inner PV plies must share the
+            # root turn's hard wall, never get a fresh one.
+            turn_started_at = float(self._active_turn_started_at)
+            hard_wall_s = float(self._active_turn_hard_wall_s)
+        else:
+            turn_started_at = time.perf_counter()
+            hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
+            self._active_turn_started_at = turn_started_at
+            self._active_turn_hard_wall_s = hard_wall_s
 
         # Run tactical beam if enabled.
         beam_best = None
@@ -1550,6 +1578,90 @@ class RheaPlanner:
                 break
         return out
 
+    def _full_strength_top_k_turn_candidates(
+        self,
+        before: GameState,
+        acting_seat: int,
+        k: int,
+        *,
+        turn_started_at: float,
+        hard_wall_s: float,
+        deadline_at: float | None = None,
+    ) -> list[TurnCandidate]:
+        """Top-k turns for ``acting_seat`` using the FULL turn search.
+
+        Runs the real two-phase turn (full-budget autotune + adaptive extend +
+        exhaustive/configured buy), with tactical beam, PV and MCTS disabled so
+        there is no recursion. The negamax lookahead uses this for its inner
+        plies, so each modeled opponent reply / our follow-up is as strong as a
+        real turn (minus the beam) -- not the quartered, beam-less, extend-less
+        budget of ``_evolve_top_k_turn_candidates``.
+        """
+        if k <= 0:
+            return []
+        if _turn_hard_wall_breached(turn_started_at=turn_started_at, hard_wall_s=hard_wall_s):
+            return []
+        if deadline_at is not None and time.perf_counter() >= float(deadline_at):
+            return []
+        if self._pv_modeling_depth >= 8:
+            return []
+        saved = (
+            self.cfg.use_pv_lookahead,
+            self.cfg.use_tactical_beam,
+            self.cfg.use_mcts,
+        )
+        saved_cm = self.complexity_metrics
+        self.cfg.use_pv_lookahead = False
+        self.cfg.use_tactical_beam = False
+        self.cfg.use_mcts = False
+        self._pv_modeling_depth += 1
+        ranked: list = []
+        try:
+            # Size the inner autotune budget for THIS position (not the root's).
+            if self.dynamic_budget:
+                self.complexity_metrics = RheaPlanner.compute_complexity_metrics(
+                    before, int(acting_seat)
+                )
+            self._sync_base_rng_for_decision(before)
+            self._choose_full_turn_two_phase(before)
+            ranked = list(getattr(self, "_pv_last_scored_mv", []) or [])
+        except Exception:
+            ranked = []
+        finally:
+            self._pv_modeling_depth -= 1
+            self.complexity_metrics = saved_cm
+            (
+                self.cfg.use_pv_lookahead,
+                self.cfg.use_tactical_beam,
+                self.cfg.use_mcts,
+            ) = saved
+        if not ranked:
+            return []
+        v_before = float(self.fitness.value(before, acting_seat))
+        out: list[TurnCandidate] = []
+        seen: set[tuple] = set()
+        for _sc, genome in ranked:
+            key = (
+                bool(genome.cop_activate),
+                tuple((ui.unit_pos, ui.move_dest, ui.action_type, ui.target_pos) for ui in genome.unit_segment),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            cand = self._complete_turn_from_move_genome(
+                before,
+                genome,
+                acting_seat,
+                v_before,
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+            )
+            if cand is not None:
+                out.append(cand)
+            if len(out) >= int(k):
+                break
+        return out
+
 
     def _turn_candidate_from_base_result(
         self,
@@ -1837,10 +1949,19 @@ class RheaPlanner:
         acting_seat = int(state.active_player)
         before = state
         factories_before = _factories_fully_owned_positions(before, acting_seat)
-        turn_started_at = time.perf_counter()
-        hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
-        self._active_turn_started_at = turn_started_at
-        self._active_turn_hard_wall_s = hard_wall_s
+        if self._pv_modeling_depth > 0 and getattr(self, "_active_turn_started_at", None) is not None:
+            # Re-entrant call from PV/negamax inner modeling: inherit the root
+            # turn's clock so all inner plies share ONE hard wall. Re-stamping
+            # here gave every inner search a fresh 900s window (and clobbered
+            # _active_turn_started_at for other consumers), letting a single
+            # turn run for hours.
+            turn_started_at = float(self._active_turn_started_at)
+            hard_wall_s = float(self._active_turn_hard_wall_s)
+        else:
+            turn_started_at = time.perf_counter()
+            hard_wall_s = max(0.0, float(self.cfg.adaptive_hard_turn_wall_s))
+            self._active_turn_started_at = turn_started_at
+            self._active_turn_hard_wall_s = hard_wall_s
         aux_candidates: list[dict] = []
         v_before = float(self.fitness.value(before, acting_seat))
         beam_candidate = None

@@ -1760,41 +1760,43 @@ def _actor_loop(
                         applied_actions, skipped_actions = replay_rhea_actions(env.state, result.actions, acting)
                         replay_s = time.perf_counter() - t_replay0
 
-                        if game_turns <= 20:
-                            print(json.dumps({
-                                "event": "rhea_turn_timing",
-                                "actor_id": actor_id,
-                                "day": day,
-                                "max_days": args.max_days,
-                                "winner": state.winner,
-                                "turn": state.turn,
-                                "game_turns": game_turns,
-                                "search_s": round(search_s, 4),
-                                "replay_s": round(replay_s, 4),
-                                "buy_mode": getattr(result, "buy_mode_used", None),
-                                "buy_candidates_enumerated": int(getattr(result, "buy_candidates_enumerated", 0)),
-                                "buy_candidates_scored": int(getattr(result, "buy_candidates_scored", 0)),
-                                "buy_exhaustive_truncated": bool(getattr(result, "buy_exhaustive_truncated", False)),
-                                "move_generations_floor": int(getattr(result, "move_generations_floor", 0)),
-                                "move_generations_used": int(getattr(result, "move_generations_used", 0)),
-                                "adaptive_extra_generations_used": int(getattr(result, "adaptive_extra_generations_used", 0)),
-                                "adaptive_stop_reason": getattr(result, "adaptive_stop_reason", None),
-                                "adaptive_disabled_reason": getattr(result, "adaptive_disabled_reason", None),
-                                "adaptive_best_improvement": getattr(result, "adaptive_best_improvement", None),
-                                "chosen_search": getattr(result, "chosen_search", "rhea"),
-                                "beam_width": int(getattr(result, "beam_width", 0)),
-                                "beam_depth": int(getattr(result, "beam_depth", 0)),
-                                "mcts_sims_run": int(getattr(result, "mcts_sims_run", 0)),
-                                "mcts_wall_s": round(float(getattr(result, "mcts_wall_s", 0.0)), 4),
-                                "mcts_stop_reason": getattr(result, "mcts_stop_reason", None),
-                                "pv_nodes_evaluated": int(getattr(result, "pv_nodes_evaluated", 0)),
-                                "pv_wall_s": round(float(getattr(result, "pv_wall_s", 0.0)), 4),
-                                "pv_stop_reason": getattr(result, "pv_stop_reason", None),
-                                "pv_backed_score": getattr(result, "pv_backed_score", None),
-                                "actions_planned": len(result.actions),
-                                "actions_applied": applied_actions,
-                                "actions_skipped": skipped_actions,
-                            }), flush=True)
+                        # Log every turn: gating this at game_turns <= 20 made
+                        # long games (21-60 turns) go silent for hours, which is
+                        # indistinguishable from a hung actor when monitoring.
+                        print(json.dumps({
+                            "event": "rhea_turn_timing",
+                            "actor_id": actor_id,
+                            "day": day,
+                            "max_days": args.max_days,
+                            "winner": state.winner,
+                            "turn": state.turn,
+                            "game_turns": game_turns,
+                            "search_s": round(search_s, 4),
+                            "replay_s": round(replay_s, 4),
+                            "buy_mode": getattr(result, "buy_mode_used", None),
+                            "buy_candidates_enumerated": int(getattr(result, "buy_candidates_enumerated", 0)),
+                            "buy_candidates_scored": int(getattr(result, "buy_candidates_scored", 0)),
+                            "buy_exhaustive_truncated": bool(getattr(result, "buy_exhaustive_truncated", False)),
+                            "move_generations_floor": int(getattr(result, "move_generations_floor", 0)),
+                            "move_generations_used": int(getattr(result, "move_generations_used", 0)),
+                            "adaptive_extra_generations_used": int(getattr(result, "adaptive_extra_generations_used", 0)),
+                            "adaptive_stop_reason": getattr(result, "adaptive_stop_reason", None),
+                            "adaptive_disabled_reason": getattr(result, "adaptive_disabled_reason", None),
+                            "adaptive_best_improvement": getattr(result, "adaptive_best_improvement", None),
+                            "chosen_search": getattr(result, "chosen_search", "rhea"),
+                            "beam_width": int(getattr(result, "beam_width", 0)),
+                            "beam_depth": int(getattr(result, "beam_depth", 0)),
+                            "mcts_sims_run": int(getattr(result, "mcts_sims_run", 0)),
+                            "mcts_wall_s": round(float(getattr(result, "mcts_wall_s", 0.0)), 4),
+                            "mcts_stop_reason": getattr(result, "mcts_stop_reason", None),
+                            "pv_nodes_evaluated": int(getattr(result, "pv_nodes_evaluated", 0)),
+                            "pv_wall_s": round(float(getattr(result, "pv_wall_s", 0.0)), 4),
+                            "pv_stop_reason": getattr(result, "pv_stop_reason", None),
+                            "pv_backed_score": getattr(result, "pv_backed_score", None),
+                            "actions_planned": len(result.actions),
+                            "actions_applied": applied_actions,
+                            "actions_skipped": skipped_actions,
+                        }), flush=True)
 
                         if skipped_actions > 0:
                             print(json.dumps({

@@ -119,27 +119,132 @@ def decision_point_seed(game_seed: int, day: int, seat: int) -> int:
 
 
 def leaf_value_at_state(*, fitness, state, root_actor: int) -> float:
-    # The raw value net is saturated on this matchup (near-constant win-prob),
-    # so a pure-value leaf cannot distinguish materially different PV lines and
-    # the lookahead can never justify a switch. Mirror RHEA's own objective
-    # (value_weight*value + reward_weight*Phi) at the leaf so deeper lines are
-    # ranked by the same discriminating signal RHEA optimizes per-turn.
+    # Negamax (zero-sum) leaf: score the resulting position as OURS - THEIRS so
+    # the PV picks the root that maximizes our this-turn + follow-up position
+    # net of the opponent's best follow-up. A pure one-sided leaf leaks on Phi's
+    # non-differential terms (income_saturation, map_control), which count only
+    # our own and so never penalize a line where the opponent out-develops us.
+    # Mirror RHEA's own objective (value_weight*value + reward_weight*Phi) on the
+    # differential so deeper lines are ranked by the same discriminating signal.
     seat = int(root_actor)
-    v = float(fitness.value(state, seat))
+    opp = 1 - seat  # 2-player zero-sum matchup
+    v_us = float(fitness.value(state, seat))
+    v_opp = float(fitness.value(state, opp))
+    v_diff = v_us - v_opp
+    # Terminal is already signed from our seat (+1 we win / -1 we lose); the
+    # value differential reinforces it without double-counting Phi.
     term = float(fitness.engine_terminal_sparse(state, seat))
     if term != 0.0:
-        return v + term
+        return v_diff + term
     try:
-        phi = float(fitness.phi(state, seat))
+        phi_us = float(fitness.phi(state, seat))
+        phi_opp = float(fitness.phi(state, opp))
     except Exception:
-        phi = 0.0
+        phi_us = 0.0
+        phi_opp = 0.0
+    phi_diff = phi_us - phi_opp
     rw = float(getattr(fitness, "reward_weight", 0.9))
     vw = float(getattr(fitness, "value_weight", 0.1))
-    return vw * v + rw * phi
+    return vw * v_diff + rw * phi_diff
 
 
 def robust_effective_margin(*, switch_margin: float, noise_floor: float) -> float:
     return max(float(switch_margin), float(noise_floor))
+
+
+def _negamax_pair_value(
+    planner: "RheaPlanner",
+    *,
+    state: Any,
+    our_seat: int,
+    pairs_remaining: int,
+    response_width: int,
+    followup_width: int,
+    turn_started_at: float,
+    hard_wall_s: float,
+    deadline_at: float,
+) -> float | None:
+    """Branched negamax value of ``state`` (position right after OUR ply).
+
+    The opponent moves next. We expand up to ``response_width`` opponent turns
+    (opponent's strongest replies) and, for each, up to ``followup_width`` of our
+    follow-up turns. The opponent picks the reply that MINIMIZES our differential
+    leaf (ours - theirs); we pick the follow-up that MAXIMIZES it. Recurses for
+    ``pairs_remaining`` opp+our pairs.
+
+    Each modeled ply is generated at FULL turn strength (full-budget autotune +
+    adaptive extend + configured buy, tactical beam off) so the opponent's reply
+    we subtract is real-strength, not a quartered myopic stub.
+
+    Returns the backed-up value, or ``None`` if the subtree could not be fully
+    expanded within the deadline (so the caller discards this depth as unsafe).
+    """
+    fitness = planner.fitness
+    if getattr(state, "winner", None) is not None or int(pairs_remaining) <= 0:
+        return leaf_value_at_state(fitness=fitness, state=state, root_actor=int(our_seat))
+    if time.perf_counter() >= float(deadline_at):
+        return None
+
+    opp_seat = 1 - int(our_seat)
+    opp_cands = planner._full_strength_top_k_turn_candidates(
+        state,
+        opp_seat,
+        int(response_width),
+        turn_started_at=turn_started_at,
+        hard_wall_s=hard_wall_s,
+        deadline_at=deadline_at,
+    )
+    if not opp_cands:
+        # Could not search an opponent reply: score the current position as-is
+        # rather than fabricate an over-optimistic no-response leaf.
+        return leaf_value_at_state(fitness=fitness, state=state, root_actor=int(our_seat))
+
+    our_values: list[float] = []
+    for opp in opp_cands:
+        opp_state = opp.state_after
+        if getattr(opp_state, "winner", None) is not None:
+            our_values.append(
+                leaf_value_at_state(fitness=fitness, state=opp_state, root_actor=int(our_seat))
+            )
+            continue
+        if time.perf_counter() >= float(deadline_at):
+            return None
+        our_cands = planner._full_strength_top_k_turn_candidates(
+            opp_state,
+            int(our_seat),
+            int(followup_width),
+            turn_started_at=turn_started_at,
+            hard_wall_s=hard_wall_s,
+            deadline_at=deadline_at,
+        )
+        if not our_cands:
+            our_values.append(
+                leaf_value_at_state(fitness=fitness, state=opp_state, root_actor=int(our_seat))
+            )
+            continue
+        best_follow: float | None = None
+        for fol in our_cands:
+            sub = _negamax_pair_value(
+                planner,
+                state=fol.state_after,
+                our_seat=int(our_seat),
+                pairs_remaining=int(pairs_remaining) - 1,
+                response_width=int(response_width),
+                followup_width=int(followup_width),
+                turn_started_at=turn_started_at,
+                hard_wall_s=hard_wall_s,
+                deadline_at=deadline_at,
+            )
+            if sub is None:
+                return None
+            if best_follow is None or sub > best_follow:
+                best_follow = sub
+        our_values.append(float(best_follow))
+
+    if not our_values:
+        return leaf_value_at_state(fitness=fitness, state=state, root_actor=int(our_seat))
+    # Opponent chooses the reply that is worst for us (negamax minimization).
+    return min(our_values)
 
 
 def evaluate_pv_line(
@@ -152,38 +257,46 @@ def evaluate_pv_line(
     hard_wall_s: float,
     deadline_at: float,
 ) -> tuple[float, bool]:
-    """Leaf value after root plus followup_pairs of (opp myopic, our myopic) plies.
+    """Branched negamax leaf after the root turn.
 
-    Returns ``(leaf_value, completed)``. ``completed`` is ``False`` when the line
-    could not be played out to the requested depth (deadline hit or a myopic
-    sub-search failed), so the caller can discard the over-optimistic partial
-    leaf instead of switching on it.
+    Expands ``followup_pairs`` opp+our pairs as a width-limited minimax tree:
+    each opponent ply branches ``response_width`` ways (opponent best reply, min
+    for us) and each of our plies branches ``followup_width`` ways (our best
+    follow-up, max for us). The leaf is the zero-sum differential (ours - theirs)
+    so the chosen root maximizes our position net of the opponent's best reply.
+
+    Returns ``(value, completed)``. ``completed`` is ``False`` when the subtree
+    could not be expanded to the requested depth within budget, so the caller can
+    discard the over-optimistic partial leaf instead of switching on it.
     """
-    state = clone_for_search(root.state_after)
     fitness = planner.fitness
-    if state.winner is not None:
-        return leaf_value_at_state(fitness=fitness, state=state, root_actor=root_actor), True
-    plies = max(0, int(followup_pairs)) * 2
-    completed = True
-    for _ in range(plies):
-        if state.winner is not None:
-            break
-        if time.perf_counter() >= float(deadline_at):
-            completed = False
-            break
-        acting = int(state.active_player)
-        cand = planner._simulate_myopic_turn_candidate(
-            state,
-            acting,
-            turn_started_at=turn_started_at,
-            hard_wall_s=hard_wall_s,
-            deadline_at=deadline_at,
+    pv = planner.cfg.pv_config
+    response_width = max(1, int(getattr(pv, "response_width", 1)))
+    followup_width = max(1, int(getattr(pv, "followup_width", 1)))
+
+    state = clone_for_search(root.state_after)
+    if getattr(state, "winner", None) is not None:
+        return leaf_value_at_state(fitness=fitness, state=state, root_actor=int(root_actor)), True
+    if int(followup_pairs) <= 0:
+        return leaf_value_at_state(fitness=fitness, state=state, root_actor=int(root_actor)), True
+
+    value = _negamax_pair_value(
+        planner,
+        state=state,
+        our_seat=int(root_actor),
+        pairs_remaining=int(followup_pairs),
+        response_width=response_width,
+        followup_width=followup_width,
+        turn_started_at=turn_started_at,
+        hard_wall_s=hard_wall_s,
+        deadline_at=deadline_at,
+    )
+    if value is None:
+        return (
+            leaf_value_at_state(fitness=fitness, state=state, root_actor=int(root_actor)),
+            False,
         )
-        if cand is None:
-            completed = False
-            break
-        state = cand.state_after
-    return leaf_value_at_state(fitness=fitness, state=state, root_actor=root_actor), completed
+    return float(value), True
 
 
 def backed_up_root_score(

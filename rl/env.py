@@ -263,6 +263,11 @@ PHI_ALPHA_ENV = "AWBW_PHI_ALPHA"   # value-coin coefficient
 PHI_BETA_ENV  = "AWBW_PHI_BETA"    # property-count coefficient
 PHI_KAPPA_ENV = "AWBW_PHI_KAPPA"   # capture-progress coefficient
 PHI_GAMMA_ENV = "AWBW_PHI_GAMMA"   # income-saturation coefficient
+# First calendar day on which the γ income-saturation term activates. Default 8
+# preserves historical behaviour (no income shaping during the opening). Lower
+# it to shape the opening capture race; it stays a *lead* (differential) term so
+# it remains zero-sum-safe and unfarmable.
+PHI_INCOME_START_DAY_ENV = "AWBW_PHI_INCOME_START_DAY"
 
 # Optional contextual capture weighting for Φ. Default-off so old checkpoints /
 # launch scripts keep exact reward semantics until the flag is enabled. When on,
@@ -1189,6 +1194,7 @@ class AWBWEnv(gym.Env):
         self._phi_beta: float = _read_float(PHI_BETA_ENV, p_beta)
         self._phi_kappa: float = _read_float(PHI_KAPPA_ENV, p_kappa)
         self._phi_gamma: float = _read_float(PHI_GAMMA_ENV, p_gamma)
+        self._phi_income_start_day: int = int(_read_float(PHI_INCOME_START_DAY_ENV, 8.0))
         cd_delta, cd_center, cd_choke, cd_denial = PHI_CONTROL_PROFILE_DEFAULTS.get(
             prof_raw, (0.0, 1.0, 0.5, 0.5)
         )
@@ -3430,9 +3436,10 @@ class AWBWEnv(gym.Env):
         
         Grows as log(1 + max(0, inc_lead))^2 to avoid saturation while still
         rewarding map saturation. Sign-aware: positive when ahead, negative when behind.
-        Only applied from day 8 onward to avoid poisoning early-game exploration.
+        Only applied from ``_phi_income_start_day`` onward (default day 8) to
+        avoid poisoning early-game exploration.
         """
-        if int(state.turn) < 8:
+        if int(state.turn) < int(getattr(self, "_phi_income_start_day", 8)):
             return 0.0
         inc_me = state.count_income_properties(me)
         inc_en = state.count_income_properties(en)
