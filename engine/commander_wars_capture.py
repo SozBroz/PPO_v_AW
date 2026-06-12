@@ -63,16 +63,19 @@ def _terrain_at(state, pos: Coord):
 
 
 def is_capturable_property_at(state, player: int, pos: Coord) -> bool:
-    """Income property tile where foot units may issue CAPTURE (not lab/tower)."""
+    """Property tile where foot units may issue CAPTURE.
+
+    AWBW-correct: comm towers and labs are capturable like any other
+    property (towers grant per-tower attack bonuses; see
+    ``GameState._refresh_comm_towers``). They yield no income but ownership
+    matters.
+    """
     terrain = _terrain_at(state, pos)
     if not terrain.is_property:
         return False
 
     prop = _property_at(state, pos)
     if prop is None:
-        return False
-
-    if getattr(prop, "is_comm_tower", False) or getattr(prop, "is_lab", False):
         return False
 
     owner = getattr(prop, "owner", None)
@@ -93,9 +96,6 @@ def is_foot_capture_mandatory_tile(state, player: int, pos: Coord) -> bool:
     prop = _property_at(state, pos)
     if prop is None:
         return True
-
-    if getattr(prop, "is_comm_tower", False) or getattr(prop, "is_lab", False):
-        return False
 
     owner = getattr(prop, "owner", None)
     return owner is None or int(owner) != int(player)

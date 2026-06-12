@@ -13,6 +13,47 @@ from engine.search_clone import clone_for_search
 from engine.unit import UNIT_STATS, UnitType
 from rl.rhea_fitness import RheaFitness
 
+# Units that are dead weight when the enemy cannot field air. ANTI_AIR is
+# deliberately absent: its MG shreds infantry, making it a standard
+# anti-footsoldier buy on airless maps (AWBW doctrine) — penalizing it gave
+# v4 an army-quality deficit vs baseline.
+_BUY_AIR_CONTEXT_MULTIPLIERS: dict[UnitType, float] = {
+    UnitType.MISSILES: 1.0,
+    UnitType.FIGHTER: 1.0,
+    UnitType.CRUISER: 1.0,
+}
+
+
+def enemy_air_threat_possible(state: GameState, acting_seat: int) -> bool:
+    enemy = 1 - int(acting_seat)
+    for prop in state.properties:
+        if prop.owner == enemy and prop.is_airport:
+            return True
+    from engine.terrain import MOVE_AIR
+
+    for u in state.units[enemy]:
+        if u.is_alive and UNIT_STATS[u.unit_type].move_type == MOVE_AIR:
+            return True
+    return False
+
+
+def buy_air_context_penalty_for_choices(
+    choices: list,
+    *,
+    penalty_weight: float,
+    air_threat_possible: bool,
+) -> float:
+    if penalty_weight <= 0.0 or air_threat_possible:
+        return 0.0
+    total = 0.0
+    for ut in choices:
+        if ut is None:
+            continue
+        mult = _BUY_AIR_CONTEXT_MULTIPLIERS.get(ut)
+        if mult is not None:
+            total += float(penalty_weight) * float(mult)
+    return total
+
 # Max terminal states per ``fitness.batch_value`` call during exhaustive buy scoring.
 # Keeps peak RAM ~O(chunk) instead of ~O(max_candidates) full board tensors.
 EXHAUSTIVE_BUY_SCORE_CHUNK = 256
@@ -179,6 +220,8 @@ def score_buy_candidate(
     phi_ref_buy: float,
     gold_before: int,
     v_terminal_override: float | None = None,
+    buy_air_context_penalty: float = 0.0,
+    air_threat_possible: bool | None = None,
 ) -> ScoredBuyCandidate:
     """Score one buy genome using the same formula as legacy buy RHEA."""
     acts_b, _ef, sf, igb, rk, rex = execute_buy(
@@ -193,11 +236,19 @@ def score_buy_candidate(
     v_adv_b = (v_terminal - v_ref_buy) * 2.0
     phi_d_b = phi_sf - phi_ref_buy
     ileg_b = -illegal_gene_penalty * float(igb)
+    if air_threat_possible is None:
+        air_threat_possible = enemy_air_threat_possible(post_moves, acting_seat)
+    air_pen = buy_air_context_penalty_for_choices(
+        getattr(genome, "choices", []),
+        penalty_weight=float(buy_air_context_penalty),
+        air_threat_possible=bool(air_threat_possible),
+    )
     tot_b = (
         reward_weight * phi_d_b
         + value_weight * v_adv_b * buy_value_scale
         + buy_shaping_weight * rew_shaped
         + ileg_b
+        - air_pen
     )
     spent = max(0, int(gold_before) - int(sf.funds[acting_seat]))
     return ScoredBuyCandidate(
@@ -250,6 +301,8 @@ def _scored_from_executed_genome(
     buy_value_scale: float,
     buy_shaping_weight: float,
     illegal_gene_penalty: float,
+    buy_air_context_penalty: float = 0.0,
+    air_threat_possible: bool = True,
 ) -> ScoredBuyCandidate:
     phi_sf = float(fitness.phi(sf, acting_seat))
     rew_shaped = float(rk) + float(rex)
@@ -257,12 +310,18 @@ def _scored_from_executed_genome(
     phi_d_b = phi_sf - float(phi_ref_buy)
     ileg_b = -float(illegal_gene_penalty) * float(igb)
     terminal_sparse = float(fitness.engine_terminal_sparse(sf, acting_seat))
+    air_pen = buy_air_context_penalty_for_choices(
+        getattr(g, "choices", []),
+        penalty_weight=float(buy_air_context_penalty),
+        air_threat_possible=bool(air_threat_possible),
+    )
     tot_b = (
         float(reward_weight) * phi_d_b
         + float(value_weight) * v_adv_b * float(buy_value_scale)
         + float(buy_shaping_weight) * rew_shaped
         + ileg_b
         + terminal_sparse
+        - air_pen
     )
     spent = max(0, int(gold_before) - int(sf.funds[acting_seat]))
     return ScoredBuyCandidate(
@@ -289,6 +348,7 @@ def pick_best_exhaustive_buy(
     buy_value_scale: float,
     buy_shaping_weight: float,
     illegal_gene_penalty: float,
+    buy_air_context_penalty: float = 0.0,
     greedy_seed: object | None,
     turn_deadline_at: float | None = None,
 ) -> ExhaustiveBuyPick:
@@ -307,6 +367,7 @@ def pick_best_exhaustive_buy(
     v_ref_buy = float(fitness.value(post_moves, acting_seat))
     phi_ref_buy = float(fitness.phi(post_moves, acting_seat))
     gold_before = int(post_moves.funds[acting_seat])
+    air_threat = enemy_air_threat_possible(post_moves, acting_seat)
 
     execute_buy = planner._execute_buy_spend_allocation
     chunk_size = max(1, int(EXHAUSTIVE_BUY_SCORE_CHUNK))
@@ -369,6 +430,8 @@ def pick_best_exhaustive_buy(
                 buy_value_scale=buy_value_scale,
                 buy_shaping_weight=buy_shaping_weight,
                 illegal_gene_penalty=illegal_gene_penalty,
+                buy_air_context_penalty=buy_air_context_penalty,
+                air_threat_possible=air_threat,
             )
             if _scored_buy_better(cand, best):
                 best = cand
@@ -377,7 +440,7 @@ def pick_best_exhaustive_buy(
         if greedy_seed is not None:
             acts_b, _ef, sf, igb, rk, rex = execute_buy(post_moves, greedy_seed, mutate_sim=clone_for_search(post_moves))
             v_terminal = float(fitness.value(sf, acting_seat))
-            best = _scored_from_executed_genome(greedy_seed, acts_b, sf, igb, rk, rex, fitness=fitness, acting_seat=acting_seat, v_terminal=v_terminal, phi_ref_buy=phi_ref_buy, v_ref_buy=v_ref_buy, gold_before=gold_before, reward_weight=reward_weight, value_weight=value_weight, buy_value_scale=buy_value_scale, buy_shaping_weight=buy_shaping_weight, illegal_gene_penalty=illegal_gene_penalty)
+            best = _scored_from_executed_genome(greedy_seed, acts_b, sf, igb, rk, rex, fitness=fitness, acting_seat=acting_seat, v_terminal=v_terminal, phi_ref_buy=phi_ref_buy, v_ref_buy=v_ref_buy, gold_before=gold_before, reward_weight=reward_weight, value_weight=value_weight, buy_value_scale=buy_value_scale, buy_shaping_weight=buy_shaping_weight, illegal_gene_penalty=illegal_gene_penalty, buy_air_context_penalty=buy_air_context_penalty, air_threat_possible=air_threat)
         if best is None:
             raise RuntimeError("pick_best_exhaustive_buy: no buy genomes to score")
 

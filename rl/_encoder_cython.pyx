@@ -159,6 +159,10 @@ def encode_units(
     cdef float hp_lo, hp_hi, hp_norm
 
     for unit in units_list:
+        # Skip hp==0 ghosts — dead units must not paint presence channels
+        if unit.hp <= 0:
+            continue
+
         r, c = unit.pos
         
         # Skip out-of-bounds units

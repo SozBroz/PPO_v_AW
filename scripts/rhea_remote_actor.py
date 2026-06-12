@@ -120,6 +120,10 @@ from rl.value_net import AWBWValueNet, load_value_checkpoint
 from scripts.train_rhea_value_parallel import (
     add_rhea_adaptive_args,
     add_rhea_autotune_args,
+    add_rhea_competency_args,
+    apply_rhea_competency_config_json,
+    competency_config_kwargs_from_args,
+    competency_fitness_kwargs_from_args,
     rhea_autotune_config_from_args,
 )
 
@@ -436,6 +440,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-max-actions-per-turn", type=int, default=256)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=96)
     add_rhea_autotune_args(ap)
+    add_rhea_competency_args(ap)
     ap.add_argument(
         "--buy-mode",
         choices=("rhea", "exhaustive"),
@@ -508,6 +513,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    apply_rhea_competency_config_json(args)
     _setup_env_vars(args)
 
     # Resolve paths
@@ -589,6 +595,7 @@ def main() -> None:
         device=actor_device,
         reward_weight=args.reward_weight,
         value_weight=args.value_weight,
+        **competency_fitness_kwargs_from_args(args),
     )
 
     # Pre-allocate encode buffers
@@ -621,6 +628,7 @@ def main() -> None:
             tactial_beam_max_width=args.rhea_tactical_beam_max_width,
             tactial_beam_max_depth=args.rhea_tactical_beam_max_depth,
             tactial_beam_max_expand=args.rhea_tactical_beam_max_expand,
+            **competency_config_kwargs_from_args(args),
         ),
         dynamic_budget=args.rhea_autotune,
         complexity_metrics=None,

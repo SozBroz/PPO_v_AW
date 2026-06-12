@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 
 from engine.game import GameState
+from engine.unit import UNIT_STATS
 from rl.encoder import GRID_SIZE, N_SCALARS, N_SPATIAL_CHANNELS, encode_state
 from rl.env import AWBWEnv
 from rl.value_net import AWBWValueNet, evaluate_value_np, evaluate_value_batch
@@ -52,6 +53,12 @@ class RheaFitness:
         reward_weight: float = 0.90,
         value_weight: float = 0.10,
         illegal_gene_penalty: float = 0.02,
+        capture_completion_bonus: float = 0.0,
+        blunder_exposure_weight: float = 0.0,
+        hq_defense_weight: float = 0.0,
+        capture_interrupt_bonus: float = 0.0,
+        neutral_income_gap_weight: float = 0.0,
+        capture_progress_bonus: float = 0.0,
     ) -> None:
         self.env_template = env_template
         self.value_model = value_model
@@ -59,6 +66,12 @@ class RheaFitness:
         self.reward_weight = float(reward_weight)
         self.value_weight = float(value_weight)
         self.illegal_gene_penalty = float(illegal_gene_penalty)
+        self.capture_completion_bonus = float(capture_completion_bonus)
+        self.blunder_exposure_weight = float(blunder_exposure_weight)
+        self.hq_defense_weight = float(hq_defense_weight)
+        self.capture_interrupt_bonus = float(capture_interrupt_bonus)
+        self.neutral_income_gap_weight = float(neutral_income_gap_weight)
+        self.capture_progress_bonus = float(capture_progress_bonus)
         # Reusable buffers — allocated once, reused across value() calls
         self._spatial_buf = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
         self._scalars_buf = np.zeros((N_SCALARS,), dtype=np.float32)
@@ -71,6 +84,244 @@ class RheaFitness:
         depending on the episode's opponent mode.
         """
         self.value_model = value_model
+
+    @staticmethod
+    def count_capture_completions(
+        before: GameState, after: GameState, acting_seat: int,
+    ) -> int:
+        seat = int(acting_seat)
+        before_owners = {(p.row, p.col): p.owner for p in before.properties}
+        n = 0
+        for prop in after.properties:
+            prev = before_owners.get((prop.row, prop.col))
+            if prev is not None and prev != seat and prop.owner == seat:
+                n += 1
+        return n
+
+    def competency_shaping(
+        self,
+        before: GameState,
+        after: GameState,
+        *,
+        observer_seat: int,
+    ) -> float:
+        delta = 0.0
+        if self.capture_completion_bonus != 0.0:
+            delta += self.capture_completion_bonus * self.count_capture_completions(
+                before, after, observer_seat,
+            )
+        if self.blunder_exposure_weight != 0.0:
+            delta -= self._blunder_exposure_penalty(after, observer_seat)
+        if self.hq_defense_weight != 0.0:
+            delta -= self._hq_defense_penalty(after, observer_seat)
+        if self.capture_interrupt_bonus != 0.0:
+            delta += self.capture_interrupt_bonus * self.count_capture_interruptions(
+                before, after, observer_seat,
+            )
+        if self.neutral_income_gap_weight != 0.0:
+            delta -= self.neutral_income_gap_weight * self._neutral_income_gap_fraction(after)
+        if self.capture_progress_bonus != 0.0:
+            delta += self.capture_progress_bonus * self.count_capture_progress_chips(
+                before, after, observer_seat,
+            )
+        return delta
+
+    @staticmethod
+    def _is_income_property(prop) -> bool:
+        return (
+            not bool(getattr(prop, "is_hq", False))
+            and not bool(getattr(prop, "is_comm_tower", False))
+            and not bool(getattr(prop, "is_lab", False))
+        )
+
+    @classmethod
+    def _neutral_income_gap_fraction(cls, after: GameState) -> float:
+        """Fraction of capturable income tiles still neutral (end-of-turn).
+
+        Genomes that flip neutrals this turn lower the fraction in ``after``,
+        so the penalty creates a persistent capture-saturation gradient without
+        needing a sighted value net. Normalized by all income tiles on the map.
+        """
+        income_total = sum(1 for p in after.properties if cls._is_income_property(p))
+        if income_total <= 0:
+            return 0.0
+        neutral = sum(
+            1 for p in after.properties
+            if cls._is_income_property(p) and p.owner is None
+        )
+        return float(neutral) / float(income_total)
+
+    @staticmethod
+    def count_capture_progress_chips(
+        before: GameState, after: GameState, acting_seat: int,
+    ) -> float:
+        """Reward partial capture progress on neutral or enemy income tiles.
+
+        Complements ``capture_completion_bonus`` (flip-only): midgame stall in
+        v8-light replays came from army-building phi dominating once contact
+        started — small per-chip progress keeps neutral saturation in play.
+        """
+        seat = int(acting_seat)
+        before_by = {(p.row, p.col): p for p in before.properties}
+        chips = 0.0
+        for prop in after.properties:
+            if not RheaFitness._is_income_property(prop):
+                continue
+            prev = before_by.get((prop.row, prop.col))
+            if prev is None:
+                continue
+            if prev.owner == seat and prev.capture_points >= 20:
+                continue
+            if prev.owner not in (None, 1 - seat):
+                continue
+            reduced = float(prev.capture_points - prop.capture_points)
+            if reduced <= 0.0:
+                continue
+            if prev.owner != seat and prop.owner == seat:
+                continue
+            chips += reduced / 20.0
+        return chips
+
+    # Tier multipliers for interrupting an enemy capture of MY property.
+    # Losing a base/airport costs production; losing the HQ costs the game.
+    _INTERRUPT_TIER_HQ: float = 4.0
+    _INTERRUPT_TIER_PRODUCTION: float = 2.0  # bases, airports
+    _INTERRUPT_TIER_STANDARD: float = 1.0    # cities, comm towers, seaports, labs
+
+    @classmethod
+    def count_capture_interruptions(
+        cls, before: GameState, after: GameState, observer_seat: int,
+    ) -> float:
+        """Tier-weighted count of enemy captures of MY property broken this turn.
+
+        A property counts when it was mine and mid-capture in ``before``
+        (capture_points < 20: an enemy stood on it making progress) and in
+        ``after`` it is still mine with progress wiped back to 20. Within a
+        planner rollout the enemy never moves voluntarily, so a reset means
+        my genome killed (or crashed) the capturer — exactly the interrupt
+        we want rewarded. Ports are plain capturable property here and fall
+        into the standard tier alongside cities, comm towers and labs.
+        """
+        seat = int(observer_seat)
+        before_by_pos = {(p.row, p.col): p for p in before.properties}
+        total = 0.0
+        for prop in after.properties:
+            prev = before_by_pos.get((prop.row, prop.col))
+            if prev is None:
+                continue
+            if prev.owner != seat or prev.capture_points >= 20:
+                continue
+            if prop.owner != seat or prop.capture_points < 20:
+                continue
+            if prop.is_hq:
+                total += cls._INTERRUPT_TIER_HQ
+            elif prop.is_base or prop.is_airport:
+                total += cls._INTERRUPT_TIER_PRODUCTION
+            else:
+                total += cls._INTERRUPT_TIER_STANDARD
+        return total
+
+    # 4-turn horizon: react to committed snipers only. The original 8-turn
+    # horizon fired for nearly any enemy foot unit on a standard map, taxing
+    # every forward genome — v6b turtled and lost the macro game it had
+    # previously won (baseline 4-0 with captures/props/army all flipped).
+    _HQ_DEFENSE_HORIZON_TURNS: float = 4.0
+
+    def _hq_defense_penalty(self, after: GameState, observer_seat: int) -> float:
+        """Penalty when an enemy foot unit can finish capturing my HQ before
+        any of my units can contest it.
+
+        Motivated by the v4b gauntlet: v4b led baseline on captures,
+        properties AND army value yet lost 0-4 — every game ended day 7-11
+        by an HQ snipe that no config defended (full-HP infantry walking
+        across the map unopposed). Distance proxy is Manhattan / move_range
+        (optimistic for the attacker, so the term triggers conservatively
+        early); capture itself takes 2 turns at full HP, so a defender
+        arriving within threat_turns + 1 still contests.
+
+        The penalty scales smoothly with the *defense gap* (how many turns
+        late the nearest defender is), not just with threat proximity. The
+        original binary form (full penalty unless a defender contests
+        within threat+1) gave RHEA no selection gradient: a genome moving a
+        unit homeward but not all the way earned zero credit, so the term
+        was inert in the v6 gauntlet (1-3 vs baseline, snipes unchanged).
+        """
+        seat = int(observer_seat)
+        enemy = 1 - seat
+        hqs = after.map_data.hq_positions.get(seat, []) or []
+        if not hqs:
+            return 0.0
+        horizon = self._HQ_DEFENSE_HORIZON_TURNS
+        total = 0.0
+        for hq in hqs:
+            hr, hc = int(hq[0]), int(hq[1])
+            threat_turns: float | None = None
+            for u in after.units[enemy]:
+                if not u.is_alive or not UNIT_STATS[u.unit_type].can_capture:
+                    continue
+                d = abs(int(u.pos[0]) - hr) + abs(int(u.pos[1]) - hc)
+                mv = max(1, int(UNIT_STATS[u.unit_type].move_range))
+                t = float(-(-d // mv))
+                if threat_turns is None or t < threat_turns:
+                    threat_turns = t
+            if threat_turns is None or threat_turns > horizon:
+                continue
+            defense_turns: float | None = None
+            for u in after.units[seat]:
+                if not u.is_alive:
+                    continue
+                d = abs(int(u.pos[0]) - hr) + abs(int(u.pos[1]) - hc)
+                mv = max(1, int(UNIT_STATS[u.unit_type].move_range))
+                t = float(-(-d // mv))
+                if defense_turns is None or t < defense_turns:
+                    defense_turns = t
+            if defense_turns is not None and defense_turns <= threat_turns + 1.0:
+                continue
+            gap = (
+                defense_turns - threat_turns - 1.0
+                if defense_turns is not None
+                else horizon
+            )
+            gap_frac = min(1.0, gap / horizon)
+            total += max(0.0, 1.0 - threat_turns / horizon) * gap_frac
+        return self.hq_defense_weight * total
+
+    def _blunder_exposure_penalty(self, after: GameState, observer_seat: int) -> float:
+        """Material genuinely at risk from end-of-turn exposure, capture-exempt.
+
+        Two refinements over the original binary form (which charged full
+        unit value for ANY nonzero threat and made every v-config
+        under-capture vs baseline — contested captures require standing in
+        threat, so the tax fought the capture bonus and won):
+
+        - risk-proportional: charge ``cost * min(threat_dmg, hp)`` — the HP
+          actually at stake — so chip damage is cheap and kill-threats are
+          expensive;
+        - purposeful exposure is free: units standing on a property they can
+          capture (mid-capture / completing) are exempt.
+        """
+        from engine.commander_wars_capture import is_capturable_property_at
+        from engine.threat import compute_influence_planes
+
+        seat = int(observer_seat)
+        t_me, *_rest = compute_influence_planes(after, me=seat, grid=30)
+        exposed = 0.0
+        for u in after.units[seat]:
+            if not u.is_alive:
+                continue
+            r, c = u.pos
+            threat = float(t_me[r, c])  # normalized max incoming damage [0,1]
+            if threat <= 0.0:
+                continue
+            if UNIT_STATS[u.unit_type].can_capture and is_capturable_property_at(
+                after, seat, (r, c)
+            ):
+                continue
+            cost = float(UNIT_STATS[u.unit_type].cost)
+            hp_frac = max(0.0, float(u.hp)) / 100.0
+            at_risk_frac = min(threat, hp_frac)
+            exposed += cost * at_risk_frac
+        return self.blunder_exposure_weight * exposed / 10000.0
 
     @staticmethod
     def engine_terminal_sparse(state: GameState, observer_seat: int) -> float:
@@ -275,6 +526,9 @@ class RheaFitness:
                                 unused_funds_penalty = base_utilization_penalty
 
         terminal_sparse = self.engine_terminal_sparse(after, observer_seat)
+        competency = self.competency_shaping(
+            before, after, observer_seat=observer_seat,
+        )
 
         total = (
             self.reward_weight * phi_delta
@@ -284,6 +538,7 @@ class RheaFitness:
             + mech_penalty
             + unused_funds_penalty
             + terminal_sparse
+            + competency
         )
 
         return RheaFitnessBreakdown(

@@ -1,0 +1,17 @@
+{
+  "label": "competency_baseline — prod_contact_beam without competency knobs (legacy behavior)",
+  "rhea_autotune": true,
+  "rhea_autotune_pop_min": 16,
+  "rhea_autotune_gen_min": 4,
+  "rhea_autotune_pop_max": 64,
+  "rhea_autotune_gen_max": 8,
+  "rhea_autotune_pop_scale": 1.45,
+  "rhea_autotune_gen_scale": 0.16,
+  "rhea_autotune_contested_capture_weight": 2.75,
+  "rhea_autotune_contact_weight": 0.90,
+  "rhea_autotune_juicy_attack_weight": 1.25,
+  "use_tactical_beam": true,
+  "rhea_tactical_beam_max_width": 48,
+  "rhea_tactical_beam_max_depth": 14,
+  "rhea_tactical_beam_max_expand": 24
+}

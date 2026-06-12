@@ -1477,6 +1477,7 @@ def _actor_loop(
             device=actor_device,
             reward_weight=args.reward_weight,
             value_weight=args.value_weight,
+            **competency_fitness_kwargs_from_args(args),
         )
 
         # Pre-allocate encode buffers (reused across turns to avoid per-call allocation)
@@ -1516,6 +1517,7 @@ def _actor_loop(
                     use_mcts=(not args.no_mcts and int(getattr(args, "rhea_pv_random_probes", 0) or 0) > 0),
                     mcts_config=mcts_config_from_args(args),
                     mcts_autotune=mcts_autotune_config_from_args(args),
+                    **competency_config_kwargs_from_args(args),
                 ),
                 dynamic_budget=args.rhea_autotune,
                 complexity_metrics=None,
@@ -2090,6 +2092,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rhea-max-actions-per-turn", type=int, default=256)
     ap.add_argument("--rhea-top-k-per-state", type=int, default=96)
     add_rhea_autotune_args(ap)
+    add_rhea_competency_args(ap)
     ap.add_argument(
         "--buy-mode",
         choices=("rhea", "exhaustive"),
@@ -2580,6 +2583,87 @@ def rhea_autotune_config_from_mapping(data: dict[str, Any]) -> RheaAutotuneConfi
     return RheaAutotuneConfig(**kwargs)
 
 
+def add_rhea_competency_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument(
+        "--rhea-competency-config-json",
+        type=str,
+        default=None,
+        help="JSON profile (e.g. configs/rhea_competency_v9_saturation.json) for competency knobs",
+    )
+    ap.add_argument("--capture-completion-bonus", type=float, default=0.0)
+    ap.add_argument("--capture-progress-bonus", type=float, default=0.0)
+    ap.add_argument("--neutral-income-gap-weight", type=float, default=0.0)
+    ap.add_argument("--blunder-exposure-weight", type=float, default=0.0)
+    ap.add_argument("--hq-defense-weight", type=float, default=0.0)
+    ap.add_argument("--capture-interrupt-bonus", type=float, default=0.0)
+    ap.add_argument("--buy-air-context-penalty", type=float, default=0.0)
+    ap.add_argument("--disable-expensive-build-bias", action="store_true")
+
+
+_COMPETENCY_JSON_KEYS = (
+    "capture_completion_bonus",
+    "capture_progress_bonus",
+    "neutral_income_gap_weight",
+    "blunder_exposure_weight",
+    "hq_defense_weight",
+    "capture_interrupt_bonus",
+    "buy_air_context_penalty",
+    "disable_expensive_build_bias",
+)
+
+
+def apply_rhea_competency_config_json(args: argparse.Namespace) -> None:
+    raw = getattr(args, "rhea_competency_config_json", None)
+    if not raw:
+        return
+    path = Path(raw)
+    if not path.is_file():
+        raise SystemExit(f"--rhea-competency-config-json not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for key in _COMPETENCY_JSON_KEYS:
+        if key in data:
+            setattr(args, key, data[key])
+    if data.get("rhea_autotune"):
+        args.rhea_autotune = True
+    for key, value in data.items():
+        if key.startswith("rhea_autotune_") and hasattr(args, key):
+            setattr(args, key, value)
+    if "use_tactical_beam" in data:
+        args.rhea_use_tactical_beam = bool(data["use_tactical_beam"])
+    for json_key, attr in (
+        ("rhea_tactical_beam_max_width", "rhea_tactical_beam_max_width"),
+        ("rhea_tactical_beam_max_depth", "rhea_tactical_beam_max_depth"),
+        ("rhea_tactical_beam_max_expand", "rhea_tactical_beam_max_expand"),
+    ):
+        if json_key in data:
+            setattr(args, attr, data[json_key])
+    if "reward_weight" in data:
+        args.reward_weight = float(data["reward_weight"])
+    if "value_weight" in data:
+        args.value_weight = float(data["value_weight"])
+    if "buy_mode" in data:
+        args.buy_mode = str(data["buy_mode"])
+
+
+def competency_fitness_kwargs_from_args(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "capture_completion_bonus": float(getattr(args, "capture_completion_bonus", 0.0)),
+        "capture_progress_bonus": float(getattr(args, "capture_progress_bonus", 0.0)),
+        "neutral_income_gap_weight": float(getattr(args, "neutral_income_gap_weight", 0.0)),
+        "blunder_exposure_weight": float(getattr(args, "blunder_exposure_weight", 0.0)),
+        "hq_defense_weight": float(getattr(args, "hq_defense_weight", 0.0)),
+        "capture_interrupt_bonus": float(getattr(args, "capture_interrupt_bonus", 0.0)),
+    }
+
+
+def competency_config_kwargs_from_args(args: argparse.Namespace) -> dict[str, float | bool]:
+    return {
+        **competency_fitness_kwargs_from_args(args),
+        "buy_air_context_penalty": float(getattr(args, "buy_air_context_penalty", 0.0)),
+        "disable_expensive_build_bias": bool(getattr(args, "disable_expensive_build_bias", False)),
+    }
+
+
 def _setup_env_vars(args: argparse.Namespace) -> None:
     """Set environment variables for phi capture phase weighting and other features."""
     if bool(getattr(args, "no_spirit_broken", False)):
@@ -2642,6 +2726,7 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    apply_rhea_competency_config_json(args)
     _setup_env_vars(args)
     print(
         json.dumps(

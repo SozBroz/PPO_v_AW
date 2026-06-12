@@ -116,6 +116,14 @@ def main() -> None:
     parser.add_argument("--phi-capture-mid-end-day", type=int, default=None)
     parser.add_argument("--phi-capture-late-end-day", type=int, default=None)
     
+    parser.add_argument("--capture-completion-bonus", type=float, default=0.0)
+    parser.add_argument("--blunder-exposure-weight", type=float, default=0.0)
+    parser.add_argument("--hq-defense-weight", type=float, default=0.0)
+    parser.add_argument("--capture-interrupt-bonus", type=float, default=0.0)
+    parser.add_argument("--neutral-income-gap-weight", type=float, default=0.0)
+    parser.add_argument("--capture-progress-bonus", type=float, default=0.0)
+    parser.add_argument("--buy-air-context-penalty", type=float, default=0.0)
+    parser.add_argument("--disable-expensive-build-bias", action="store_true")
     # Dual-gradient self-play
     parser.add_argument("--dual-gradient-self-play", action="store_true")
     parser.add_argument("--dual-gradient-hist-prob", type=float, default=0.0)
@@ -200,6 +208,12 @@ def main() -> None:
         device=args.device,
         reward_weight=args.reward_weight,
         value_weight=args.value_weight,
+        capture_completion_bonus=float(getattr(args, "capture_completion_bonus", 0.0)),
+        blunder_exposure_weight=float(getattr(args, "blunder_exposure_weight", 0.0)),
+        hq_defense_weight=float(getattr(args, "hq_defense_weight", 0.0)),
+        capture_interrupt_bonus=float(getattr(args, "capture_interrupt_bonus", 0.0)),
+        neutral_income_gap_weight=float(getattr(args, "neutral_income_gap_weight", 0.0)),
+        capture_progress_bonus=float(getattr(args, "capture_progress_bonus", 0.0)),
     )
     # Create config with smaller parameters since early game has few actions
     config = RheaConfig(
@@ -222,6 +236,14 @@ def main() -> None:
         adaptive_min_improvement=args.rhea_adaptive_min_improvement,
         adaptive_max_wall_s=args.rhea_adaptive_max_wall_s,
         adaptive_hard_turn_wall_s=args.rhea_adaptive_hard_turn_wall_s,
+        capture_completion_bonus=float(getattr(args, "capture_completion_bonus", 0.0)),
+        blunder_exposure_weight=float(getattr(args, "blunder_exposure_weight", 0.0)),
+        hq_defense_weight=float(getattr(args, "hq_defense_weight", 0.0)),
+        capture_interrupt_bonus=float(getattr(args, "capture_interrupt_bonus", 0.0)),
+        neutral_income_gap_weight=float(getattr(args, "neutral_income_gap_weight", 0.0)),
+        capture_progress_bonus=float(getattr(args, "capture_progress_bonus", 0.0)),
+        buy_air_context_penalty=float(getattr(args, "buy_air_context_penalty", 0.0)),
+        disable_expensive_build_bias=bool(getattr(args, "disable_expensive_build_bias", False)),
     )
     # Override parameters for early game
     # (default top_k_per_state = 48 from RheaConfig)

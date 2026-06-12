@@ -1,0 +1,21 @@
+{
+  "label": "competency_v4 — v3 knobs with refined blunder term: capture-exempt (units on capturable property pay nothing) and risk-proportional (cost x min(threat, hp) instead of binary full-value); fixes v1-v3 under-capturing where the exposure tax fought the capture bonus",
+  "rhea_autotune": true,
+  "rhea_autotune_pop_min": 16,
+  "rhea_autotune_gen_min": 4,
+  "rhea_autotune_pop_max": 64,
+  "rhea_autotune_gen_max": 8,
+  "rhea_autotune_pop_scale": 1.45,
+  "rhea_autotune_gen_scale": 0.16,
+  "rhea_autotune_contested_capture_weight": 2.75,
+  "rhea_autotune_contact_weight": 0.90,
+  "rhea_autotune_juicy_attack_weight": 1.25,
+  "use_tactical_beam": true,
+  "rhea_tactical_beam_max_width": 48,
+  "rhea_tactical_beam_max_depth": 14,
+  "rhea_tactical_beam_max_expand": 24,
+  "capture_completion_bonus": 0.05,
+  "blunder_exposure_weight": 0.05,
+  "buy_air_context_penalty": 0.05,
+  "disable_expensive_build_bias": false
+}

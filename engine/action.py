@@ -959,7 +959,8 @@ def _get_action_actions(
 
     # --- Prune WAIT on capturable property tiles ---
     # If CAPTURE is legal, WAIT is not. (ATTACK-only does not remove WAIT.)
-    # Same for fresh vs mid-capture. Labs, comm towers, missile silos, and
+    # Same for fresh vs mid-capture. Applies to all capturable property,
+    # including comm towers and labs (AWBW-correct). Missile silos and
     # owned buildings are untouched. When property terrain has no
     # ``PropertyState`` row we still prune WAIT (mask) but do not offer
     # CAPTURE — map data must include the property for play to proceed.

@@ -1385,6 +1385,13 @@ class GameState:
             self._reset_capture_on_capturer_death(attacker)
 
         self._finish_action(attacker)
+        # GHOST-PURGE: prune combat dead from the rosters so downstream
+        # consumers (army-wipe eval, NN encoder, roster iterators) never see
+        # hp==0 ghosts. Oracle replay keeps placeholders — site envelopes may
+        # still reference the dead unit by id later in the same chain.
+        if not oracle_mode:
+            for _p in (0, 1):
+                self.units[_p] = [u for u in self.units[_p] if u.is_alive]
         self._evaluate_army_wipe_after_combat()
         return
 
@@ -1530,12 +1537,19 @@ class GameState:
             co.pending_war_bonds_funds += payout
 
     def _evaluate_army_wipe_after_combat(self) -> None:
-        """One side has no units left; other side wins (checked only after an attack resolves)."""
+        """One side has no units left; other side wins (checked only after an attack resolves).
+
+        Counts alive units only — hp==0 ghosts (oracle placeholders, pre-prune
+        rosters) must not mask a wiped army.
+        """
         if self.done:
             return
+        alive = {
+            p: any(u.is_alive for u in self.units[p]) for p in (0, 1)
+        }
         for p in (0, 1):
             opp = 1 - p
-            if len(self.units[opp]) == 0 and len(self.units[p]) > 0:
+            if not alive[opp] and alive[p]:
                 self.done       = True
                 self.winner     = p
                 self.win_reason = "army_wipe"

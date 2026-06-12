@@ -508,14 +508,6 @@ def encode_state(
     else:
         spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
 
-    # ... rest of Python implementation would go here ...
-    # For now, return empty arrays as placeholder
-    scalars = np.zeros((N_SCALARS,), dtype=np.float32)
-    return spatial, scalars
-
-    hp_lo_ch = N_UNIT_CHANNELS
-    hp_hi_ch = N_UNIT_CHANNELS + 1
-
     # ── Terrain channels ─────────────────────────────────────────────────────
     # Phase 3b: one-hot terrain block is a pure function of map_data.terrain.
     # Cache per MapData; invalidate when the terrain grid changes (capture and
@@ -630,6 +622,8 @@ def encode_state(
         for idx, player in enumerate((observer, 1 - observer)):
             player_ch_offset = _N_UNIT_TYPES * idx  # 0 = me, 14 = enemy
             for unit in state.units[player]:
+                if not unit.is_alive:
+                    continue  # hp==0 ghosts must not paint presence channels
                 r, c = unit.pos
                 if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
                     continue

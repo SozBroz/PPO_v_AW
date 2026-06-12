@@ -81,7 +81,11 @@ from rl.candidate_actions import (
     candidate_arrays,
     enumerate_candidates,
 )
-from rl.buy_exhaustive import pick_best_exhaustive_buy
+from rl.buy_exhaustive import (
+    buy_air_context_penalty_for_choices,
+    enemy_air_threat_possible,
+    pick_best_exhaustive_buy,
+)
 from rl.mcts import (
     MCTSAutotuneConfig,
     MCTSConfig,
@@ -328,6 +332,7 @@ def _sample_build_intent_biased_expensive(
     rng: random.Random,
     *,
     p_pick_max_cost: float,
+    uniform: bool = False,
 ) -> BuildIntent:
     """Prefer the most expensive legal unit at this factory (still from ``opts``).
 
@@ -339,6 +344,8 @@ def _sample_build_intent_biased_expensive(
         raise ValueError("_sample_build_intent_biased_expensive: empty opts")
     if len(opts) == 1:
         return opts[0]
+    if uniform:
+        return rng.choice(opts)
     max_c = max(UNIT_STATS[bi.unit_type].cost for bi in opts)
     best = [bi for bi in opts if UNIT_STATS[bi.unit_type].cost == max_c]
     if rng.random() < p_pick_max_cost:
@@ -610,6 +617,14 @@ class RheaConfig:
     use_mcts: bool = False
     mcts_config: MCTSConfig = field(default_factory=MCTSConfig)
     mcts_autotune: MCTSAutotuneConfig = field(default_factory=MCTSAutotuneConfig)
+    capture_completion_bonus: float = 0.0
+    blunder_exposure_weight: float = 0.0
+    hq_defense_weight: float = 0.0
+    capture_interrupt_bonus: float = 0.0
+    neutral_income_gap_weight: float = 0.0
+    capture_progress_bonus: float = 0.0
+    buy_air_context_penalty: float = 0.0
+    disable_expensive_build_bias: bool = False
 
 
 @dataclass(slots=True)
@@ -1237,6 +1252,9 @@ class RheaPlanner:
                 terminal_sparse = float(
                     self.fitness.engine_terminal_sparse(after, acting_seat)
                 )
+                competency = self.fitness.competency_shaping(
+                    before, after, observer_seat=acting_seat,
+                )
                 total = (
                     self.fitness.reward_weight * phi_delta
                     + self.fitness.value_weight * win_advantage
@@ -1246,6 +1264,7 @@ class RheaPlanner:
                     + build_value_reward
                     + float(mfo_pen)
                     + terminal_sparse
+                    + competency
                 )
 
                 breakdown = RheaFitnessBreakdown(
@@ -1371,11 +1390,15 @@ class RheaPlanner:
         value_adv = (float(self.fitness.value(after, acting_seat)) - float(v_before)) * 2.0
         illegal_penalty = -float(self.fitness.illegal_gene_penalty) * float(illegal_genes)
         terminal_sparse = float(self.fitness.engine_terminal_sparse(after, acting_seat))
+        competency = self.fitness.competency_shaping(
+            before, after, observer_seat=acting_seat,
+        )
         total = (
             float(self.fitness.reward_weight) * phi_delta
             + float(self.fitness.value_weight) * value_adv
             + illegal_penalty
             + terminal_sparse
+            + competency
         )
         return RheaFitnessBreakdown(
             phi_delta=float(phi_delta),
@@ -1428,6 +1451,7 @@ class RheaPlanner:
                 buy_value_scale=float(self.cfg.buy_value_scale),
                 buy_shaping_weight=float(self.cfg.buy_shaping_weight),
                 illegal_gene_penalty=igen_pen,
+                buy_air_context_penalty=float(self.cfg.buy_air_context_penalty),
                 greedy_seed=greedy_seed,
                 turn_deadline_at=_turn_hard_wall_deadline_at(
                     turn_started_at=turn_started_at,
@@ -1539,7 +1563,10 @@ class RheaPlanner:
                 terminal_sparse = float(
                     self.fitness.engine_terminal_sparse(sam, acting_seat)
                 )
-                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ + terminal_sparse
+                competency = self.fitness.competency_shaping(
+                    before, sam, observer_seat=acting_seat,
+                )
+                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ + terminal_sparse + competency
                 scored_mv.append((total_m, population[idx]))
             scored_mv.sort(key=lambda x: x[0], reverse=True)
             elites = scored_mv[: max(1, self.cfg.elite)]
@@ -2149,7 +2176,10 @@ class RheaPlanner:
                 terminal_sparse = float(
                     self.fitness.engine_terminal_sparse(sam, acting_seat)
                 )
-                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ + terminal_sparse
+                competency = self.fitness.competency_shaping(
+                    before, sam, observer_seat=acting_seat,
+                )
+                total_m = rw * phi_delta + vw * wadv + ileg_p + fac_occ + terminal_sparse + competency
                 scored_mv.append((total_m, population[idx]))
 
             scored_mv.sort(key=lambda x: x[0], reverse=True)
@@ -2264,7 +2294,10 @@ class RheaPlanner:
             terminal_sparse = float(
                 self.fitness.engine_terminal_sparse(sim_fin, acting_seat)
             )
-            score_tot = rw * phi_end + vw * v_adv_end + ill_c + terminal_sparse
+            competency = self.fitness.competency_shaping(
+                before, sim_fin, observer_seat=acting_seat,
+            )
+            score_tot = rw * phi_end + vw * v_adv_end + ill_c + terminal_sparse + competency
 
             bd = RheaFitnessBreakdown(
                 phi_delta=float(phi_end),
@@ -2359,6 +2392,7 @@ class RheaPlanner:
                     buy_value_scale=float(self.cfg.buy_value_scale),
                     buy_shaping_weight=float(self.cfg.buy_shaping_weight),
                     illegal_gene_penalty=igen_pen,
+                    buy_air_context_penalty=float(self.cfg.buy_air_context_penalty),
                     greedy_seed=greedy_seed,
                     turn_deadline_at=_turn_hard_wall_deadline_at(
                         turn_started_at=turn_started_at,
@@ -2431,6 +2465,8 @@ class RheaPlanner:
             g0_buy = int(s_after_moves.funds[acting_seat])
             buy_sw = float(self.cfg.buy_shaping_weight)
             buy_vs = float(self.cfg.buy_value_scale)
+            buy_air_pen = float(self.cfg.buy_air_context_penalty)
+            air_threat = enemy_air_threat_possible(s_after_moves, acting_seat)
             v_ref_buy = float(self.fitness.value(s_after_moves, acting_seat))
             phi_ref_buy = float(self.fitness.phi(s_after_moves, acting_seat))
 
@@ -2460,11 +2496,17 @@ class RheaPlanner:
                     v_adv_b = (v_terminal - v_ref_buy) * 2.0
                     phi_d_b = phi_sf - phi_ref_buy
                     ileg_b = -igen_pen * float(igb)
+                    air_pen = buy_air_context_penalty_for_choices(
+                        bg.choices,
+                        penalty_weight=buy_air_pen,
+                        air_threat_possible=air_threat,
+                    )
                     tot_b = (
                         rw * phi_d_b
                         + vw * v_adv_b * buy_vs
                         + buy_sw * rew_shaped
                         + ileg_b
+                        - air_pen
                     )
                     spent = max(0, g0_buy - int(sf.funds[acting_seat]))
                     scored_b.append((tot_b, spent, bg, igb))
@@ -2606,7 +2648,10 @@ class RheaPlanner:
         terminal_sparse = float(
             self.fitness.engine_terminal_sparse(sim_after_buy, acting_seat)
         )
-        score_total = rw * phi_end + vw * v_adv_end + ill_c + terminal_sparse
+        competency = self.fitness.competency_shaping(
+            before, sim_after_buy, observer_seat=acting_seat,
+        )
+        score_total = rw * phi_end + vw * v_adv_end + ill_c + terminal_sparse + competency
 
         bd = RheaFitnessBreakdown(
             phi_delta=float(phi_end),
@@ -2868,10 +2913,14 @@ class RheaPlanner:
         by_factory: dict[tuple[int, int], list[BuildIntent]] = {}
         for bi in pool.build_options:
             by_factory.setdefault(bi.factory_pos, []).append(bi)
+        uniform_build = bool(self.cfg.disable_expensive_build_bias)
         for factory_pos, opts in by_factory.items():
             build_segment.append(
                 _sample_build_intent_biased_expensive(
-                    opts, self.rng, p_pick_max_cost=0.72
+                    opts,
+                    self.rng,
+                    p_pick_max_cost=0.72,
+                    uniform=uniform_build,
                 )
             )
 
@@ -2988,14 +3037,14 @@ class RheaPlanner:
         for _ in range(capture_seeds):
             genome = make_genome(pool)
             self._bias_genome_toward_capture(genome, pool)
-            if include_build_bias:
+            if include_build_bias and not self.cfg.disable_expensive_build_bias:
                 self._bias_genome_toward_expensive_builds(genome, pool)
             population[seed_idx] = genome
             seed_idx += 1
         for _ in range(attack_seeds):
             genome = make_genome(pool)
             self._bias_genome_toward_attack(genome, pool)
-            if include_build_bias:
+            if include_build_bias and not self.cfg.disable_expensive_build_bias:
                 self._bias_genome_toward_expensive_builds(genome, pool)
             population[seed_idx] = genome
             seed_idx += 1
@@ -3032,6 +3081,8 @@ class RheaPlanner:
         probability.  This gives evolution a better starting signal than
         random infantry spam.
         """
+        if self.cfg.disable_expensive_build_bias:
+            return
         for i, intent in enumerate(genome.build_segment):
             opts = [bi for bi in pool.build_options if bi.factory_pos == intent.factory_pos]
             if len(opts) <= 1:
@@ -3142,7 +3193,10 @@ class RheaPlanner:
                 ]
                 if same_factory:
                     picked = _sample_build_intent_biased_expensive(
-                        same_factory, self.rng, p_pick_max_cost=0.58
+                        same_factory,
+                        self.rng,
+                        p_pick_max_cost=0.58,
+                        uniform=bool(self.cfg.disable_expensive_build_bias),
                     )
                     intent.unit_type = picked.unit_type
 
@@ -3161,7 +3215,10 @@ class RheaPlanner:
                 ]
                 genome.build_segment.append(
                     _sample_build_intent_biased_expensive(
-                        same, self.rng, p_pick_max_cost=0.65
+                        same,
+                        self.rng,
+                        p_pick_max_cost=0.65,
+                        uniform=bool(self.cfg.disable_expensive_build_bias),
                     )
                 )
 
@@ -3703,15 +3760,36 @@ class RheaPlanner:
         # Fallback: match on action_type only if unit_pos/target_pos are None
         if not term_cands:
             term_cands = [a for a in legal if a.action_type == intent.action_type]
+        illegal = 0
+        if not term_cands:
+            # Stale terminal: the encoded action is no longer legal here (its
+            # ATTACK target died earlier in the sim, or WAIT is masked on a
+            # capture-mandatory tile). Recover with a real engine action so
+            # the unit never ends the turn half-acted (ghost state).
+            # NO illegal-gene charge on a successful recovery: stale attack
+            # intents are routine evolutionary churn, and charging 0.02 each
+            # (a full turn's phi gain) was empirically shown to purge ALL
+            # combat from the gene pool (seed-13 A/B: 31-day slugfest with
+            # six-figure armies collapsed to 9-day zero-Fire capture race).
+            # CAPTURE/WAIT are mutually exclusive in the mask, so preference
+            # order is cosmetic.
+            for _recovery_type in (ActionType.CAPTURE, ActionType.WAIT):
+                term_cands = [a for a in legal if a.action_type == _recovery_type]
+                if term_cands:
+                    break
+            if not term_cands:
+                illegal = 1
+                if legal:
+                    term_cands = [legal[0]]
         if term_cands:
             try:
                 sim.step(term_cands[0])
                 actions.append(term_cands[0])
             except Exception:
-                pass
+                illegal = 1
 
-        # CRITICAL: The terminal action may have failed silently, leaving the sim
-        # in ACTION stage with selected_unit still set.  Phase 2 (builds) requires
+        # CRITICAL: The terminal action may have failed, leaving the sim in
+        # ACTION stage with selected_unit still set.  Phase 2 (builds) requires
         # SELECT stage, so force-reset here.  The unit's movement was already
         # consumed by step 4; the failed terminal does not leave the unit movable.
         if sim.action_stage != ActionStage.SELECT:
@@ -3719,7 +3797,7 @@ class RheaPlanner:
             sim.selected_unit = None
             sim.selected_move_pos = None
 
-        return True, 0
+        return True, illegal
 
     def _execute_build_intent(
         self,
