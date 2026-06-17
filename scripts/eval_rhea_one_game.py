@@ -85,6 +85,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=str, default="replays")
     parser.add_argument("--game-id", type=int, default=None)
     parser.add_argument("--open-viewer", action="store_true", default=True)
+    parser.add_argument("--no-open-viewer", dest="open_viewer", action="store_false")
     parser.add_argument("--rhea-monolithic-buy", action="store_true",
                         help="Use legacy single-phase RHEA (moves+builds in one genome)")
     parser.add_argument(
