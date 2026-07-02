@@ -972,6 +972,7 @@ class AWBWEnv(gym.Env):
         opening_book_path: str | Path | None = None,
         opening_book_seats: str = "both",
         opening_book_prob: float = 0.0,
+        opening_book_prob_p1: float | None = None,
         opening_book_strict_co: bool = False,
         opening_book_max_day: int | None = None,
         opening_book_seed: int = 0,
@@ -991,6 +992,17 @@ class AWBWEnv(gym.Env):
         self._opening_book_path = str(opening_book_path) if opening_book_path else None
         self._opening_book_seats = str(opening_book_seats or "both")
         self._opening_book_prob = max(0.0, min(1.0, float(opening_book_prob)))
+        self._opening_book_prob_p1 = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    opening_book_prob_p1
+                    if opening_book_prob_p1 is not None
+                    else opening_book_prob
+                ),
+            ),
+        )
         self._opening_book_strict_co = bool(opening_book_strict_co)
         self._opening_book_max_day = (
             int(opening_book_max_day) if opening_book_max_day is not None else None
@@ -1110,6 +1122,7 @@ class AWBWEnv(gym.Env):
                     self._opening_book_path,
                     seats=self._opening_book_seats,
                     prob=self._opening_book_prob,
+                    prob_p1=self._opening_book_prob_p1,
                     strict_co=self._opening_book_strict_co,
                     max_day=self._opening_book_max_day,
                     seed=self._opening_book_seed,
@@ -1464,6 +1477,16 @@ class AWBWEnv(gym.Env):
             if lead >= 1:
                 self._log_tie_breaker_property_count = lead
         self._log_finished_game()
+        self._try_write_rhea_corpus()
+
+    def _try_write_rhea_corpus(self) -> None:
+        """Append one durable corpus row; never raises (training must continue)."""
+        try:
+            from rl.game_corpus import write_env_corpus_row
+
+            write_env_corpus_row(self)
+        except Exception:
+            pass
 
     def _get_legal(self) -> list[Action]:
         """Return cached legal actions for self.state; populate on first call.
@@ -1813,6 +1836,16 @@ class AWBWEnv(gym.Env):
             }
         if self.curriculum_tag:
             self._episode_info["curriculum_tag"] = self.curriculum_tag
+        if seed is not None:
+            self._episode_info["luck_seed"] = int(seed)
+        else:
+            from rl.game_corpus import _serialize_rng_state
+
+            self._episode_info["luck_rng_state"] = _serialize_rng_state(
+                self.state.luck_rng
+            )
+        if self._max_turns is not None:
+            self._episode_info["max_days"] = int(self._max_turns)
 
         self._diag_lines_this_ep = 0
         self._spirit_broken_kind = None

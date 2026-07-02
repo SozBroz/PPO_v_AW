@@ -309,6 +309,52 @@ def _parse_co_list(s: str) -> list[int]:
     return [int(x) for x in str(s).split(",") if str(x).strip()]
 
 
+def _parse_map_id_cli(value: str) -> list[int]:
+    """``--map-id`` as comma-separated non-negative ints or a single int."""
+    s = (value or "").strip()
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError(
+            f"invalid --map-id {value!r}: use non-negative id(s), comma-separated"
+        )
+    out: list[int] = []
+    for p in parts:
+        try:
+            n = int(p, 10)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"invalid --map-id token {p!r}: expected non-negative integer"
+            ) from e
+        if n < 0:
+            raise argparse.ArgumentTypeError(f"--map-id must be non-negative, got {n}")
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _filter_map_pool(
+    full_pool: list[dict],
+    *,
+    map_ids: list[int] | None = None,
+    all_std_maps: bool = False,
+) -> list[dict]:
+    """Subset ``gl_map_pool.json`` for training env sampling."""
+    if all_std_maps:
+        std = [m for m in full_pool if m.get("type") == "std"]
+        use = std if std else list(full_pool)
+        wanted = {int(m["map_id"]) for m in use}
+    elif map_ids is not None:
+        wanted = {int(x) for x in map_ids}
+    else:
+        raise ValueError("map_ids required when all_std_maps is False")
+
+    by_id = {int(m["map_id"]): m for m in full_pool if m.get("map_id") is not None}
+    missing = sorted(wanted - set(by_id))
+    if missing:
+        raise ValueError(f"Map ID(s) not found in pool: {missing}")
+    return [by_id[mid] for mid in sorted(wanted)]
+
+
 def _encode(state, observer_seat: int) -> tuple[np.ndarray, np.ndarray]:
     spatial = np.zeros((GRID_SIZE, GRID_SIZE, N_SPATIAL_CHANNELS), dtype=np.float32)
     scalars = np.zeros((N_SCALARS,), dtype=np.float32)
@@ -342,16 +388,16 @@ def _make_env(args: argparse.Namespace) -> AWBWEnv:
     co_p0 = _parse_co_list(args.co_p0)
     co_p1 = _parse_co_list(args.co_p1)
     
-    # Load map pool and filter to the specified map_id
     pool_path = Path(__file__).parent.parent / "data" / "gl_map_pool.json"
     with open(pool_path, encoding="utf-8") as f:
         full_pool = json.load(f)
-    
-    # Filter to the specific map_id
-    map_pool = [m for m in full_pool if m.get("map_id") == args.map_id]
-    if not map_pool:
-        raise ValueError(f"Map ID {args.map_id} not found in pool")
-    
+
+    map_pool = _filter_map_pool(
+        full_pool,
+        map_ids=None if args.all_std_maps else list(args.map_id),
+        all_std_maps=bool(args.all_std_maps),
+    )
+
     # max_days parameter is passed as max_turns to AWBWEnv
     # (they are aliases for the same calendar day cap)
     max_turns = args.max_days if args.max_days else None
@@ -359,32 +405,30 @@ def _make_env(args: argparse.Namespace) -> AWBWEnv:
     # Opening book integration
     opening_book_path = str(args.opening_book_path) if args.opening_book_path else None
     opening_book_prob = max(0.0, min(1.0, float(args.opening_book_prob)))
+    opening_book_prob_p1 = max(
+        0.0, min(1.0, float(getattr(args, "opening_book_prob_p1", opening_book_prob)))
+    )
     opening_book_strike_release = bool(args.opening_book_strike_release)
 
+    env_kwargs: dict[str, Any] = {
+        "map_pool": map_pool,
+        "co_p0": co_p0,
+        "co_p1": co_p1,
+        "max_turns": max_turns,
+        "opening_book_path": opening_book_path,
+        "opening_book_seats": "both",
+        "opening_book_prob": opening_book_prob,
+        "opening_book_prob_p1": opening_book_prob_p1,
+        "opening_book_strict_co": False,
+        "opening_book_strike_release": opening_book_strike_release,
+    }
     try:
-        return AWBWEnv(
-            map_pool=map_pool,
-            co_p0=co_p0,
-            co_p1=co_p1,
-            max_turns=max_turns,
-            opening_book_path=opening_book_path,
-            opening_book_seats="both",
-            opening_book_prob=opening_book_prob,
-            opening_book_strict_co=False,
-            opening_book_strike_release=opening_book_strike_release,
-        )
+        return AWBWEnv(**env_kwargs)
     except TypeError:
-        return AWBWEnv(
-            map_pool=map_pool,
-            co_p0=co_p0[0],
-            co_p1=co_p1[0],
-            max_turns=max_turns,
-            opening_book_path=opening_book_path,
-            opening_book_seats="both",
-            opening_book_prob=opening_book_prob,
-            opening_book_strict_co=False,
-            opening_book_strike_release=opening_book_strike_release,
-        )
+        env_kwargs["co_p0"] = co_p0[0]
+        env_kwargs["co_p1"] = co_p1[0]
+        env_kwargs.pop("opening_book_prob_p1", None)
+        return AWBWEnv(**env_kwargs)
 
 
 def _save_checkpoint(path: Path, model: AWBWValueNet, learner_cfg: RheaValueLearnerConfig | None, step: int) -> None:
@@ -2055,7 +2099,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Env / checkpoint.
     ap.add_argument("--checkpoint", type=str, required=True)
-    ap.add_argument("--map-id", type=int, default=171596)
+    ap.add_argument(
+        "--map-id",
+        type=_parse_map_id_cli,
+        default=[171596],
+        help="Comma-separated map id(s) from gl_map_pool.json (default 171596). "
+        "Ignored when --all-std-maps is set.",
+    )
+    ap.add_argument(
+        "--all-std-maps",
+        action="store_true",
+        help="Use every pool entry with type std (overrides --map-id).",
+    )
     ap.add_argument("--co-p0", type=str, default="14,8,28,7")
     ap.add_argument("--co-p1", type=str, default="14,8,28,7")
     ap.add_argument("--max-days", type=int, default=30)
@@ -2078,7 +2133,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--opening-book-path", type=Path, default=None,
                       help="Path to opening book JSONL (e.g., data/designed_desires_opening_book.jsonl)")
     ap.add_argument("--opening-book-prob", type=float, default=1.0,
-                      help="Probability (0-1) to use opening book vs RHEA from day 1 (default 1.0 = always)")
+                      help="Probability (0-1) P0 uses opening book vs RHEA from day 1 (default 1.0 = always)")
+    ap.add_argument(
+        "--opening-book-prob-p1",
+        type=float,
+        default=None,
+        help="P1 opening-book probability (default: same as --opening-book-prob)",
+    )
     ap.add_argument("--opening-book-strike-release", action="store_true",
                       help="Release opening book if a unit moves into enemy strike range")
 
@@ -2726,6 +2787,8 @@ def _setup_env_vars(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    if args.opening_book_prob_p1 is None:
+        args.opening_book_prob_p1 = args.opening_book_prob
     apply_rhea_competency_config_json(args)
     _setup_env_vars(args)
     print(

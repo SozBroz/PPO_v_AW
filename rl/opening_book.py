@@ -305,13 +305,17 @@ class TwoSidedOpeningBookManager:
         *,
         seats: str | Iterable[int] = "both",
         prob: float = 1.0,
+        prob_p1: float | None = None,
         strict_co: bool = False,
         max_day: int | None = None,
         seed: int = 0,
         strike_release: bool = False,
     ) -> None:
         self.index = OpeningBookIndex.from_jsonl(Path(path))
-        self.prob = max(0.0, min(1.0, float(prob)))
+        self.prob_p0 = max(0.0, min(1.0, float(prob)))
+        self.prob_p1 = max(
+            0.0, min(1.0, float(prob_p1 if prob_p1 is not None else prob))
+        )
         self.strict_co = bool(strict_co)
         self.rng = random.Random(int(seed))
         self.enabled_seats = _parse_seats(seats)
@@ -342,8 +346,10 @@ class TwoSidedOpeningBookManager:
         map_id: int,
         co_ids: list[int | None],
     ) -> None:
-        use_episode = self.prob > 0.0 and self.rng.random() < self.prob
+        seat_probs = {0: self.prob_p0, 1: self.prob_p1}
         for seat, ctl in self.controllers.items():
+            p = seat_probs.get(int(seat), self.prob_p0)
+            use_episode = p > 0.0 and self.rng.random() < p
             ctl.on_episode_start(
                 episode_id=episode_id,
                 map_id=map_id,
